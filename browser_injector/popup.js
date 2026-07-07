@@ -1,0 +1,379 @@
+const API = "http://127.0.0.1:17654/api";
+
+const fields = [
+  "configPath",
+  "maxCycles",
+  "targetLevels",
+  "startDelay",
+  "healthMinPercent",
+  "prowessMinPercent",
+  "recoverToPercent",
+  "recoveryHealthThreshold",
+  "recoveryProwessThreshold",
+  "maxUsesPerResource",
+  "inventoryOpenDelayMs",
+  "skillSlot1",
+  "skillSlot2",
+  "skillSlot3",
+  "skillSlot4",
+  "skillSlot5",
+  "skillSlot6",
+  "combatFallbackZeroEnabled",
+  "combatFallbackProwessPercent",
+  "combatClickIntervalMs",
+  "combatPreClickDelayMs",
+  "combatClickHoldMs",
+  "live",
+  "noActivateApp",
+  "openHuntOnStart",
+  "itemRecoveryEnabled",
+];
+
+const $ = (id) => document.getElementById(id);
+
+const defaults = {
+  configPath: "config/automation.local.json",
+  maxCycles: 50,
+  targetLevels: "2",
+  startDelay: 1,
+  healthMinPercent: 90,
+  prowessMinPercent: 90,
+  recoverToPercent: 90,
+  recoveryHealthThreshold: 90,
+  recoveryProwessThreshold: 90,
+  maxUsesPerResource: 4,
+  inventoryOpenDelayMs: 1500,
+  skillSlot1: false,
+  skillSlot2: true,
+  skillSlot3: true,
+  skillSlot4: false,
+  skillSlot5: false,
+  skillSlot6: false,
+  combatFallbackZeroEnabled: true,
+  combatFallbackProwessPercent: 1,
+  combatClickIntervalMs: 900,
+  combatPreClickDelayMs: 0,
+  combatClickHoldMs: 0,
+  live: true,
+  noActivateApp: true,
+  openHuntOnStart: true,
+  itemRecoveryEnabled: true,
+};
+
+async function api(path, options = {}) {
+  const response = await fetch(`${API}${path}`, {
+    method: options.method || "GET",
+    headers: { "content-type": "application/json" },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+function readSettings() {
+  const settings = {};
+  for (const id of fields) {
+    const input = $(id);
+    if (!input) {
+      continue;
+    }
+    if (input.type === "checkbox") {
+      settings[id] = input.checked;
+    } else if (input.type === "number") {
+      settings[id] = input.value === "" ? null : Number(input.value);
+    } else {
+      settings[id] = input.value.trim();
+    }
+  }
+  settings.recoveryThreshold = settings.recoveryProwessThreshold;
+  settings.targetLevels = String(settings.targetLevels || "")
+    .replace(/,/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  settings.combatSlotSequence = [1, 2, 3, 4, 5, 6].filter((slot) => Boolean($(`skillSlot${slot}`)?.checked));
+  return settings;
+}
+
+function writeSettings(settings) {
+  const merged = { ...defaults, ...settings };
+  if (settings && Array.isArray(settings.combatSlotSequence)) {
+    for (let slot = 1; slot <= 6; slot += 1) {
+      merged[`skillSlot${slot}`] = settings.combatSlotSequence.includes(slot);
+    }
+  }
+  if (settings && typeof settings.combatSlotSequence === "string") {
+    const selected = settings.combatSlotSequence
+      .replace(/,/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((value) => Number(value));
+    for (let slot = 1; slot <= 6; slot += 1) {
+      merged[`skillSlot${slot}`] = selected.includes(slot);
+    }
+  }
+  if (settings && settings.recoveryThreshold != null) {
+    merged.recoveryHealthThreshold = settings.recoveryHealthThreshold ?? settings.recoveryThreshold;
+    merged.recoveryProwessThreshold = settings.recoveryProwessThreshold ?? settings.recoveryThreshold;
+  }
+  for (const id of fields) {
+    const input = $(id);
+    if (!input) {
+      continue;
+    }
+    const value = merged[id];
+    if (input.type === "checkbox") {
+      input.checked = Boolean(value);
+    } else if (id === "targetLevels" && Array.isArray(value)) {
+      input.value = value.join(",");
+    } else {
+      input.value = value ?? "";
+    }
+  }
+}
+
+async function saveSettings() {
+  await chrome.storage.local.set({ antibotCvSettings: readSettings() });
+}
+
+async function loadSettings() {
+  const stored = await chrome.storage.local.get("antibotCvSettings");
+  writeSettings(stored.antibotCvSettings || defaults);
+}
+
+function setStatusText(id, text) {
+  $(id).textContent = text == null || text === "" ? "-" : String(text);
+}
+
+function selectedClientId() {
+  return $("clientId")?.value || "";
+}
+
+function shortClientId(clientId) {
+  const value = String(clientId || "");
+  return value.length > 10 ? value.slice(-10) : value;
+}
+
+function clientLabel(client, statusClient) {
+  const state = client.running
+    ? "RUNNING"
+    : statusClient && statusClient.client_seen
+      ? "online"
+      : client.ok
+        ? "current"
+        : "offline";
+  const cycles =
+    client.completed_cycles != null && client.requested_cycles != null
+      ? ` ${client.completed_cycles}/${client.requested_cycles}`
+      : "";
+  const page = client.title || client.href || statusClient?.title || statusClient?.href || "";
+  const suffix = page ? ` - ${page.replace(/^https?:\/\//, "").slice(0, 46)}` : "";
+  return `${state}${cycles} ${shortClientId(client.client_id || client.clientId)}${suffix}`;
+}
+
+function sendMessageToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(response || null);
+    });
+  });
+}
+
+async function loadCurrentClient() {
+  const select = $("clientId");
+  if (!select) {
+    return null;
+  }
+  select.innerHTML = "";
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch (_) {
+    tabs = [];
+  }
+  const tab = tabs[0];
+  if (!tab || !tab.id) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Активная вкладка не найдена";
+    select.appendChild(option);
+    select.disabled = true;
+    return null;
+  }
+  let client = null;
+  try {
+    client = await sendMessageToTab(tab.id, { type: "antibot-cv-current-client" });
+  } catch (_) {
+    client = null;
+  }
+  const option = document.createElement("option");
+  if (!client || !client.ok || !client.clientId) {
+    option.value = "";
+    option.textContent = "Открой поп-ап на вкладке игры";
+    select.appendChild(option);
+    select.disabled = true;
+    return null;
+  }
+  option.value = String(client.clientId);
+  option.textContent = clientLabel(client);
+  select.appendChild(option);
+  select.value = option.value;
+  select.disabled = true;
+  return client;
+}
+
+function renderCurrentClientOption(currentClient, status) {
+  const select = $("clientId");
+  if (!select || !currentClient || !currentClient.clientId) {
+    return;
+  }
+  const option = select.options[0] || document.createElement("option");
+  option.value = String(currentClient.clientId);
+  option.textContent = clientLabel(
+    {
+      ...currentClient,
+      client_id: currentClient.clientId,
+      running: Boolean(status.running),
+      completed_cycles: status.last_status?.completed_cycles,
+      requested_cycles: status.last_status?.requested_cycles,
+    },
+    status.client || {}
+  );
+  if (!select.options.length) {
+    select.appendChild(option);
+  }
+  select.value = option.value;
+}
+
+function renderStatus(status, currentClient) {
+  const running = Boolean(status.running);
+  const hasCurrentClient = Boolean(currentClient && currentClient.clientId && selectedClientId());
+  $("runBadge").textContent = running ? "running" : "idle";
+  $("runBadge").classList.toggle("running", running);
+  $("startButton").disabled = running || !hasCurrentClient;
+  $("stopButton").disabled = !running || !hasCurrentClient;
+
+  const client = status.client || {};
+  const clientText = !hasCurrentClient
+    ? "открой поп-ап на вкладке игры"
+    : client.client_seen
+    ? `${client.version_ok ? "ok" : "version mismatch"} ${client.client_id || ""}`
+    : "не виден";
+  setStatusText("serverStatus", status.ok ? "Python control-server доступен" : "Нет ответа сервера");
+  setStatusText("clientStatus", clientText);
+  renderCurrentClientOption(currentClient, status);
+
+  const last = status.last_status || {};
+  setStatusText("botState", last.state || (running ? "STARTING" : "STOPPED"));
+  setStatusText("cycleStatus", `${last.completed_cycles ?? 0}/${last.requested_cycles ?? "?"}`);
+  setStatusText("actionStatus", last.total_actions ?? 0);
+  setStatusText("errorStatus", status.last_error || last.last_error || last.error_reason || last.errors || "-");
+}
+
+async function refreshStatus() {
+  try {
+    const currentClient = await loadCurrentClient();
+    const clientId = selectedClientId();
+    if (!clientId) {
+      renderStatus(
+        {
+          ok: true,
+          running: false,
+          last_status: {},
+          client: { client_seen: false, version_ok: false, client_id: "" },
+        },
+        currentClient
+      );
+      return;
+    }
+    const status = await api(`/status?clientId=${encodeURIComponent(clientId)}`);
+    renderStatus(status, currentClient);
+  } catch (error) {
+    $("runBadge").textContent = "offline";
+    $("runBadge").classList.remove("running");
+    $("startButton").disabled = true;
+    $("stopButton").disabled = true;
+    setStatusText("serverStatus", "Сначала запусти control-server в терминале");
+    setStatusText("clientStatus", "-");
+    setStatusText("botState", "-");
+    setStatusText("cycleStatus", "-");
+    setStatusText("actionStatus", "-");
+    setStatusText("errorStatus", error.message);
+  }
+}
+
+async function startBot() {
+  await saveSettings();
+  const settings = readSettings();
+  settings.clientId = selectedClientId();
+  if (!settings.clientId) {
+    throw new Error("Открой поп-ап на нужной вкладке игры, чтобы привязать текущий client_id.");
+  }
+  await api("/start", { method: "POST", body: settings });
+  await refreshStatus();
+}
+
+async function stopBot() {
+  const clientId = selectedClientId();
+  if (!clientId) {
+    throw new Error("Открой поп-ап на нужной вкладке игры, чтобы остановить ее экземпляр.");
+  }
+  await api("/stop", { method: "POST", body: { clientId } });
+  await refreshStatus();
+}
+
+function renderSkillScan(data) {
+  const abilities = Array.isArray(data.abilities) ? data.abilities : [];
+  const bySlot = new Map();
+  for (const ability of abilities) {
+    const slot = Number(ability && ability.slot);
+    if (Number.isInteger(slot) && slot >= 1 && slot <= 6 && !bySlot.has(slot)) {
+      bySlot.set(slot, ability);
+    }
+  }
+  for (let slot = 1; slot <= 6; slot += 1) {
+    const label = document.querySelector(`[data-slot-label="${slot}"]`);
+    const ability = bySlot.get(slot);
+    if (label) {
+      label.textContent = ability ? ability.name || `slot ${slot}` : "-";
+      label.title = ability ? `${ability.name || ""} id=${ability.id ?? ""}` : "";
+    }
+  }
+  const summary = abilities.length ? `Скиллы: ${abilities.length}` : data.message || "Скиллы не найдены";
+  setStatusText("errorStatus", summary);
+}
+
+async function scanSkills() {
+  const clientId = selectedClientId();
+  if (!clientId) {
+    throw new Error("Открой поп-ап на вкладке боя нужного окна.");
+  }
+  const data = await api(clientId ? `/battle-skills?clientId=${encodeURIComponent(clientId)}` : "/battle-skills");
+  renderSkillScan(data);
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadSettings();
+  await loadCurrentClient().catch(() => {});
+  for (const id of fields) {
+    const input = $(id);
+    if (input) {
+      input.addEventListener("change", saveSettings);
+    }
+  }
+  $("startButton").addEventListener("click", () => startBot().catch((error) => setStatusText("errorStatus", error.message)));
+  $("stopButton").addEventListener("click", () => stopBot().catch((error) => setStatusText("errorStatus", error.message)));
+  $("refreshButton").addEventListener("click", refreshStatus);
+  $("scanSkillsButton").addEventListener("click", () => scanSkills().catch((error) => setStatusText("errorStatus", error.message)));
+  await refreshStatus();
+  setInterval(refreshStatus, 1500);
+});

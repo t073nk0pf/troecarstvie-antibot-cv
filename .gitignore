@@ -1,0 +1,15 @@
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+runs/
+*.log
+*.jsonl
+
+# Local live-debug snapshots can contain account/game state and should not be
+# published with the source package.
+inventory-debug*.json
+recovery-debug*.json
+recovery-debu*.json

@@ -1,0 +1,10 @@
+[project]
+name = "troecarstvie-antibot-cv"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Local bounded CV automation harness for controlled anti-bot research samples"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

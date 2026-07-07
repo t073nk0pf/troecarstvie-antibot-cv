@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Antibot CV</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Antibot CV</h1>
+          <p id="serverStatus">Проверка сервера...</p>
+        </div>
+        <span id="runBadge" class="badge">idle</span>
+      </header>
+
+      <section class="grid">
+        <label>
+          <span>Текущая вкладка</span>
+          <select id="clientId"></select>
+        </label>
+        <label class="wide">
+          <span>Конфиг</span>
+          <input id="configPath" type="text" value="config/automation.local.json" />
+        </label>
+        <label>
+          <span>Циклы</span>
+          <input id="maxCycles" type="number" min="1" value="50" />
+        </label>
+        <label>
+          <span>Уровни мобов</span>
+          <input id="targetLevels" type="text" placeholder="2 или 2,3" />
+        </label>
+        <label>
+          <span>Старт, сек</span>
+          <input id="startDelay" type="number" min="0" step="0.1" value="1" />
+        </label>
+      </section>
+
+      <section class="grid">
+        <label>
+          <span>Мин. HP %</span>
+          <input id="healthMinPercent" type="number" min="1" max="100" value="90" />
+        </label>
+        <label>
+          <span>Мин. удаль %</span>
+          <input id="prowessMinPercent" type="number" min="1" max="100" value="90" />
+        </label>
+        <label>
+          <span>Пить до %</span>
+          <input id="recoverToPercent" type="number" min="1" max="100" value="90" />
+        </label>
+        <label>
+          <span>Пить HP ниже %</span>
+          <input id="recoveryHealthThreshold" type="number" min="1" max="100" value="90" />
+        </label>
+        <label>
+          <span>Пить удаль ниже %</span>
+          <input id="recoveryProwessThreshold" type="number" min="1" max="100" value="90" />
+        </label>
+        <label>
+          <span>Бурдюков за ресурс</span>
+          <input id="maxUsesPerResource" type="number" min="1" max="8" value="4" />
+        </label>
+        <label>
+          <span>Ожидание рюкзака, мс</span>
+          <input id="inventoryOpenDelayMs" type="number" min="0" max="5000" step="100" value="1500" />
+        </label>
+      </section>
+
+      <section class="combat">
+        <div class="section-head">
+          <span>Скиллы боя</span>
+          <button id="scanSkillsButton" class="small" type="button">Скан</button>
+        </div>
+        <div class="skill-grid">
+          <label class="skill-cell"><input id="skillSlot1" type="checkbox" data-slot="1" /><strong>1</strong><span class="skill-name" data-slot-label="1">-</span></label>
+          <label class="skill-cell"><input id="skillSlot2" type="checkbox" data-slot="2" checked /><strong>2</strong><span class="skill-name" data-slot-label="2">-</span></label>
+          <label class="skill-cell"><input id="skillSlot3" type="checkbox" data-slot="3" checked /><strong>3</strong><span class="skill-name" data-slot-label="3">-</span></label>
+          <label class="skill-cell"><input id="skillSlot4" type="checkbox" data-slot="4" /><strong>4</strong><span class="skill-name" data-slot-label="4">-</span></label>
+          <label class="skill-cell"><input id="skillSlot5" type="checkbox" data-slot="5" /><strong>5</strong><span class="skill-name" data-slot-label="5">-</span></label>
+          <label class="skill-cell"><input id="skillSlot6" type="checkbox" data-slot="6" /><strong>6</strong><span class="skill-name" data-slot-label="6">-</span></label>
+        </div>
+      </section>
+
+      <section class="grid">
+        <label>
+          <span>Интервал скиллов, мс</span>
+          <input id="combatClickIntervalMs" type="number" min="100" max="5000" step="50" value="900" />
+        </label>
+        <label>
+          <span>0 удар при удали <= %</span>
+          <input id="combatFallbackProwessPercent" type="number" min="0" max="100" step="1" value="1" />
+        </label>
+        <label>
+          <span>Перед нажатием, мс</span>
+          <input id="combatPreClickDelayMs" type="number" min="0" max="2000" step="50" value="0" />
+        </label>
+        <label>
+          <span>Удержание, мс</span>
+          <input id="combatClickHoldMs" type="number" min="0" max="1000" step="25" value="0" />
+        </label>
+        <label class="checkbox-line">
+          <input id="combatFallbackZeroEnabled" type="checkbox" checked />
+          <span>Разрешить удар 0 при нулевой удали</span>
+        </label>
+      </section>
+
+      <section class="checks">
+        <label><input id="live" type="checkbox" checked /> live</label>
+        <label><input id="noActivateApp" type="checkbox" checked /> Chrome может быть в фоне</label>
+        <label><input id="openHuntOnStart" type="checkbox" checked /> сразу открыть охоту</label>
+        <label><input id="itemRecoveryEnabled" type="checkbox" checked /> пить бурдюки</label>
+      </section>
+
+      <section class="actions">
+        <button id="startButton" type="button">Старт</button>
+        <button id="stopButton" type="button">Стоп</button>
+        <button id="refreshButton" type="button">Обновить</button>
+      </section>
+
+      <section class="status">
+        <dl>
+          <div><dt>Клиент</dt><dd id="clientStatus">-</dd></div>
+          <div><dt>Состояние</dt><dd id="botState">-</dd></div>
+          <div><dt>Циклы</dt><dd id="cycleStatus">-</dd></div>
+          <div><dt>Действия</dt><dd id="actionStatus">-</dd></div>
+          <div><dt>Ошибка</dt><dd id="errorStatus">-</dd></div>
+        </dl>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,170 @@
+{
+  "ability4": {
+    "normalized_position": [
+      0.45,
+      0.89
+    ],
+    "require_ready_confirmation": true,
+    "slot_confidence_threshold": 0.5,
+    "pre_click_delay_ms": 0,
+    "click_hold_ms": 0,
+    "use_once": true
+  },
+  "activate_app": null,
+  "allow_live_toggle": false,
+  "battle": {
+    "confirm_frames": 2,
+    "min_signals": 2,
+    "weighted_threshold": 1.5
+  },
+  "battle_end": {
+    "confirm_frames": 2,
+    "threshold": 0.7
+  },
+  "capture": {
+    "logical_height": null,
+    "logical_width": null,
+    "monitor_index": 1,
+    "roi": null
+  },
+  "capture_fps": 5,
+  "combat": {
+    "click_interval_ms": 2500,
+    "pre_click_delay_ms": 0,
+    "click_hold_ms": 0,
+    "enabled": true,
+    "low_resource_fallback_slot_index": 0,
+    "require_ready_confirmation": false,
+    "slot_confidence_threshold": 0.4,
+    "slot_index": 4,
+    "slot_sequence": []
+  },
+  "dry_run": true,
+  "max_cycles": 3,
+  "max_session_minutes": 10,
+  "runs_dir": "runs",
+  "resources": {
+    "enabled": true,
+    "fail_open_if_missing": false,
+    "health_bar_roi": null,
+    "health_min_percent": 35,
+    "max_rest_minutes": 0,
+    "prowess_bar_roi": null,
+    "prowess_min_percent": 35,
+    "recover_to_percent": 80,
+    "require_recover_before_search": false,
+    "wait_in_battle_when_low": true,
+    "rest_refresh_after_ms": 20000,
+    "rest_refresh_interval_ms": 20000,
+    "rest_check_interval_ms": 1000,
+    "roi": null
+  },
+  "item_recovery": {
+    "enabled": false,
+    "use_after_cycle": true,
+    "use_when_below_percent": 90,
+    "force_use": false,
+    "use_if_resources_missing": true,
+    "open_hunt_after": true,
+    "timeout_s": 8,
+    "health_restore_percent": 40,
+    "prowess_restore_percent": 30,
+    "max_uses_per_resource": 4,
+    "confirm_delay_ms": 700,
+    "between_items_delay_ms": 500,
+    "health_names": [
+      "малый бурдюк жизни",
+      "бурдюк жизни"
+    ],
+    "prowess_names": [
+      "малый бурдюк удали",
+      "бурдюк удали"
+    ]
+  },
+  "recovery": {
+    "battle_active_timeout_ms": 240000,
+    "battle_end_timeout_ms": 30000,
+    "battle_wait_timeout_ms": 12000,
+    "enabled": true,
+    "statistics_timeout_ms": 20000,
+    "viewport_exhausted_pause_ms": 750
+  },
+  "safety": {
+    "max_actions_per_minute": 30,
+    "max_consecutive_errors": 3,
+    "max_viewport_moves_per_search": 10
+  },
+  "statistics": {
+    "confirm_frames": 2,
+    "threshold": 0.7
+  },
+  "target": {
+    "allowed_targets": [
+      "steppe_jackal",
+      "young_lynx"
+    ],
+    "allowed_levels": [],
+    "click_offset": {
+      "dx": 0,
+      "dy": -35
+    },
+    "green_label": {
+      "green_h_max": 85,
+      "green_h_min": 45,
+      "green_s_min": 80,
+      "green_v_min": 80,
+      "max_label_height": 70,
+      "max_label_width": 260,
+      "min_label_height": 4,
+      "min_label_width": 8
+    },
+    "mode": "template_label",
+    "per_target_click_offsets": {},
+    "preferred_target_order": [
+      "steppe_jackal",
+      "young_lynx"
+    ],
+    "search_roi": null,
+    "stable_frames": 2
+  },
+  "templates_path": "config/templates.example.json",
+  "viewport": {
+    "direction_pad_points": {
+      "EAST": [
+        0.71,
+        0.51
+      ],
+      "NORTH": [
+        0.5,
+        0.2
+      ],
+      "SOUTH": [
+        0.5,
+        0.78
+      ],
+      "WEST": [
+        0.3,
+        0.51
+      ]
+    },
+    "direction_pad_roi": null,
+    "max_moves_per_search": 8,
+    "max_scrollbar_moves_per_search": 2,
+    "scrollbar_enabled": true,
+    "scrollbar_min_confidence": 0.65,
+    "scrollbar_roi": null,
+    "scrollbar_sequence": [
+      "DOWN",
+      "UP"
+    ],
+    "scrollbar_step_px": 90,
+    "search_sequence": [
+      "NORTH",
+      "SOUTH",
+      "WEST",
+      "EAST"
+    ],
+    "settle_ms": 700,
+    "strategy": "direction_pad"
+  }
+}

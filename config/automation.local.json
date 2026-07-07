@@ -1,0 +1,255 @@
+{
+  "ability4": {
+    "normalized_position": [
+      0.45,
+      0.89
+    ],
+    "require_ready_confirmation": true,
+    "slot_confidence_threshold": 0.5,
+    "pre_click_delay_ms": 200,
+    "click_hold_ms": 80,
+    "use_once": true
+  },
+  "activate_app": "Google Chrome",
+  "allow_live_toggle": false,
+  "battle": {
+    "confirm_frames": 1,
+    "min_signals": 1,
+    "weighted_threshold": 0.8
+  },
+  "battle_end": {
+    "confirm_frames": 1,
+    "threshold": 0.7
+  },
+  "capture": {
+    "logical_height": null,
+    "logical_width": null,
+    "monitor_index": 1,
+    "roi": null
+  },
+  "capture_fps": 60,
+  "combat": {
+    "click_interval_ms": 900,
+    "pre_click_delay_ms": 200,
+    "click_hold_ms": 80,
+    "enabled": true,
+    "low_resource_fallback_slot_index": 0,
+    "require_ready_confirmation": false,
+    "slot_confidence_threshold": 0.4,
+    "slot_index": 4,
+    "slot_sequence": [
+      2,
+      3
+    ]
+  },
+  "dry_run": true,
+  "max_cycles": 100000,
+  "max_session_minutes": 480,
+  "runs_dir": "runs",
+  "resources": {
+    "enabled": true,
+    "fail_open_if_missing": false,
+    "health_bar_roi": {
+      "height": 14,
+      "width": 145,
+      "x": 695,
+      "y": 183
+    },
+    "health_min_percent": 55,
+    "max_rest_minutes": 0,
+    "prowess_bar_roi": {
+      "height": 14,
+      "width": 135,
+      "x": 858,
+      "y": 184
+    },
+    "prowess_min_percent": 55,
+    "recover_to_percent": 90,
+    "require_recover_before_search": true,
+    "wait_in_battle_when_low": true,
+    "rest_refresh_after_ms": 15000,
+    "rest_refresh_interval_ms": 20000,
+    "rest_check_interval_ms": 1000,
+    "roi": {
+      "height": 80,
+      "width": 360,
+      "x": 650,
+      "y": 160
+    }
+  },
+  "item_recovery": {
+    "enabled": true,
+    "use_after_cycle": true,
+    "use_when_below_percent": 90,
+    "force_use": false,
+    "use_if_resources_missing": true,
+    "open_hunt_after": true,
+    "timeout_s": 8,
+    "health_restore_percent": 40,
+    "prowess_restore_percent": 30,
+    "max_uses_per_resource": 4,
+    "inventory_open_delay_ms": 1500,
+    "confirm_delay_ms": 700,
+    "between_items_delay_ms": 500,
+    "health_names": [
+      "малый бурдюк жизни",
+      "бурдюк жизни"
+    ],
+    "prowess_names": [
+      "малый бурдюк удали",
+      "бурдюк удали"
+    ]
+  },
+  "recovery": {
+    "battle_active_timeout_ms": 240000,
+    "battle_end_timeout_ms": 30000,
+    "battle_wait_timeout_ms": 4000,
+    "enabled": true,
+    "statistics_timeout_ms": 20000,
+    "viewport_exhausted_pause_ms": 100
+  },
+  "safety": {
+    "max_actions_per_minute": 600,
+    "max_consecutive_errors": 3,
+    "max_viewport_moves_per_search": 12
+  },
+  "statistics": {
+    "confirm_frames": 1,
+    "threshold": 0.7
+  },
+  "target": {
+    "allowed_targets": [
+      "green_label",
+      "mob_sprite_01",
+      "mob_sprite_02",
+      "mob_sprite_03",
+      "green_sprite"
+    ],
+    "allowed_levels": [],
+    "click_offset": {
+      "dx": -35,
+      "dy": -80
+    },
+    "interaction_margin_px": 24,
+    "click_retry_delay_ms": 90,
+    "click_retry_offsets": [
+      {
+        "dx": 0,
+        "dy": -80
+      },
+      {
+        "dx": 0,
+        "dy": -35
+      },
+      {
+        "dx": 0,
+        "dy": 0
+      },
+      {
+        "dx": 0,
+        "dy": 35
+      },
+      {
+        "dx": -35,
+        "dy": -55
+      },
+      {
+        "dx": 35,
+        "dy": -55
+      },
+      {
+        "dx": -35,
+        "dy": -80
+      },
+      {
+        "dx": 35,
+        "dy": -80
+      }
+    ],
+    "green_label": {
+      "green_h_max": 85,
+      "green_h_min": 45,
+      "green_s_min": 80,
+      "green_v_min": 80,
+      "detect_red_labels": false,
+      "max_label_height": 26,
+      "max_label_width": 420,
+      "min_label_height": 8,
+      "min_label_width": 55
+    },
+    "mode": "any_allowed_green_label",
+    "per_target_click_offsets": {},
+    "preferred_target_order": [
+      "green_label",
+      "mob_sprite_01",
+      "mob_sprite_02",
+      "mob_sprite_03",
+      "green_sprite"
+    ],
+    "search_roi": {
+      "height": 760,
+      "width": 1450,
+      "x": 120,
+      "y": 150
+    },
+    "sprite_template_ids": [
+      "mob_sprite_01",
+      "mob_sprite_02",
+      "mob_sprite_03"
+    ],
+    "stable_frames": 1
+  },
+  "templates_path": "config/templates.example.json",
+  "viewport": {
+    "direction_pad_points": {
+      "EAST": [
+        0.71,
+        0.51
+      ],
+      "NORTH": [
+        0.5,
+        0.2
+      ],
+      "SOUTH": [
+        0.5,
+        0.78
+      ],
+      "WEST": [
+        0.3,
+        0.51
+      ]
+    },
+    "direction_pad_roi": {
+      "height": 135,
+      "width": 135,
+      "x": 435,
+      "y": 250
+    },
+    "max_moves_per_search": 4,
+    "max_scrollbar_moves_per_search": 4,
+    "scrollbar_every_direction_moves": 1,
+    "scrollbar_enabled": true,
+    "scrollbar_min_confidence": 0.65,
+    "scrollbar_roi": {
+      "height": 560,
+      "width": 120,
+      "x": 1530,
+      "y": 300
+    },
+    "scrollbar_sequence": [
+      "DOWN",
+      "UP",
+      "DOWN",
+      "UP"
+    ],
+    "scrollbar_step_px": 120,
+    "search_sequence": [
+      "NORTH",
+      "SOUTH",
+      "WEST",
+      "EAST"
+    ],
+    "settle_ms": 1000,
+    "strategy": "direction_pad"
+  }
+}

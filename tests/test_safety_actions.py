@@ -1,0 +1,567 @@
+from __future__ import annotations
+
+import json
+
+from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, DryRunActionSink, LiveMacActionSink
+from src.antibot_cv.automation.actions import _log_action
+from src.antibot_cv.automation.browser_injector import InjectorResult
+from src.antibot_cv.automation.config import AutomationConfig
+from src.antibot_cv.automation.safety import SafetyGuard
+from src.antibot_cv.automation.session import MAX_HUNT_CLICKS_PER_CYCLE, SessionState
+from src.antibot_cv.telemetry.event_logger import InMemoryEventLogger
+from src.antibot_cv.viewport.coordinates import Point
+
+
+class FailingSink:
+    def execute(self, request: ActionRequest) -> bool:
+        raise AssertionError("live sink must not be reached")
+
+
+def test_dry_run_no_live_click(test_config: AutomationConfig) -> None:
+    session = SessionState(requested_cycles=3)
+    guard = SafetyGuard(test_config)
+    sink = DryRunActionSink()
+    executor = ActionExecutor(guard=guard, session=session, sink=sink)
+    ok = executor.execute(ActionRequest("click_target", frame_point=Point(1, 2), screen_point=Point(3, 4), dry_run=True))
+    assert ok is True
+    assert len(sink.requests) == 1
+    assert session.total_actions == 1
+
+
+def test_emergency_stop_blocks_actions(test_config: AutomationConfig) -> None:
+    session = SessionState(requested_cycles=3)
+    guard = SafetyGuard(test_config)
+    guard.emergency_stop()
+    executor = ActionExecutor(guard=guard, session=session, sink=FailingSink())
+    ok = executor.execute(ActionRequest("click_target", screen_point=Point(3, 4), dry_run=True))
+    assert ok is False
+    assert session.total_actions == 0
+
+
+def test_max_actions_blocks(test_config: AutomationConfig) -> None:
+    config = test_config.with_overrides()
+    session = SessionState(requested_cycles=3)
+    guard = SafetyGuard(config)
+    for _ in range(config.safety.max_actions_per_minute):
+        guard.record_action()
+    decision = guard.allow_action("click_target", completed_cycles=0, requested_cycles=3)
+    assert decision.allowed is False
+    assert decision.reason == "max_actions_per_minute"
+
+
+def test_consecutive_errors_latch_stop(test_config: AutomationConfig) -> None:
+    guard = SafetyGuard(test_config)
+    guard.record_error()
+    guard.record_error()
+    decision = guard.record_error()
+    assert decision.allowed is False
+    assert guard.emergency_stopped is True
+
+
+def test_ability_exit_hunt_limits_retries(test_config: AutomationConfig) -> None:
+    session = SessionState(requested_cycles=3)
+    session.new_battle()
+    guard = SafetyGuard(test_config)
+    sink = DryRunActionSink()
+    executor = ActionExecutor(guard=guard, session=session, sink=sink)
+    assert executor.execute(ActionRequest("click_ability_4", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    assert not executor.execute(ActionRequest("click_ability_4", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    assert executor.execute(ActionRequest("click_exit", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    assert not executor.execute(ActionRequest("click_exit", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    for _ in range(MAX_HUNT_CLICKS_PER_CYCLE):
+        assert executor.execute(ActionRequest("click_hunt", screen_point=Point(1, 1), cycle_id=0, dry_run=True))
+    assert not executor.execute(ActionRequest("click_hunt", screen_point=Point(1, 1), cycle_id=0, dry_run=True))
+    assert session.hunt_actions == MAX_HUNT_CLICKS_PER_CYCLE
+
+
+def test_attack_click_has_bounded_retries(test_config: AutomationConfig) -> None:
+    session = SessionState(requested_cycles=3)
+    session.new_battle()
+    guard = SafetyGuard(test_config)
+    sink = DryRunActionSink()
+    executor = ActionExecutor(guard=guard, session=session, sink=sink)
+
+    for _ in range(3):
+        assert executor.execute(ActionRequest("click_attack", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    assert not executor.execute(ActionRequest("click_attack", screen_point=Point(1, 1), battle_id=1, dry_run=True))
+    assert session.attack_actions == 3
+
+
+def test_log_action_allows_live_dry_run_override() -> None:
+    logger = InMemoryEventLogger()
+    request = ActionRequest("click_target", screen_point=Point(1, 1), dry_run=True)
+    _log_action(logger, "click_target_clicked", request, dry_run=False)
+    assert logger.events[-1]["dry_run"] is False
+
+
+def test_live_mouse_click_is_blocked_in_js_only_mode() -> None:
+    logger = InMemoryEventLogger(dry_run=False)
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(ActionRequest("click_combat_slot", screen_point=Point(10, 20), dry_run=False))
+
+    assert not ok
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert logger.events[-1]["block_reason"] == "live_js_only_unsupported_action:click_combat_slot"
+
+
+def test_live_attack_visible_target_passes_allowed_levels(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            assert command == "attack_visible_bot"
+            assert payload == {"confirmed": 1, "margin": 35, "allowedLevels": [3]}
+            assert required_version is None
+            return InjectorResult(
+                True,
+                '{"ok":true,"message":"huntAttack","target":{"botId":1675,"name":"mob","level":3,"levelSource":"lvl","x":10,"y":20,"screenX":30,"screenY":40}}',
+                "client",
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(ActionRequest("attack_visible_target", metadata={"confirmed": 1, "margin": 35, "allowed_levels": [3]}, dry_run=False))
+
+    assert ok
+    assert logger.events[-1]["event_type"] == "attack_visible_target_requested"
+    assert logger.events[-1]["target_level"] == 3
+
+
+def test_live_ability_uses_js_skill_without_screen_point(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            assert command == "use_skill_slot"
+            assert payload == {"slot": 4}
+            assert required_version is None
+            return InjectorResult(
+                True,
+                '{"ok":true,"message":"useSkill","slot":4,"ability":{"id":-10,"slot":4,"name":"test"}}',
+                "client",
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(ActionRequest("click_ability_4", metadata={"use_js_skill": True, "skill_slot": 4}, dry_run=False))
+
+    assert ok
+    assert logger.events[-1]["event_type"] == "click_ability_4_js"
+    assert logger.events[-1]["ability_id"] == -10
+    assert logger.events[-1]["ability_name"] == "test"
+
+
+def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            assert command == "use_skill_slot"
+            assert payload == {"slot": 4}
+            assert required_version is None
+            return InjectorResult(True, '{"ok":true,"message":"useSkill","slot":4}', "client")
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(ActionRequest("click_combat_slot", metadata={"use_js_skill": True, "slot_index": 4}, dry_run=False))
+
+    assert ok
+    assert logger.events[-1]["event_type"] == "click_combat_slot_js"
+    assert logger.events[-1]["skill_slot"] == 4
+
+
+def test_live_viewport_move_uses_js_hunt_direction(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            assert command == "hunt_move_direction"
+            assert payload == {"direction": "SOUTH", "margin": 35}
+            assert required_version is None
+            return InjectorResult(True, '{"ok":true,"message":"hunt_direction_moved","direction":"south"}', "client")
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "viewport_move",
+            scan_direction="SOUTH",
+            metadata={"use_js_hunt_direction": True, "margin": 35},
+            is_viewport_move=True,
+            dry_run=False,
+        )
+    )
+
+    assert ok
+    assert logger.events[-1]["event_type"] == "viewport_move_js_hunt_direction"
+    assert logger.events[-1]["scan_direction"] == "SOUTH"
+
+
+def test_live_recovery_items_can_use_multiple_burdjuks(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object] | None]] = []
+
+    class FakeInjector:
+        def __init__(self) -> None:
+            self.open_counts = {"health": 0, "prowess": 0}
+            self.resources = {"healthPercent": 20, "prowessPercent": 40}
+
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, payload))
+            assert required_version is None
+            if command == "open_recovery_item":
+                assert payload is not None
+                kind = str(payload["kind"])
+                self.open_counts[kind] += 1
+                resources = dict(self.resources)
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "recovery_item_clicked",
+                            "kind": kind,
+                            "resources": resources,
+                            "item": {"artikulId": "111"},
+                        }
+                    ),
+                    "client",
+                )
+            if command == "confirm_action_form":
+                if self.open_counts["health"] > 0 and self.open_counts["prowess"] == 0:
+                    self.resources["healthPercent"] += 40
+                elif self.open_counts["prowess"] > 0:
+                    self.resources["prowessPercent"] += 30
+                return InjectorResult(True, '{"ok":true,"message":"action_form_confirmed"}', "client")
+            if command == "resource_snapshot":
+                return InjectorResult(True, json.dumps(self.resources), "client")
+            if command == "open_hunt":
+                return InjectorResult(True, '{"ok":true,"message":"open_hunt"}', "client")
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": ["бурдюк жизни"],
+                "prowess_names": ["бурдюк удали"],
+                "use_when_below_percent": 90,
+                "health_restore_percent": 40,
+                "prowess_restore_percent": 30,
+                "max_uses_per_resource": 4,
+                "inventory_open_delay_ms": 1600,
+                "confirm_delay_ms": 0,
+                "between_items_delay_ms": 0,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert ok
+    assert [command for command, payload in calls if command == "open_recovery_item" for _ in [payload]] == [
+        "open_recovery_item",
+        "open_recovery_item",
+        "open_recovery_item",
+        "open_recovery_item",
+    ]
+    attempts = logger.events[-1]["recovery_item_attempts"]
+    assert [attempt["kind"] for attempt in attempts] == ["health", "health", "prowess", "prowess"]
+    assert attempts[1]["percent_after"] == 100
+    assert attempts[3]["percent_after"] == 100
+    open_payloads = [payload for command, payload in calls if command == "open_recovery_item"]
+    assert [payload["inventoryOpenDelayMs"] for payload in open_payloads] == [1600, 1600, 1600, 1600]
+
+
+def test_live_recovery_items_passes_force_use_to_injector(monkeypatch) -> None:
+    payloads: list[dict[str, object]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            if command == "open_recovery_item":
+                assert payload is not None
+                payloads.append(payload)
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "recovery_item_not_needed",
+                            "kind": payload["kind"],
+                            "resources": {"healthPercent": 100, "prowessPercent": 100},
+                        }
+                    ),
+                    "client",
+                )
+            if command == "open_hunt":
+                return InjectorResult(True, '{"ok":true,"message":"open_hunt"}', "client")
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": ["бурдюк жизни"],
+                "prowess_names": ["бурдюк удали"],
+                "use_when_below_percent": 90,
+                "force_use": True,
+                "open_hunt_after": False,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert ok
+    assert [payload["forceUse"] for payload in payloads] == [True, True]
+
+
+def test_live_recovery_items_extends_open_timeout_for_inventory_delay(monkeypatch) -> None:
+    open_timeouts: list[float] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            if command == "open_recovery_item":
+                open_timeouts.append(timeout_s)
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "recovery_item_not_needed",
+                            "kind": payload["kind"] if payload else "health",
+                            "resources": {"healthPercent": 100, "prowessPercent": 100},
+                        }
+                    ),
+                    "client",
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": ["бурдюк жизни"],
+                "prowess_names": ["бурдюк удали"],
+                "timeout_s": 1,
+                "inventory_open_delay_ms": 5000,
+                "open_hunt_after": False,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert ok
+    assert open_timeouts == [10.5, 10.5]
+
+
+def test_live_recovery_items_skips_confirm_when_not_required(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeInjector:
+        def __init__(self) -> None:
+            self.resources = {"healthPercent": 100, "prowessPercent": 80}
+
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            calls.append(command)
+            if command == "open_recovery_item":
+                kind = str((payload or {}).get("kind"))
+                if kind == "health":
+                    return InjectorResult(
+                        True,
+                        json.dumps(
+                            {
+                                "ok": True,
+                                "message": "recovery_item_not_needed",
+                                "kind": "health",
+                                "percent": 100,
+                                "threshold": 90,
+                            }
+                        ),
+                        "client",
+                    )
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "recovery_item_clicked",
+                            "kind": "prowess",
+                            "requiresConfirm": False,
+                            "resources": {"healthPercent": 100, "prowessPercent": 80},
+                        }
+                    ),
+                    "client",
+                )
+            if command == "confirm_action_form":
+                raise AssertionError("confirm must be skipped")
+            if command == "resource_refresh":
+                self.resources["prowessPercent"] = 95
+                return InjectorResult(True, '{"ok":true,"message":"main_frame_reload_scheduled"}', "client")
+            if command == "resource_snapshot":
+                return InjectorResult(True, json.dumps(self.resources), "client")
+            return InjectorResult(True, '{"ok":true}', "client")
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": [],
+                "prowess_names": ["бурдюк удали"],
+                "use_when_below_percent": 90,
+                "health_restore_percent": 40,
+                "prowess_restore_percent": 30,
+                "max_uses_per_resource": 1,
+                "confirm_delay_ms": 0,
+                "between_items_delay_ms": 0,
+                "open_hunt_after": False,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert ok
+    assert calls.count("open_recovery_item") == 2
+    assert "confirm_action_form" not in calls
+    assert "resource_snapshot" in calls
+    attempts = logger.events[-1]["recovery_item_attempts"]
+    assert attempts[-1]["confirm_skipped"] == "not_required"
+
+
+def test_live_recovery_items_does_not_open_hunt_when_resource_not_confirmed(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            calls.append(command)
+            if command == "open_recovery_item":
+                kind = str((payload or {}).get("kind"))
+                if kind == "health":
+                    return InjectorResult(
+                        True,
+                        json.dumps({"ok": True, "message": "recovery_item_not_needed", "kind": "health", "percent": 100}),
+                        "client",
+                    )
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "recovery_item_clicked",
+                            "kind": "prowess",
+                            "requiresConfirm": False,
+                            "resources": {"healthPercent": 100, "prowessPercent": 80},
+                        }
+                    ),
+                    "client",
+                )
+            if command == "resource_refresh":
+                return InjectorResult(True, '{"ok":true,"message":"main_frame_reload_scheduled"}', "client")
+            if command == "resource_snapshot":
+                return InjectorResult(True, json.dumps({"healthPercent": 100, "prowessPercent": 80}), "client")
+            if command == "open_hunt":
+                raise AssertionError("hunt must not open before recovery is confirmed")
+            return InjectorResult(True, '{"ok":true}', "client")
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": ["бурдюк жизни"],
+                "prowess_names": ["бурдюк удали"],
+                "use_when_below_percent": 90,
+                "max_uses_per_resource": 1,
+                "confirm_delay_ms": 0,
+                "between_items_delay_ms": 0,
+                "open_hunt_after": True,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert not ok
+    assert "open_hunt" not in calls
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert logger.events[-1]["open_hunt_skipped"] == "recovery_failed"
+    assert logger.events[-1]["recovery_resource_results"][-1]["ok"] is False

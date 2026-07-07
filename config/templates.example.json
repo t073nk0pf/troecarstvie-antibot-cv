@@ -1,0 +1,190 @@
+{
+  "templates": [
+    {
+      "max_results": 1,
+      "path": "assets/templates/battle/ability_bar.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 600,
+        "width": 1200,
+        "x": 300,
+        "y": 300
+      },
+      "template_id": "ability_bar",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/location/attack_button.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 220,
+        "width": 900,
+        "x": 0,
+        "y": 250
+      },
+      "template_id": "attack_button",
+      "threshold": 0.78
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/battle/battle_panel.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 720,
+        "width": 1250,
+        "x": 250,
+        "y": 80
+      },
+      "template_id": "battle_panel",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/direction_pad/direction_pad.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 260,
+        "width": 260,
+        "x": 250,
+        "y": 300
+      },
+      "template_id": "direction_pad",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/battle_end/exit_button.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 520,
+        "width": 800,
+        "x": 600,
+        "y": 180
+      },
+      "template_id": "exit_button",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/statistics/hunt_button.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 180,
+        "width": 600,
+        "x": 700,
+        "y": 220
+      },
+      "template_id": "hunt_button",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/statistics/statistics_buttons.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 270,
+        "width": 650,
+        "x": 650,
+        "y": 150
+      },
+      "template_id": "statistics_buttons",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/statistics/statistics_header.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 170,
+        "width": 520,
+        "x": 0,
+        "y": 30
+      },
+      "template_id": "statistics_header",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/statistics/team_tables.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 260,
+        "width": 1900,
+        "x": 0,
+        "y": 50
+      },
+      "template_id": "team_tables",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 1,
+      "path": "assets/templates/battle_end/victory_popup.png",
+      "scales": [
+        1.0
+      ],
+      "search_roi": {
+        "height": 520,
+        "width": 950,
+        "x": 500,
+        "y": 120
+      },
+      "template_id": "victory_popup",
+      "threshold": 0.8
+    },
+    {
+      "max_results": 4,
+      "path": "assets/templates/targets/mob_sprite_01.png",
+      "scales": [
+        0.9,
+        1.0,
+        1.1
+      ],
+      "search_roi": null,
+      "template_id": "mob_sprite_01",
+      "threshold": 0.72
+    },
+    {
+      "max_results": 4,
+      "path": "assets/templates/targets/mob_sprite_02.png",
+      "scales": [
+        0.9,
+        1.0,
+        1.1
+      ],
+      "search_roi": null,
+      "template_id": "mob_sprite_02",
+      "threshold": 0.72
+    },
+    {
+      "max_results": 4,
+      "path": "assets/templates/targets/mob_sprite_03.png",
+      "scales": [
+        0.9,
+        1.0,
+        1.1
+      ],
+      "search_roi": null,
+      "template_id": "mob_sprite_03",
+      "threshold": 0.72
+    }
+  ]
+}
