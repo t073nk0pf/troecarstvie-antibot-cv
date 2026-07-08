@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_INJECTOR_HOST = "127.0.0.1"
 DEFAULT_INJECTOR_PORT = 17654
-CURRENT_BRIDGE_VERSION = "2026-07-07-local-popup"
+CURRENT_BRIDGE_VERSION = "2026-07-08-background-fetch"
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):

@@ -1,5 +1,5 @@
 (() => {
-  const BRIDGE_VERSION = "2026-07-07-local-popup";
+  const BRIDGE_VERSION = "2026-07-08-background-fetch";
   const CONTENT_SOURCE = `antibot-cv-content:${BRIDGE_VERSION}`;
   const INJECTOR_SOURCE = `antibot-cv-injector:${BRIDGE_VERSION}`;
 

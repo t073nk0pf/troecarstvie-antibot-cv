@@ -13,12 +13,15 @@ from src.antibot_cv.automation.browser_injector import CURRENT_BRIDGE_VERSION, B
 def test_injector_bridge_versions_match() -> None:
     page_bridge = Path("browser_injector/page_bridge.js").read_text(encoding="utf-8")
     content = Path("browser_injector/content.js").read_text(encoding="utf-8")
+    background = Path("browser_injector/background.js").read_text(encoding="utf-8")
     page_version = re.search(r'BRIDGE_VERSION = "([^"]+)"', page_bridge)
     content_version = re.search(r'bridgeVersion = "([^"]+)"', content)
+    background_version = re.search(r'BRIDGE_VERSION = "([^"]+)"', background)
 
     assert page_version is not None
     assert content_version is not None
-    assert page_version.group(1) == content_version.group(1) == CURRENT_BRIDGE_VERSION
+    assert background_version is not None
+    assert page_version.group(1) == content_version.group(1) == background_version.group(1) == CURRENT_BRIDGE_VERSION
 
 
 def test_content_command_timeout_allows_inventory_delay() -> None:
@@ -42,6 +45,20 @@ def test_content_exposes_current_client_to_popup() -> None:
     assert "chrome.tabs.query({ active: true, currentWindow: true })" in popup
     assert "chrome.tabs.sendMessage" in popup
     assert "tabs" in manifest["permissions"]
+
+
+def test_extension_routes_local_fetch_through_background() -> None:
+    content = Path("browser_injector/content.js").read_text(encoding="utf-8")
+    popup = Path("browser_injector/popup.js").read_text(encoding="utf-8")
+    background = Path("browser_injector/background.js").read_text(encoding="utf-8")
+    manifest = json.loads(Path("browser_injector/manifest.json").read_text(encoding="utf-8"))
+
+    assert '"background.js"' == json.dumps(manifest["background"]["service_worker"])
+    assert "antibot-cv-local-fetch" in content
+    assert "antibot-cv-local-fetch" in popup
+    assert "antibot-cv-local-fetch" in background
+    assert "fetch(`${ENDPOINT}${path}`" in background
+    assert "fetch(" not in content
 
 
 def test_content_keeps_client_id_stable_per_tab_session() -> None:

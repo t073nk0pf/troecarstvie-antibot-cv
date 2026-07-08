@@ -3,8 +3,7 @@
     return;
   }
 
-  const endpoint = "http://127.0.0.1:17654";
-  const bridgeVersion = "2026-07-07-local-popup";
+  const bridgeVersion = "2026-07-08-background-fetch";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   const clientId = getStableClientId();
@@ -76,11 +75,7 @@
         href: window.location.href,
         title: document.title || "",
       });
-      const response = await fetch(
-        `${endpoint}/next?${params.toString()}`,
-        { cache: "no-store" }
-      );
-      const data = await response.json();
+      const data = await localFetch(`/next?${params.toString()}`);
       const command = data && data.command;
       if (command && command.id && command.id !== lastCommandId) {
         const targetHrefIncludes = command.payload && command.payload.targetHrefIncludes;
@@ -100,19 +95,45 @@
 
   async function ack(id, result) {
     try {
-      await fetch(`${endpoint}/ack`, {
+      await localFetch("/ack", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+        body: {
           id,
           ok: Boolean(result && result.ok),
           message: result && result.message ? String(result.message) : "",
           client_id: clientId,
-        }),
+        },
       });
     } catch (_) {
       // Best effort acknowledgement only.
     }
+  }
+
+  function localFetch(path, options = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "antibot-cv-local-fetch",
+          request: {
+            path,
+            method: options.method || "GET",
+            body: options.body,
+          },
+        },
+        (response) => {
+          const error = chrome.runtime.lastError;
+          if (error) {
+            reject(new Error(error.message));
+            return;
+          }
+          if (!response || !response.ok) {
+            reject(new Error((response && (response.error || response.data?.error)) || "local_fetch_failed"));
+            return;
+          }
+          resolve(response.data || {});
+        }
+      );
+    });
   }
 
   function timeoutForPageCommand(payload) {

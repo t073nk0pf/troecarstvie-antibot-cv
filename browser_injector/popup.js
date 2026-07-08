@@ -1,5 +1,3 @@
-const API = "http://127.0.0.1:17654/api";
-
 const fields = [
   "configPath",
   "maxCycles",
@@ -61,16 +59,35 @@ const defaults = {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    method: options.method || "GET",
-    headers: { "content-type": "application/json" },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  const data = await response.json().catch(() => ({}));
+  const response = await localFetch(`/api${path}`, options);
+  const data = response.data || {};
   if (!response.ok) {
-    throw new Error(data.error || `HTTP ${response.status}`);
+    throw new Error(data.error || response.error || `HTTP ${response.status}`);
   }
   return data;
+}
+
+function localFetch(path, options = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "antibot-cv-local-fetch",
+        request: {
+          path,
+          method: options.method || "GET",
+          body: options.body,
+        },
+      },
+      (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        resolve(response || { ok: false, status: 0, error: "local_fetch_failed" });
+      }
+    );
+  });
 }
 
 function readSettings() {
