@@ -16,6 +16,25 @@ python3.11 -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Windows Quick Start
+
+From Git CMD in the cloned project folder:
+
+```bat
+setup_windows.cmd
+```
+
+Then close Git CMD, open a new Git CMD, and start the local control server:
+
+```bat
+botcv
+```
+
+Keep the `botcv` terminal open while using the Chrome extension. The setup file
+creates `.venv`, installs dependencies, updates the Windows bridge branch when
+the folder is a git clone, and adds `%USERPROFILE%\bin\botcv.cmd` to the user
+PATH.
+
 ## CLI
 
 Calibration:
