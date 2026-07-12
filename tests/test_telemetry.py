@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from src.antibot_cv.automation.session import SessionState
+from src.antibot_cv.automation.checkpoint import write_json_checkpoint
 from src.antibot_cv.telemetry.event_logger import EventLogger, frame_hash
 from src.antibot_cv.telemetry.session_summary import LatencyTracker, summarize_latency, write_session_summary
 from tests.conftest import blank_frame
@@ -15,6 +16,24 @@ def test_jsonl_serialization(tmp_path) -> None:
     assert record["session_id"] == "session1"
     assert record["event_type"] == "state_transition"
     assert record["dry_run"] is True
+
+
+def test_event_log_rotates_before_unbounded_growth(tmp_path) -> None:
+    logger = EventLogger("session1", tmp_path, dry_run=True, max_bytes=1024, backup_count=2)
+    logger.log_event("large", payload="x" * 800)
+    logger.log_event("large", payload="y" * 800)
+
+    assert (tmp_path / "events.jsonl.1").exists()
+    assert (tmp_path / "events.jsonl").exists()
+
+
+def test_checkpoint_replaces_atomically(tmp_path) -> None:
+    path = tmp_path / "checkpoint.json"
+    write_json_checkpoint(path, {"state": "FARM", "level": 5})
+    write_json_checkpoint(path, {"state": "STOPPED", "level": 6})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"state": "STOPPED", "level": 6}
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_session_summary(tmp_path) -> None:

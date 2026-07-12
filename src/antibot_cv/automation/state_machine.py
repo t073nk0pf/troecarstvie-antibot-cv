@@ -23,6 +23,11 @@ class GameState(Enum):
     RETURN_TO_HUNT = "RETURN_TO_HUNT"
     COOLDOWN = "COOLDOWN"
     RESTING = "RESTING"
+    DEAD = "DEAD"
+    REVIVE_PENDING = "REVIVE_PENDING"
+    ROUTE_RECOVERY = "ROUTE_RECOVERY"
+    QUEST_REFRESH_PENDING = "QUEST_REFRESH_PENDING"
+    NAVIGATOR_PENDING = "NAVIGATOR_PENDING"
     STOPPED = "STOPPED"
     ERROR = "ERROR"
 
@@ -38,6 +43,7 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
             GameState.WAIT_BATTLE_END,
             GameState.STATISTICS_WAIT,
             GameState.RESTING,
+            GameState.QUEST_REFRESH_PENDING,
             GameState.STOPPED,
             GameState.ERROR,
         }
@@ -52,6 +58,7 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
             GameState.WAIT_BATTLE_END,
             GameState.STATISTICS_WAIT,
             GameState.RESTING,
+            GameState.QUEST_REFRESH_PENDING,
             GameState.STOPPED,
             GameState.ERROR,
         }
@@ -75,9 +82,41 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
     GameState.RETURN_TO_HUNT: frozenset({GameState.COOLDOWN, GameState.STOPPED, GameState.ERROR}),
     GameState.COOLDOWN: frozenset({GameState.LOCATION_SEARCH, GameState.RESTING, GameState.STOPPED, GameState.ERROR}),
     GameState.RESTING: frozenset({GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}),
+    GameState.DEAD: frozenset({GameState.REVIVE_PENDING, GameState.ROUTE_RECOVERY, GameState.STOPPED, GameState.ERROR}),
+    GameState.REVIVE_PENDING: frozenset(
+        {GameState.REVIVE_PENDING, GameState.ROUTE_RECOVERY, GameState.DEAD, GameState.STOPPED, GameState.ERROR}
+    ),
+    GameState.ROUTE_RECOVERY: frozenset(
+        {
+            GameState.LOCATION_SEARCH,
+            GameState.RESTING,
+            GameState.QUEST_REFRESH_PENDING,
+            GameState.NAVIGATOR_PENDING,
+            GameState.DEAD,
+            GameState.STOPPED,
+            GameState.ERROR,
+        }
+    ),
+    GameState.QUEST_REFRESH_PENDING: frozenset(
+        {GameState.LOCATION_SEARCH, GameState.NAVIGATOR_PENDING, GameState.DEAD, GameState.STOPPED, GameState.ERROR}
+    ),
+    GameState.NAVIGATOR_PENDING: frozenset(
+        {GameState.ROUTE_RECOVERY, GameState.LOCATION_SEARCH, GameState.DEAD, GameState.STOPPED, GameState.ERROR}
+    ),
     GameState.ERROR: frozenset({GameState.STOPPED}),
     GameState.STOPPED: frozenset(),
 }
+
+for _state in tuple(ALLOWED_TRANSITIONS):
+    if _state not in {
+        GameState.STOPPED,
+        GameState.ERROR,
+        GameState.DEAD,
+        GameState.REVIVE_PENDING,
+        GameState.QUEST_REFRESH_PENDING,
+        GameState.NAVIGATOR_PENDING,
+    }:
+        ALLOWED_TRANSITIONS[_state] = frozenset(set(ALLOWED_TRANSITIONS[_state]) | {GameState.DEAD})
 
 
 class TransitionLogger(Protocol):
@@ -105,7 +144,12 @@ class StateMachine:
         battle_id: int | None = None,
         reason: str | None = None,
     ) -> GameState:
-        if target == self.state and target in {GameState.VIEWPORT_SCAN, GameState.WAIT_BATTLE_END, GameState.STATISTICS_WAIT}:
+        if target == self.state and target in {
+            GameState.VIEWPORT_SCAN,
+            GameState.WAIT_BATTLE_END,
+            GameState.STATISTICS_WAIT,
+            GameState.REVIVE_PENDING,
+        }:
             return self.state
         if not self.can_transition(target):
             raise InvalidTransitionError(f"Invalid transition {self.state.value} -> {target.value}")

@@ -116,7 +116,14 @@ def test_live_attack_visible_target_passes_allowed_levels(monkeypatch) -> None:
             required_version: str | None = None,
         ) -> InjectorResult:
             assert command == "attack_visible_bot"
-            assert payload == {"confirmed": 1, "margin": 35, "allowedLevels": [3]}
+            assert payload == {
+                "confirmed": 1,
+                "margin": 35,
+                "allowedLevels": [3],
+                "verifyTimeoutMs": 3500,
+                "commandTimeoutMs": 6500,
+            }
+            assert timeout_s == 7.0
             assert required_version is None
             return InjectorResult(
                 True,
@@ -146,7 +153,8 @@ def test_live_ability_uses_js_skill_without_screen_point(monkeypatch) -> None:
             required_version: str | None = None,
         ) -> InjectorResult:
             assert command == "use_skill_slot"
-            assert payload == {"slot": 4}
+            assert payload == {"slot": 4, "verifyTimeoutMs": 900, "commandTimeoutMs": 4000}
+            assert timeout_s == 4.5
             assert required_version is None
             return InjectorResult(
                 True,
@@ -177,7 +185,8 @@ def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> Non
             required_version: str | None = None,
         ) -> InjectorResult:
             assert command == "use_skill_slot"
-            assert payload == {"slot": 4}
+            assert payload == {"slot": 4, "verifyTimeoutMs": 900, "commandTimeoutMs": 4000}
+            assert timeout_s == 4.5
             assert required_version is None
             return InjectorResult(True, '{"ok":true,"message":"useSkill","slot":4}', "client")
 
@@ -190,6 +199,140 @@ def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> Non
     assert ok
     assert logger.events[-1]["event_type"] == "click_combat_slot_js"
     assert logger.events[-1]["skill_slot"] == 4
+
+
+def test_live_js_combat_logs_compact_injector_evidence(monkeypatch) -> None:
+    huge_snapshot = {"candidates": ["x" * 2000 for _ in range(20)]}
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            if command == "use_skill_slot":
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "useSkill_confirmed",
+                            "slot": 2,
+                            "ability": {"id": -10, "slot": 2, "name": "test"},
+                            "before": huge_snapshot,
+                            "after": huge_snapshot,
+                        }
+                    ),
+                    "client",
+                )
+            if command == "use_battle_item":
+                return InjectorResult(
+                    True,
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "message": "battle_item_used",
+                            "kind": "health",
+                            "slot": 5,
+                            "item": {"id": 101, "slot": 5, "name": "item"},
+                            "method": "useSkill",
+                            "evidence": {"confirmed": True, "itemChanged": True},
+                            "afterSnapshot": huge_snapshot,
+                        }
+                    ),
+                    "client",
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    assert sink.execute(
+        ActionRequest("click_combat_slot", metadata={"use_js_skill": True, "skill_slot": 2}, dry_run=False)
+    )
+    assert sink.execute(
+        ActionRequest(
+            "use_battle_item",
+            metadata={"kind": "health", "slots": [5], "names": ["item"]},
+            dry_run=False,
+        )
+    )
+
+    serialized = json.dumps(logger.events, ensure_ascii=False)
+    assert len(serialized) < 5000
+    assert "x" * 2000 not in serialized
+
+
+def test_live_recovery_logs_compact_failed_inventory_diagnostics(monkeypatch) -> None:
+    huge = "x" * 5000
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            required_version: str | None = None,
+        ) -> InjectorResult:
+            assert command == "open_recovery_item"
+            return InjectorResult(
+                False,
+                json.dumps(
+                    {
+                        "ok": False,
+                        "message": "recovery_item_use_failed",
+                        "kind": payload["kind"] if payload else "",
+                        "item": {
+                            "artikulId": "3573417035",
+                            "artAltTitle": "Малый бурдюк жизни",
+                            "count": 1,
+                            "debug": huge,
+                        },
+                        "fallbackReason": {
+                            "message": "useArtifact_rejected",
+                            "status": -1,
+                            "error": "Призрак не может использовать этот предмет!",
+                            "response": huge,
+                        },
+                        "resources": {
+                            "healthPercent": 0,
+                            "prowessPercent": 0,
+                            "candidates": [huge],
+                        },
+                    }
+                ),
+                "client",
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger)
+
+    assert not sink.execute(
+        ActionRequest(
+            "use_recovery_items",
+            metadata={
+                "health_names": ["бурдюк жизни"],
+                "prowess_names": ["бурдюк удали"],
+                "max_uses_per_resource": 1,
+                "inventory_open_delay_ms": 0,
+                "open_hunt_after": False,
+            },
+            dry_run=False,
+        )
+    )
+
+    serialized = json.dumps(logger.events, ensure_ascii=False)
+    assert len(serialized) < 6000
+    assert huge not in serialized
+    attempts = logger.events[-1]["recovery_item_attempts"]
+    assert attempts[0]["open_result"]["fallbackReason"]["status"] == -1
+    assert attempts[0]["open_result"]["resources"]["healthPercent"] == 0
 
 
 def test_live_viewport_move_uses_js_hunt_direction(monkeypatch) -> None:
@@ -565,3 +708,87 @@ def test_live_recovery_items_does_not_open_hunt_when_resource_not_confirmed(monk
     assert logger.events[-1]["event_type"] == "action_blocked"
     assert logger.events[-1]["open_hunt_skipped"] == "recovery_failed"
     assert logger.events[-1]["recovery_resource_results"][-1]["ok"] is False
+
+
+def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypatch) -> None:
+    calls: list[tuple[str, str | None, dict[str, object]]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, client_id, dict(payload or {})))
+            if command in {"open_quest_navigator", "open_location_navigator"}:
+                return InjectorResult(True, '{"submitted":true}', client_id)
+            if command == "navigator_select_target":
+                return InjectorResult(
+                    True,
+                    '{"message":"navigator_target_selected","selected":true}',
+                    client_id,
+                )
+            if command == "navigator_go":
+                return InjectorResult(
+                    True,
+                    '{"message":"navigator_go_submitted","submitted":true}',
+                    client_id,
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "open_quest_navigator",
+            metadata={"target": "Дикий предел"},
+            dry_run=False,
+        )
+    )
+    assert sink.execute(
+        ActionRequest(
+            "open_location_navigator",
+            metadata={"target": "Курганы бренности"},
+            dry_run=False,
+        )
+    )
+    assert sink.execute(
+        ActionRequest(
+            "navigator_select_target",
+            metadata={
+                "target": "Курганы бренности",
+                "navigator_client_id": "child-client",
+                "search_delay_ms": 250,
+                "route_delay_ms": 350,
+            },
+            dry_run=False,
+        )
+    )
+    assert sink.execute(
+        ActionRequest(
+            "navigator_go",
+            metadata={"target": "Дикий предел", "navigator_client_id": "child-client"},
+            dry_run=False,
+        )
+    )
+
+    assert calls == [
+        ("open_quest_navigator", "parent-client", {"target": "Дикий предел"}),
+        ("open_location_navigator", "parent-client", {}),
+        (
+            "navigator_select_target",
+            "child-client",
+            {
+                "target": "Курганы бренности",
+                "kind": "location",
+                "searchDelayMs": 250,
+                "routeDelayMs": 350,
+            },
+        ),
+        ("navigator_go", "child-client", {"expectedTarget": "Дикий предел"}),
+    ]

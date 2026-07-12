@@ -20,7 +20,7 @@ Browser control panel:
 ```bash
 cd /path/to/troecarstvie-antibot-cv
 source .venv/bin/activate
-python -m src.antibot_cv.automation.controller control-server --config config/automation.local.json
+python -m src.antibot_cv.automation.controller control-server --config config/automation.local.json --live
 ```
 
 On Windows after running `setup_windows.cmd`, start the server with:

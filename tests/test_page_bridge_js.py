@@ -33,6 +33,7 @@ function setupBridge(finished) {
 
   root.top = root;
   root.window = root;
+  root.setTimeout = setTimeout;
   root.addEventListener = (type, callback) => { listeners[type] = callback; };
   root.removeEventListener = () => {};
   root.postMessage = (message) => { messages.push(message); };
@@ -55,11 +56,15 @@ function setupBridge(finished) {
       },
     },
   };
-  fightWin.useSkill = (slot) => { fightWin.usedSlot = slot; };
+  fightWin.useSkill = (slot) => {
+    fightWin.usedSlot = slot;
+    fightWin.fight.model.totalDmg += 1;
+    return true;
+  };
 
   vm.runInNewContext(source, { window: root, console });
 
-  function command(type, payload = {}) {
+  async function command(type, payload = {}) {
     messages.length = 0;
     listeners.message({
       source: root,
@@ -69,6 +74,10 @@ function setupBridge(finished) {
         command: { type, payload },
       },
     });
+    const deadline = Date.now() + 1500;
+    while (!messages.length && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     assert.strictEqual(messages.length, 1);
     return {
       ok: messages[0].ok,
@@ -80,26 +89,815 @@ function setupBridge(finished) {
   return { command };
 }
 
+;(async () => {
 const finished = setupBridge(true);
-const finishedSnapshot = finished.command("battle_snapshot");
+const finishedSnapshot = await finished.command("battle_snapshot");
 assert.strictEqual(finishedSnapshot.message.hasFight, false);
 assert.strictEqual(finishedSnapshot.message.rawHasFight, true);
 assert.strictEqual(finishedSnapshot.message.finished, true);
 assert.strictEqual(finishedSnapshot.message.useSkillAvailable, false);
 
-const finishedUseSkill = finished.command("use_skill_slot", { slot: 2 });
+const finishedUseSkill = await finished.command("use_skill_slot", { slot: 2 });
 assert.strictEqual(finishedUseSkill.ok, false);
 assert.strictEqual(finishedUseSkill.message.message, "fight_finished");
 
 const active = setupBridge(false);
-const activeSnapshot = active.command("battle_snapshot");
+const activeSnapshot = await active.command("battle_snapshot");
 assert.strictEqual(activeSnapshot.message.hasFight, true);
 assert.strictEqual(activeSnapshot.message.finished, false);
 assert.strictEqual(activeSnapshot.message.useSkillAvailable, true);
 
-const activeUseSkill = active.command("use_skill_slot", { slot: 2 });
+const activeUseSkill = await active.command("use_skill_slot", { slot: 2, verifyTimeoutMs: 250 });
 assert.strictEqual(activeUseSkill.ok, true);
 assert.strictEqual(activeUseSkill.usedSlot, 2);
+assert.strictEqual(activeUseSkill.message.message, "useSkill_confirmed");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_reports_and_uses_battle_items_by_slot_or_name() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/main.php" },
+  frames: [],
+  document: { title: "", querySelectorAll() { return []; } },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  setTimeout,
+};
+root.top = root;
+root.window = root;
+const fightWin = {
+  name: "main",
+  location: { href: "https://3kingdoms.ru/fight.php?1" },
+  frames: [],
+  fight: {
+    model: {
+      finished: false,
+      fightState: 1,
+      oppId: 123,
+      myTurn: true,
+      enabledControl: true,
+      abilities: { all: [{ id: -4626, slot: 2, name: "skill" }] },
+      items: [
+        { id: 101, slot: 5, name: "Малый бурдюк жизни", ready: true, cooldown: 0, count: 2 },
+        { id: 102, slot: 6, name: "Малый бурдюк удали", disabled: false, cooldown: 0, count: 2 },
+      ],
+    },
+  },
+  useItemSlot(slot) {
+    this.usedItemSlot = slot;
+    const item = this.fight.model.items.find((candidate) => candidate.slot === slot);
+    item.count -= 1;
+  },
+};
+root.frames = [fightWin];
+
+vm.runInNewContext(source, { window: root, console });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`,
+      token: "token-1",
+      command: { type, payload },
+    },
+  });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+;(async () => {
+const snapshot = await command("battle_snapshot");
+assert.strictEqual(snapshot.ok, true);
+assert.strictEqual(snapshot.message.items.length, 2);
+assert.deepStrictEqual(snapshot.message.items.map((item) => item.name), [
+  "Малый бурдюк жизни",
+  "Малый бурдюк удали",
+]);
+
+const bySlot = await command("use_battle_item", { kind: "health", slots: [5], verifyDelayMs: 1 });
+assert.strictEqual(bySlot.ok, true);
+assert.strictEqual(bySlot.message.message, "battle_item_used");
+assert.strictEqual(bySlot.message.item.name, "Малый бурдюк жизни");
+assert.strictEqual(bySlot.message.method, "useItemSlot");
+assert.deepStrictEqual(bySlot.message.args, [5]);
+assert.strictEqual(fightWin.usedItemSlot, 5);
+assert.strictEqual(bySlot.message.evidence.itemChanged, true);
+
+const byName = await command("use_battle_item", { kind: "prowess", names: ["бурдюк удали"], verifyDelayMs: 1 });
+assert.strictEqual(byName.ok, true);
+assert.strictEqual(byName.message.item.slot, 6);
+assert.strictEqual(byName.message.method, "useItemSlot");
+assert.deepStrictEqual(byName.message.args, [6]);
+assert.strictEqual(fightWin.usedItemSlot, 6);
+assert.strictEqual(byName.message.evidence.itemChanged, true);
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_treats_positive_ability_ids_as_battle_items() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/main.php" },
+  frames: [],
+  document: { title: "", querySelectorAll() { return []; } },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  setTimeout,
+};
+root.top = root;
+root.window = root;
+const fightWin = {
+  name: "main",
+  location: { href: "https://3kingdoms.ru/fight.php?1" },
+  frames: [],
+  document: { title: "", querySelectorAll() { return []; } },
+  fight: {
+    model: {
+      finished: false,
+      fightState: 1,
+      oppId: 123,
+      myTurn: true,
+      enabledControl: true,
+      abilities: {
+        all: [
+          { id: -4626, slot: 2, name: "Возмездие I", ready: true, cooldown: 0 },
+          { id: 438, slot: 5, name: "Малый бурдюк жизни", ready: true, cooldown: 0, count: 2 },
+        ],
+      },
+    },
+  },
+  useSkill(slot) {
+    this.usedSlot = slot;
+    const entry = this.fight.model.abilities.all.find((candidate) => candidate.slot === slot);
+    if (entry && entry.id > 0) entry.count -= 1;
+    return true;
+  },
+};
+root.frames = [fightWin];
+
+vm.runInNewContext(source, { window: root, console });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`,
+      token: "token-1",
+      command: { type, payload },
+    },
+  });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+;(async () => {
+const snapshot = await command("battle_snapshot");
+assert.strictEqual(snapshot.message.items.length, 1);
+assert.strictEqual(snapshot.message.items[0].id, 438);
+assert.strictEqual(snapshot.message.items[0].quantity, 2);
+
+const used = await command("use_battle_item", { kind: "health", slots: [5], verifyDelayMs: 1 });
+assert.strictEqual(used.ok, true);
+assert.strictEqual(used.message.message, "battle_item_used");
+assert.strictEqual(used.message.method, "useSkill");
+assert.deepStrictEqual(used.message.args, [5]);
+assert.strictEqual(fightWin.usedSlot, 5);
+assert.strictEqual(used.message.evidence.itemChanged, true);
+assert.strictEqual(used.message.beforeResource.candidates, undefined);
+assert.strictEqual(used.message.afterResource.candidates, undefined);
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_state_snapshot_reads_player_without_mutating_page() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let mutationCount = 0;
+
+function element(tag, className, text) {
+  return {
+    tagName: tag,
+    id: "",
+    className,
+    textContent: text,
+    innerText: text,
+    parentElement: null,
+    getAttribute(name) {
+      if (name === "class") return className;
+      return null;
+    },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+}
+
+const hp = element("DIV", "b-control-lvl__hp", "Жизнь 100%");
+const mp = element("DIV", "b-control-lvl__mp", "Удаль 87.5%");
+const control = element("DIV", "b-control-lvl", "5 v3g45 Жизнь 100% Удаль 87.5% Опыт 12.5% Слава 71.3%");
+hp.parentElement = control;
+mp.parentElement = control;
+
+const mainDocument = {
+  title: "Квесты",
+  scripts: [],
+  body: { innerText: control.innerText, textContent: control.textContent },
+  documentElement: { innerHTML: control.innerText },
+  querySelector(selector) {
+    if (selector.includes("control-lvl__hp")) return hp;
+    if (selector.includes("control-lvl__mp")) return mp;
+    if (selector.includes("control-lvl")) return control;
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "*") return [control, hp, mp];
+    return [];
+  },
+};
+
+const mainWin = {
+  name: "main",
+  location: { href: "https://3kingdoms.ru/user_quest.php?mode=started" },
+  frames: [],
+  document: mainDocument,
+};
+const mainFrame = {
+  name: "main_frame",
+  location: { href: "https://3kingdoms.ru/main_frame.php" },
+  frames: [mainWin],
+  document: { title: "", body: { innerText: "" }, documentElement: { innerHTML: "" }, querySelectorAll() { return []; }, querySelector() { return null; } },
+  processMenu() { mutationCount += 1; },
+};
+mainFrame.frames.main = mainWin;
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/main.php" },
+  frames: [mainFrame],
+  document: { title: "", body: { innerText: "" }, documentElement: { innerHTML: "" }, querySelectorAll() { return []; }, querySelector() { return null; } },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  huntAttack() { mutationCount += 1; },
+};
+root.frames.main_frame = mainFrame;
+root.top = root;
+root.window = root;
+const deepHuntBranch = { nested: { nested: { nested: { value: 1 } } } };
+root.getHuntApp = () => ({
+  moduleName: "hunt",
+  model: { ready: true, botCount: 2, deepHuntBranch },
+  controller: { started: true, timeout: 2000, deepHuntBranch },
+  deepHuntBranch,
+});
+
+vm.runInNewContext(source, { window: root, console });
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`,
+    token: "state-token",
+    command: { type: "state_snapshot", payload: {} },
+  },
+});
+
+assert.strictEqual(messages.length, 1);
+assert.strictEqual(messages[0].ok, true);
+const result = JSON.parse(messages[0].message);
+assert.strictEqual(result.schemaVersion, 1);
+assert.ok(result.snapshotId);
+assert.ok(result.generatedAt);
+assert.strictEqual(result.sections.player.status, "available");
+assert.strictEqual(result.sections.player.data.name, "v3g45");
+assert.strictEqual(result.sections.player.data.level, 5);
+assert.strictEqual(result.sections.player.data.xpPercent, 12.5);
+assert.strictEqual(result.sections.player.data.hpPercent, 100);
+assert.strictEqual(result.sections.player.data.prowessPercent, 87.5);
+assert.strictEqual(result.sections.location.data.pageKind, "quests");
+assert.strictEqual(result.sections.deathRevive.data.dead, false);
+assert.strictEqual(result.sections.hunt.data.hasHunt, true);
+assert.ok(JSON.stringify(result.sections.hunt.data).length < 5000);
+assert.strictEqual(result.sections.hunt.data.hunt.deepHuntBranch, undefined);
+assert.strictEqual(result.sections.quests.status, "available");
+assert.strictEqual(result.sections.quests.data.loadStatus, "loaded");
+assert.strictEqual(result.sections.quests.data.snapshotId, result.snapshotId);
+assert.strictEqual(result.sections.shopInventory.status, "not_loaded");
+assert.strictEqual(mutationCount, 0);
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_marks_cancelable_quest_as_active_combat_observation() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const title = { innerText: "Охота на волка", textContent: "Охота на волка" };
+const routeMarker = { getAttribute(name) { return name === "alt" ? "Проложить путь" : null; } };
+const route = {
+  textContent: "Лесная опушка", innerText: "Лесная опушка",
+  getAttribute(name) { return name === "title" ? "Проложить путь" : name === "href" ? "#" : null; },
+  querySelectorAll(selector) { return selector === "img" ? [routeMarker] : []; },
+};
+const container = {
+  innerText: "Охота на волка Текущая цель: Убить Волка Награда: опыт Отказаться",
+  textContent: "Охота на волка Текущая цель: Убить Волка Награда: опыт Отказаться",
+  querySelector(selector) { return selector === ".npc-point__title" ? title : null; },
+  querySelectorAll(selector) { return selector === "a" ? [route] : []; },
+};
+const cancel = {
+  parentElement: container,
+  getAttribute(name) { return name === "href" ? "user_quest.php?action=cancel&ref=91" : null; },
+  closest(selector) { return selector === "table" ? container : null; },
+};
+const document = {
+  title: "Квесты",
+  body: { innerText: container.innerText, textContent: container.textContent },
+  querySelector() { return null; },
+  querySelectorAll(selector) {
+    if (selector.includes("action=cancel")) return [cancel];
+    if (selector === "*") return [];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/user_quest.php?mode=started" },
+  frames: [], document, setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`, token: "quests",
+    command: { type: "state_snapshot", payload: { include: ["quests"] } },
+  },
+});
+assert.strictEqual(messages.length, 1);
+const result = JSON.parse(messages[0].message);
+const section = result.sections.quests;
+assert.strictEqual(section.data.loadStatus, "loaded");
+assert.strictEqual(section.data.snapshotId, result.snapshotId);
+assert.strictEqual(section.data.activeCount, 1);
+assert.strictEqual(section.data.items[0].id, "91");
+assert.strictEqual(section.data.items[0].status, "active");
+assert.strictEqual(section.data.items[0].objectiveKind, "combat");
+assert.strictEqual(section.data.items[0].navigation[0].text, "Лесная опушка");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_reads_area_name_from_heading_before_realm_label() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const text = "\n\tКурганы бренности\n\tЦарство: Артания\nКуда хотите перейти?";
+const document = {
+  title: "",
+  body: { innerText: text, textContent: text },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/area.php" }, frames: [], document,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`, token: "location",
+    command: { type: "state_snapshot", payload: { include: ["location"] } },
+  },
+});
+assert.strictEqual(messages.length, 1);
+assert.strictEqual(messages[0].ok, true);
+const result = JSON.parse(messages[0].message);
+assert.strictEqual(result.sections.location.data.pageKind, "area");
+assert.strictEqual(result.sections.location.data.semanticName, "Курганы бренности");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_reads_and_submits_guarded_navigator_route() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let goClicks = 0;
+
+function input(attributes, value, visible = true) {
+  return {
+    value,
+    textContent: "",
+    innerText: "",
+    offsetWidth: visible ? 80 : 0,
+    offsetHeight: visible ? 24 : 0,
+    getAttribute(name) { return attributes[name] || null; },
+    querySelectorAll() { return []; },
+    click() { goClicks += 1; },
+  };
+}
+
+const compass = input({ name: "compassInput" }, "Дикий предел");
+const go = input({ type: "button" }, "Дойти");
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/navigator.php?name=test" },
+  frames: [],
+  document: {
+    title: "Навигатор",
+    body: { innerText: "Путь займет 2 перехода", textContent: "Путь займет 2 перехода" },
+    querySelectorAll(selector) { return selector === "input,button" ? [compass, go] : []; },
+  },
+  getComputedStyle() { return { display: "block", visibility: "visible" }; },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root;
+root.window = root;
+
+vm.runInNewContext(source, { window: root, console });
+
+function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`,
+      token: "navigator-token",
+      command: { type, payload },
+    },
+  });
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+const snapshot = command("navigator_snapshot");
+assert.strictEqual(snapshot.ok, true);
+assert.ok(snapshot.message.snapshotId);
+assert.ok(snapshot.message.generatedAt);
+assert.strictEqual(snapshot.message.target, "Дикий предел");
+assert.strictEqual(snapshot.message.currentLocation, false);
+assert.strictEqual(snapshot.message.hasRoute, true);
+assert.strictEqual(snapshot.message.routeTransitions, 2);
+
+const mismatch = command("navigator_go", { expectedTarget: "Прокаленное плато" });
+assert.strictEqual(mismatch.ok, false);
+assert.strictEqual(mismatch.message.message, "navigator_target_mismatch");
+assert.strictEqual(goClicks, 0);
+
+const submitted = command("navigator_go", { expectedTarget: "Дикий предел" });
+assert.strictEqual(submitted.ok, true);
+assert.strictEqual(submitted.message.submitted, true);
+assert.strictEqual(goClicks, 1);
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_selects_one_exact_location_before_route_submission() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let bodyText = "";
+let candidateClicks = 0;
+const heading = { innerText: "Локации", textContent: "Локации", parentElement: null, children: [] };
+const section = { innerText: "", textContent: "", parentElement: null, children: [heading] };
+heading.parentElement = section;
+const compass = {
+  value: "", innerText: "", textContent: "", offsetWidth: 450, offsetHeight: 24,
+  getAttribute(name) { return name === "name" ? "compassInput" : null; },
+  querySelectorAll() { return []; }, focus() {}, dispatchEvent() {},
+};
+const routeButton = {
+  value: "Проложить маршрут", innerText: "", textContent: "", offsetWidth: 194, offsetHeight: 24,
+  getAttribute() { return null; }, querySelectorAll() { return []; }, click() {},
+};
+const candidate = {
+  innerText: "Курганы бренности", textContent: "Курганы бренности", parentElement: section,
+  offsetWidth: 300, offsetHeight: 20, children: [], getAttribute() { return null; }, querySelectorAll() { return []; },
+  click() { candidateClicks += 1; compass.value = "Курганы бренности"; bodyText = "Путь займет 3 перехода"; },
+};
+const document = {
+  title: "Навигатор",
+  body: {
+    get innerText() { return bodyText; },
+    get textContent() { return bodyText; },
+  },
+  querySelectorAll(selector) {
+    if (selector === "input,button") return [compass, routeButton];
+    if (selector === "div,li,a,button,[role='option']") return [heading, candidate];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/navigator.php" }, frames: [], document, setTimeout,
+  getComputedStyle() { return { display: "block", visibility: "visible" }; },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+(async () => {
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`, token: "select-location",
+      command: { type: "navigator_select_target", payload: { target: "Курганы бренности", kind: "location", searchDelayMs: 1, routeDelayMs: 1 } },
+    },
+  });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  assert.strictEqual(messages[0].ok, true);
+  const result = JSON.parse(messages[0].message);
+  assert.strictEqual(result.message, "navigator_target_selected");
+  assert.strictEqual(result.target, "Курганы бренности");
+  assert.strictEqual(result.snapshot.routeTransitions, 3);
+  assert.strictEqual(result.snapshot.visibleGoButtonCount, 1);
+  assert.strictEqual(candidateClicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_only_the_unique_location_compass_control() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let clicks = 0;
+const compass = { click() { clicks += 1; } };
+const document = {
+  body: { innerText: "", textContent: "" },
+  querySelectorAll(selector) { return selector === "a[data-command='showExternalNavigate']" ? [compass] : []; },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [], document,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`, token: "open-compass",
+    command: { type: "open_location_navigator", payload: {} },
+  },
+});
+assert.strictEqual(messages.length, 1);
+assert.strictEqual(messages[0].ok, true);
+assert.strictEqual(JSON.parse(messages[0].message).message, "location_navigator_opened");
+assert.strictEqual(clicks, 1);
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_quest_navigator_by_location_label() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let clicks = 0;
+const marker = { getAttribute(name) { return name === "alt" ? "Проложить путь" : null; } };
+const link = {
+  textContent: "Дикий предел",
+  innerText: "Дикий предел",
+  getAttribute(name) { return name === "href" ? "#" : null; },
+  querySelectorAll(selector) { return selector === "img" ? [marker] : []; },
+  click() { clicks += 1; },
+};
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/user_quest.php?mode=started" },
+  frames: [],
+  document: {
+    title: "Квесты",
+    body: { innerText: "Текущая цель: Уничтожьте мобов в Диком пределе", textContent: "" },
+    querySelectorAll(selector) { return selector === "a" ? [link] : []; },
+  },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root;
+root.window = root;
+
+vm.runInNewContext(source, { window: root, console });
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`,
+    token: "quest-route-token",
+    command: { type: "open_quest_navigator", payload: { target: "Дикий предел" } },
+  },
+});
+assert.strictEqual(messages.length, 1);
+assert.strictEqual(messages[0].ok, true);
+const result = JSON.parse(messages[0].message);
+assert.strictEqual(result.target, "Дикий предел");
+assert.strictEqual(clicks, 1);
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_quests_when_sidebar_label_is_only_image_alt() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let clicks = 0;
+const icon = { getAttribute(name) { return name === "alt" ? "квесты" : null; } };
+const link = {
+  innerText: "",
+  textContent: "",
+  getAttribute(name) { return name === "href" ? "#" : null; },
+  querySelectorAll(selector) { return selector === "img[alt],img[title]" ? [icon] : []; },
+  closest() { return this; },
+  click() {
+    clicks += 1;
+    root.location.href = "https://3kingdoms.ru/user_quest.php?mode=started";
+  },
+};
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/main.php" },
+  frames: [],
+  document: {
+    title: "",
+    querySelectorAll(selector) { return selector === "a,button,[onclick]" ? [link] : []; },
+  },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  setTimeout,
+};
+root.top = root;
+root.window = root;
+
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+(async () => {
+listeners.message({
+  source: root,
+  data: {
+    source: `antibot-cv-content:${version}`,
+    token: "open-quests-token",
+    command: { type: "open_quests", payload: { verifyTimeoutMs: 250 } },
+  },
+});
+const deadline = Date.now() + 1000;
+while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+assert.strictEqual(messages.length, 1);
+assert.strictEqual(messages[0].ok, true);
+assert.strictEqual(JSON.parse(messages[0].message).message, "quests_opened_confirmed");
+assert.strictEqual(clicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
 """
     result = subprocess.run(
         ["node", "-e", script],
@@ -140,6 +938,7 @@ root.hunt = {
         { id: 1, name: "north bot", shortName: "north bot", x: 760, y: 120, fightId: 0, agrforbid: false, isBot: true },
         { id: 2, name: "south bot", shortName: "south bot", lvl: 4, x: 760, y: 1260, fightId: 0, agrforbid: false, isBot: true },
         { id: 3, name: "south named bot[7]", shortName: "south named bot[7]", x: 770, y: 1300, fightId: 0, agrforbid: false, isBot: true },
+        { id: 4, name: "Волколак-живодер [5]", shortName: "Волколак-живодер [5]", lvl: 5, x: 780, y: 1320, fightId: 0, agrforbid: false, isBot: true },
       ],
     },
   },
@@ -185,7 +984,7 @@ assert.strictEqual(moved.message.direction, "south");
 assert.strictEqual(root.hunt.view.compass.selected, "south");
 assert.strictEqual(root.hunt.view.content.lastScroll.x, root.hunt.view.viewBounds.x);
 assert.strictEqual(root.hunt.view.content.lastScroll.y, root.hunt.view.viewBounds.y);
-assert.strictEqual(moved.message.targetCount, 2);
+assert.strictEqual(moved.message.targetCount, 3);
 const levelFromField = moved.message.targets.find((target) => target.botId === 2);
 assert.strictEqual(levelFromField.level, 4);
 assert.strictEqual(levelFromField.levelSource, "lvl");
@@ -195,6 +994,9 @@ assert.strictEqual(levelFromName.levelSource, "name_brackets");
 const onlyLevelSeven = command("visible_hunt_targets", { margin: 35, allowedLevels: [7] });
 assert.strictEqual(onlyLevelSeven.message.targets.length, 1);
 assert.strictEqual(onlyLevelSeven.message.targets[0].botId, 3);
+const questInflection = command("visible_hunt_targets", { margin: 35, allowedLevels: [5], names: ["Волколаков-живодеров"] });
+assert.strictEqual(questInflection.message.targets.length, 1);
+assert.strictEqual(questInflection.message.targets[0].botId, 4);
 """
     result = subprocess.run(
         ["node", "-e", script],
@@ -2038,5 +2840,472 @@ function command(type, payload = {}) {
         capture_output=True,
         check=False,
     )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_revives_only_explicit_free_option_and_verifies_alive() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let dead = true;
+let reviveClicks = 0;
+
+function element(className, text) {
+  return {
+    className, textContent: text, innerText: text, value: "", parentElement: null,
+    getAttribute(name) { return name === "class" ? className : null; },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+  };
+}
+const hp = element("b-control-lvl__hp", "Жизнь 100%");
+const mp = element("b-control-lvl__mp", "Удаль 100%");
+const control = element("b-control-lvl", "5 hero Жизнь 100% Удаль 100% Опыт 10%");
+hp.parentElement = control; mp.parentElement = control;
+const revive = element("revive", "Воскреснуть бесплатно");
+revive.parentElement = element("revive-wrap", "Бесплатно воскреснуть");
+revive.click = () => { reviveClicks += 1; dead = false; };
+
+const playerDocument = {
+  title: "", scripts: [], body: { innerText: control.innerText, textContent: control.textContent },
+  documentElement: { innerHTML: control.innerText },
+  querySelector(selector) {
+    if (selector.includes("control-lvl__hp")) return hp;
+    if (selector.includes("control-lvl__mp")) return mp;
+    if (selector.includes("control-lvl")) return control;
+    return null;
+  },
+  querySelectorAll(selector) { return selector === "*" ? [control, hp, mp] : []; },
+};
+const deathDocument = {
+  title: "", scripts: [], documentElement: { innerHTML: "" },
+  body: {
+    get innerText() { return dead ? "Вы погибли. Бесплатно воскреснуть" : "Персонаж жив"; },
+    get textContent() { return this.innerText; },
+  },
+  querySelector() { return null; },
+  querySelectorAll(selector) { return dead && selector.includes("button") ? [revive] : []; },
+};
+const mainWin = { name: "main", location: { href: "https://3kingdoms.ru/area.php" }, frames: [], document: deathDocument };
+const mainFrame = { name: "main_frame", location: { href: "https://3kingdoms.ru/main_frame.php" }, frames: [mainWin], document: deathDocument };
+mainFrame.frames.main = mainWin;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [mainFrame], document: playerDocument,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); }, setTimeout,
+};
+root.frames.main_frame = mainFrame; root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: { source: `antibot-cv-content:${version}`, token: "token", command: { type, payload } } });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const before = await command("state_snapshot", { include: ["deathRevive"] });
+  assert.strictEqual(before.message.sections.deathRevive.data.dead, true);
+  assert.strictEqual(before.message.sections.deathRevive.data.freeReviveAvailable, true);
+  const result = await command("revive_free", { expectedCharacter: "hero", verifyDelayMs: 1 });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.message.message, "free_revive_confirmed");
+  assert.strictEqual(result.message.confirmed, true);
+  assert.strictEqual(reviveClicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_detects_top_level_resurrection_yes_popup_without_cost() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let dead = true;
+let reviveClicks = 0;
+
+function basicElement(className, text) {
+  return {
+    className, textContent: text, innerText: text, value: "", parentElement: null, disabled: false,
+    getAttribute(name) { return name === "class" ? className : null; },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+  };
+}
+const control = basicElement("b-control-lvl", "");
+Object.defineProperty(control, "innerText", { get() { return `5 hero Жизнь ${dead ? 0 : 100}% Удаль ${dead ? 0 : 100}% Опыт 10%`; } });
+Object.defineProperty(control, "textContent", { get() { return control.innerText; } });
+const hp = basicElement("b-control-lvl__hp", "");
+Object.defineProperty(hp, "innerText", { get() { return `Жизнь ${dead ? 0 : 100}%`; } });
+Object.defineProperty(hp, "textContent", { get() { return hp.innerText; } });
+const mp = basicElement("b-control-lvl__mp", "");
+Object.defineProperty(mp, "innerText", { get() { return `Удаль ${dead ? 0 : 100}%`; } });
+Object.defineProperty(mp, "textContent", { get() { return mp.innerText; } });
+hp.parentElement = control; mp.parentElement = control;
+
+const prompt = basicElement("popup-confirm", "Желаете воскреснуть? Да нет");
+const yes = basicElement("popup-yes", "Да");
+yes.value = "Да";
+yes.getAttribute = (name) => name === "name" ? "yes" : name === "class" ? "popup-yes" : null;
+yes.parentElement = prompt;
+yes.getBoundingClientRect = () => ({ width: 80, height: 20 });
+yes.click = () => { reviveClicks += 1; dead = false; };
+
+const rootDocument = {
+  title: "", scripts: [], documentElement: { innerHTML: "" },
+  body: {
+    get innerText() { return `${control.innerText} ${dead ? prompt.innerText : ""}`; },
+    get textContent() { return this.innerText; },
+  },
+  querySelector(selector) {
+    if (selector.includes("control-lvl__hp")) return hp;
+    if (selector.includes("control-lvl__mp")) return mp;
+    if (selector.includes("control-lvl")) return control;
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "*") return [control, hp, mp];
+    if (selector.includes("input[type='button']")) return dead ? [yes] : [];
+    return [];
+  },
+};
+const mainDocument = {
+  title: "", scripts: [], documentElement: { innerHTML: "" },
+  body: { innerText: "Лес призраков", textContent: "Лес призраков" },
+  querySelector() { return null; }, querySelectorAll() { return []; },
+};
+const mainWin = { name: "main", location: { href: "https://3kingdoms.ru/area.php?exit=1" }, frames: [], document: mainDocument };
+const mainFrame = { name: "main_frame", location: { href: "https://3kingdoms.ru/main_frame.php" }, frames: [mainWin], document: rootDocument };
+mainFrame.frames.main = mainWin;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [mainFrame], document: rootDocument,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); }, setTimeout,
+};
+root.frames.main_frame = mainFrame; root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: { source: `antibot-cv-content:${version}`, token: "token", command: { type, payload } } });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const before = await command("state_snapshot", { include: ["deathRevive"] });
+  assert.strictEqual(before.message.sections.deathRevive.data.dead, true);
+  assert.strictEqual(before.message.sections.deathRevive.data.freeReviveOptionCount, 1);
+  assert.strictEqual(
+    before.message.sections.deathRevive.data.reviveOptions[0].freeEvidence,
+    "explicit_resurrection_prompt_without_cost"
+  );
+  const result = await command("revive_free", { expectedCharacter: "hero", verifyDelayMs: 1 });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.message.confirmed, true);
+  assert.strictEqual(reviveClicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_uses_native_resurrect_handler_for_canvas_ghost_dialog() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let dead = true;
+let reviveCalls = 0;
+let noticeVisible = false;
+let noticeCloseClicks = 0;
+
+function basicElement(className, getText) {
+  return {
+    className, value: "", parentElement: null, disabled: false,
+    get innerText() { return getText(); },
+    get textContent() { return getText(); },
+    getAttribute(name) { return name === "class" ? className : null; },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+  };
+}
+const control = basicElement("b-control-lvl", () => `5 hero Жизнь ${dead ? 0 : 100}% Удаль ${dead ? 0 : 100}% Опыт 10%`);
+const hp = basicElement("b-control-lvl__hp", () => `Жизнь ${dead ? 0 : 100}%`);
+const mp = basicElement("b-control-lvl__mp", () => `Удаль ${dead ? 0 : 100}%`);
+hp.parentElement = control; mp.parentElement = control;
+const noticeClose = basicElement("notice-close", () => "Закрыть");
+noticeClose.click = () => { noticeCloseClicks += 1; noticeVisible = false; };
+const noticeDocument = {
+  body: { innerText: "Воскрешение Вы воскрешены! Войдите в новую жизнь уверенным шагом победителя! Закрыть" },
+  querySelectorAll() { return noticeVisible ? [noticeClose] : []; },
+};
+const errorFrame = {
+  id: "error",
+  contentDocument: noticeDocument,
+  contentWindow: { document: noticeDocument },
+  getAttribute(name) { return name === "src" && noticeVisible ? "error.php?title=revive" : ""; },
+};
+
+const playerDocument = {
+  title: "", scripts: [], documentElement: { innerHTML: "" },
+  body: {
+    get innerText() { return control.innerText; },
+    get textContent() { return control.textContent; },
+  },
+  querySelector(selector) {
+    if (selector === "iframe#error") return noticeVisible ? errorFrame : null;
+    if (selector.includes("control-lvl__hp")) return hp;
+    if (selector.includes("control-lvl__mp")) return mp;
+    if (selector.includes("control-lvl")) return control;
+    return null;
+  },
+  querySelectorAll(selector) { return selector === "*" ? [control, hp, mp] : []; },
+};
+const areaDocument = {
+  title: "", scripts: [], documentElement: { innerHTML: "" },
+  body: { innerText: "Лес призраков", textContent: "Лес призраков" },
+  querySelector() { return null; }, querySelectorAll() { return []; },
+};
+const mainLocation = {
+  _href: "https://3kingdoms.ru/user.php?mode=personage&submode=backpack",
+  get href() { return this._href; },
+  set href(value) {
+    this._href = String(value);
+    if (this._href.includes("code=RESURRECT")) {
+      reviveCalls += 1;
+      dead = false;
+      noticeVisible = true;
+      this._href = "https://3kingdoms.ru/area.php";
+    } else if (this._href === "/area.php") {
+      this._href = "https://3kingdoms.ru/area.php";
+    }
+  },
+};
+const mainWin = { name: "main", location: mainLocation, frames: [], document: areaDocument };
+const mainFrame = { name: "main_frame", location: { href: "https://3kingdoms.ru/main_frame.php" }, frames: [mainWin], document: playerDocument };
+mainFrame.frames.main = mainWin;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [mainFrame], document: playerDocument,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); }, setTimeout,
+};
+root.frames.main_frame = mainFrame; root.top = root; root.window = root;
+root.browserAPI = { eatAfterResurrection() { throw new Error("must_not_open_inventory"); } };
+root.resurrect = function resurrect() {
+  const endpoint = "/action_run.php?code=RESURRECT&url_success=/area.php&url_error=/area.php";
+  mainWin.location.href = endpoint;
+  root.browserAPI.eatAfterResurrection();
+};
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: { source: `antibot-cv-content:${version}`, token: "token", command: { type, payload } } });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const before = await command("state_snapshot", { include: ["deathRevive"] });
+  assert.strictEqual(before.message.sections.deathRevive.data.dead, true);
+  assert.strictEqual(before.message.sections.deathRevive.data.freeReviveOptionCount, 1);
+  assert.strictEqual(
+    before.message.sections.deathRevive.data.reviveOptions[0].freeEvidence,
+    "native_resurrect_handler_zero_hp_recoverable_page"
+  );
+  const result = await command("revive_free", { expectedCharacter: "hero", verifyDelayMs: 1 });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.message.message, "free_revive_confirmed");
+  assert.strictEqual(result.message.confirmed, true);
+  assert.strictEqual(reviveCalls, 1);
+  assert.strictEqual(result.message.after.data.resurrectionNoticeAvailable, true);
+  const closeResult = await command("close_resurrection_notice", { verifyDelayMs: 1 });
+  assert.strictEqual(closeResult.ok, true);
+  assert.strictEqual(closeResult.message.message, "resurrection_notice_closed");
+  assert.strictEqual(closeResult.message.confirmed, true);
+  assert.strictEqual(noticeCloseClicks, 1);
+  const afterClose = await command("state_snapshot", { include: ["deathRevive"] });
+  assert.strictEqual(afterClose.message.sections.deathRevive.data.resurrectionNoticeAvailable, false);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_attack_requires_observed_postcondition() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const bot = {
+  id: 42, name: "Проверочный моб [5]", shortName: "Проверочный моб", level: 5,
+  x: 40, y: 40, fightId: 0, agrforbid: false, isBot: true,
+};
+const hunt = {
+  model: { bots: { list: [bot] } },
+  view: {
+    width: 100, height: 100, viewBounds: { x: 0, y: 0, w: 100, h: 100 },
+    content: { x: 0, y: 0, bots: { x: 0, y: 0, children: [] } },
+  },
+};
+const main = {
+  name: "main", location: { href: "https://3kingdoms.ru/hunt.php" }, frames: [],
+  document: { title: "", querySelectorAll() { return []; } }, hunt,
+};
+const mainFrame = {
+  name: "main_frame", location: { href: "https://3kingdoms.ru/main_frame.php" },
+  frames: [main], document: { title: "", querySelectorAll() { return []; } },
+};
+mainFrame.frames.main = main;
+let confirmAttack = true;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [mainFrame],
+  document: { title: "", querySelectorAll() { return []; } }, setTimeout,
+  getHuntApp() { return hunt; },
+  huntAttack() { if (confirmAttack) bot.fightId = 777; },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.frames.main_frame = mainFrame; root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(payload) {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: { source: `antibot-cv-content:${version}`, token: "token", command: { type: "attack_visible_bot", payload } },
+  });
+  const deadline = Date.now() + 2000;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const confirmed = await command({ allowedLevels: [5], confirmed: 1, verifyTimeoutMs: 500 });
+  assert.strictEqual(confirmed.ok, true);
+  assert.strictEqual(confirmed.message.message, "huntAttack_confirmed");
+  assert.strictEqual(confirmed.message.target.botId, 42);
+
+  bot.fightId = 0;
+  confirmAttack = false;
+  const unconfirmed = await command({ allowedLevels: [5], confirmed: 1, verifyTimeoutMs: 500 });
+  assert.strictEqual(unconfirmed.ok, false);
+  assert.strictEqual(unconfirmed.message.message, "huntAttack_unconfirmed");
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_open_hunt_requires_observed_navigation() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const main = {
+  name: "main", location: { href: "https://3kingdoms.ru/area.php" }, frames: [],
+  document: { title: "", querySelectorAll() { return []; } },
+};
+let confirmNavigation = true;
+const mainFrame = {
+  name: "main_frame", location: { href: "https://3kingdoms.ru/main_frame.php" },
+  frames: [main], document: { title: "", querySelectorAll() { return []; } },
+  processMenu(id) {
+    assert.strictEqual(id, "b07");
+    if (confirmNavigation) main.location.href = "https://3kingdoms.ru/hunt.php?update_swf=1";
+  },
+};
+mainFrame.frames.main = main;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/main.php" }, frames: [mainFrame],
+  document: { title: "", querySelectorAll() { return []; } }, setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.frames.main_frame = mainFrame; root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command() {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`, token: "token",
+      command: { type: "open_hunt", payload: { verifyTimeoutMs: 250 } },
+    },
+  });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const confirmed = await command();
+  assert.strictEqual(confirmed.ok, true);
+  assert.strictEqual(confirmed.message.message, "processMenu_b07_confirmed");
+
+  main.location.href = "https://3kingdoms.ru/area.php";
+  confirmNavigation = false;
+  const unconfirmed = await command();
+  assert.strictEqual(unconfirmed.ok, false);
+  assert.strictEqual(unconfirmed.message.message, "processMenu_b07_unconfirmed");
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stdout + result.stderr

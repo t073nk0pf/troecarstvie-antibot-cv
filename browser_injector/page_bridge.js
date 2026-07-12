@@ -1,5 +1,5 @@
 (() => {
-  const BRIDGE_VERSION = "2026-07-08-background-fetch";
+  const BRIDGE_VERSION = "2026-07-11-leveling-mvp-v18";
   const CONTENT_SOURCE = `antibot-cv-content:${BRIDGE_VERSION}`;
   const INJECTOR_SOURCE = `antibot-cv-injector:${BRIDGE_VERSION}`;
 
@@ -8,6 +8,7 @@
   }
   window.__antibotCvPageBridgeInstalled = true;
   window.__antibotCvPageBridgeVersion = BRIDGE_VERSION;
+  let stateSnapshotSequence = 0;
 
   const send = (token, ok, message) => {
     const serialized = typeof message === "string" ? message : JSON.stringify(message);
@@ -28,6 +29,27 @@
     }
     return String(value).replace(/\s+/g, " ").trim().slice(0, maxLength);
   };
+
+  const delayMs = (value) =>
+    new Promise((resolve) => {
+      const waitMs = Math.max(0, parseInt(value, 10) || 0);
+      if (!waitMs) {
+        resolve();
+        return;
+      }
+      const root = window.top || window;
+      const schedule =
+        root && typeof root.setTimeout === "function"
+          ? root.setTimeout.bind(root)
+          : typeof setTimeout === "function"
+            ? setTimeout
+            : null;
+      if (!schedule) {
+        resolve();
+        return;
+      }
+      schedule(resolve, waitMs);
+    });
 
   const interestingName = (name) =>
     /hunt|attack|battle|fight|mob|monster|target|click|process|menu|map|move|select|use|exit|cast|ability|slot/i.test(name);
@@ -209,6 +231,76 @@
     cooldown: ability && ability.cooldown != null ? ability.cooldown : null,
   });
 
+  const battleItemSummary = (item) => ({
+    id: item && item.id != null ? item.id : item && item.itemId != null ? item.itemId : null,
+    slot: item && item.slot != null ? item.slot : item && item.slotIndex != null ? item.slotIndex : null,
+    name: safeString(item && (item.name || item.title || item.caption || item.label), 120),
+    ready: item && item.ready != null ? Boolean(item.ready) : null,
+    disabled: item && item.disabled != null ? Boolean(item.disabled) : null,
+    cooldown: item && item.cooldown != null ? item.cooldown : null,
+    quantity:
+      item && item.quantity != null
+        ? item.quantity
+        : item && item.count != null
+          ? item.count
+          : item && item.amount != null
+            ? item.amount
+            : item && item.qty != null
+              ? item.qty
+              : item && item.cnt != null
+                ? item.cnt
+                : null,
+  });
+
+  const asArray = (value) => {
+    if (Array.isArray(value)) {
+      return value;
+    }
+    if (value && typeof value === "object") {
+      return Object.values(value);
+    }
+    return [];
+  };
+
+  const collectBattleItems = (fight) => {
+    const model = fight && fight.model ? fight.model : {};
+    const abilityItems = asArray(model.abilities && model.abilities.all).filter(
+      (entry) => entry && typeof entry === "object" && Number(entry.id) > 0
+    );
+    const sources = [
+      abilityItems,
+      model.items && model.items.all,
+      model.items,
+      model.usables && model.usables.all,
+      model.usables,
+      model.consumables && model.consumables.all,
+      model.consumables,
+      model.artifacts && model.artifacts.all,
+      model.artifacts,
+      model.inventory && model.inventory.all,
+      model.inventory,
+      model.quickItems && model.quickItems.all,
+      model.quickItems,
+    ];
+    const items = [];
+    const seen = new Set();
+    for (const source of sources) {
+      for (const entry of asArray(source)) {
+        if (!entry || typeof entry !== "object") {
+          continue;
+        }
+        const summary = battleItemSummary(entry);
+        const key = `${summary.id}:${summary.slot}:${summary.name}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        items.push(summary);
+      }
+    }
+    return items;
+  };
+
   const fightModelState = (fight) => {
     const model = fight && fight.model ? fight.model : null;
     return {
@@ -235,6 +327,7 @@
         fightHref: "",
         useSkillAvailable: false,
         abilities: [],
+        items: [],
       };
     }
     const fight = item.win.fight || null;
@@ -254,6 +347,7 @@
       fightHref: item.href,
       useSkillAvailable: hasFight && typeof item.win.useSkill === "function",
       abilities,
+      items: collectBattleItems(fight),
     };
   };
 
@@ -324,7 +418,7 @@
     };
   };
 
-  const useSkillSlot = (payload) => {
+  const useSkillSlot = async (payload) => {
     const rawSlot = payload && (payload.slot ?? payload.slotIndex ?? payload.skill_slot);
     const slot = parseInt(rawSlot, 10);
     const preClickDelayMs = Math.max(0, parseInt(payload && payload.preClickDelayMs, 10) || 0);
@@ -350,17 +444,57 @@
     if (!ability) {
       return { ok: false, message: "ability_slot_missing", slot, snapshot: battleSnapshot() };
     }
+    const abilityBefore = abilitySummary(ability);
+    if (abilityBefore.disabled === true || abilityBefore.ready === false || Number(abilityBefore.cooldown) > 0) {
+      return { ok: false, message: "ability_not_ready", slot, ability: abilityBefore, snapshot };
+    }
+    const beforeResource = compactResourceSnapshot(resourceSnapshot());
+    const verifyTimeoutMs = Math.max(200, Math.min(2500, parseInt(payload && payload.verifyTimeoutMs, 10) || 900));
+    await delayMs(preClickDelayMs);
     try {
-      item.win.useSkill(slot);
+      const returnValue = item.win.useSkill(slot);
+      const deadline = Date.now() + verifyTimeoutMs;
+      let after = battleSnapshot();
+      let afterResource = compactResourceSnapshot(resourceSnapshot());
+      let abilityAfter = Array.isArray(after.abilities)
+        ? after.abilities.find((entry) => entry && entry.slot === slot) || null
+        : null;
+      const changed = () => {
+        if (returnValue === true || !after.hasFight || after.finished) return true;
+        for (const name of ["fightState", "oppId", "myTurn", "enabledControl", "totalDmg"]) {
+          if (snapshot[name] !== after[name]) return true;
+        }
+        for (const name of ["ready", "disabled", "cooldown"]) {
+          if (abilityAfter && abilityBefore[name] !== abilityAfter[name]) return true;
+        }
+        return beforeResource.healthPercent !== afterResource.healthPercent ||
+          beforeResource.prowessPercent !== afterResource.prowessPercent;
+      };
+      while (!changed() && Date.now() < deadline) {
+        await delayMs(100);
+        after = battleSnapshot();
+        afterResource = compactResourceSnapshot(resourceSnapshot());
+        abilityAfter = Array.isArray(after.abilities)
+          ? after.abilities.find((entry) => entry && entry.slot === slot) || null
+          : null;
+      }
+      const confirmed = changed();
       return {
-        ok: true,
-        message: "useSkill",
+        ok: confirmed,
+        message: confirmed ? "useSkill_confirmed" : "useSkill_unconfirmed",
         slot,
         preClickDelayMs,
         clickHoldMs,
+        verifyTimeoutMs,
         fightPath: item.path,
         fightHref: item.href,
-        ability: abilitySummary(ability),
+        ability: abilityBefore,
+        abilityAfter,
+        returnValue: returnValue === true ? true : returnValue === false ? false : null,
+        before: snapshot,
+        after,
+        beforeResource,
+        afterResource,
       };
     } catch (error) {
       return {
@@ -370,6 +504,252 @@
         snapshot: battleSnapshot(),
       };
     }
+  };
+
+  const normalizeNeedles = (values) =>
+    (Array.isArray(values) ? values : values == null || values === "" ? [] : [values])
+      .map((value) => safeString(value, 120).toLowerCase())
+      .filter(Boolean);
+
+  const normalizeSlots = (values) =>
+    (Array.isArray(values) ? values : values == null || values === "" ? [] : [values])
+      .map((value) => parseInt(value, 10))
+      .filter((value, index, array) => Number.isFinite(value) && value >= 0 && array.indexOf(value) === index);
+
+  const battleItemMatches = (item, itemId, slots, names) => {
+    if (!item) {
+      return false;
+    }
+    if (itemId !== "" && String(item.id) === itemId) {
+      return true;
+    }
+    const slot = parseInt(item.slot, 10);
+    if (Number.isFinite(slot) && slots.includes(slot)) {
+      return true;
+    }
+    const haystack = `${item.name} ${item.id} ${item.slot}`.toLowerCase();
+    return names.some((needle) => haystack.includes(needle));
+  };
+
+  const callBattleItemMethod = async (owner, methodNames, slot, item) => {
+    if (!owner) {
+      return null;
+    }
+    const itemId = item && item.id != null ? item.id : null;
+    for (const name of methodNames) {
+      let fn = null;
+      try {
+        fn = owner[name];
+      } catch (_) {}
+      if (typeof fn !== "function") {
+        continue;
+      }
+      const argsList = [];
+      if (name === "useSkill" && slot != null) {
+        argsList.push([slot]);
+      }
+      if (/slot/i.test(name) && slot != null) {
+        argsList.push([slot]);
+      }
+      if (name !== "useSkill" && !/slot/i.test(name) && itemId != null) {
+        argsList.push([itemId]);
+      }
+      if (slot != null) {
+        argsList.push([slot]);
+      }
+      if (itemId != null) {
+        argsList.push([itemId]);
+      }
+      if (slot != null && itemId != null) {
+        argsList.push([slot, itemId], [itemId, slot]);
+      }
+      const uniqueArgs = argsList.filter(
+        (args, index, all) => all.findIndex((candidate) => JSON.stringify(candidate) === JSON.stringify(args)) === index
+      );
+      for (const args of uniqueArgs) {
+        try {
+          let result = fn.apply(owner, args);
+          if (result && typeof result.then === "function") {
+            const timeoutMarker = {};
+            result = await Promise.race([result, delayMs(2000).then(() => timeoutMarker)]);
+            if (result === timeoutMarker) {
+              continue;
+            }
+          }
+          if (result === false) {
+            continue;
+          }
+          return { ok: true, method: name, args, result: safeString(result, 120) };
+        } catch (_) {}
+      }
+    }
+    return null;
+  };
+
+  const clickBattleItemElement = (item, slots, names) => {
+    const fightItem = findFightWindow();
+    const doc = fightItem && fightItem.win && fightItem.win.document ? fightItem.win.document : null;
+    if (!doc) {
+      return null;
+    }
+    const elements = Array.from(doc.querySelectorAll("[data-slot],[data-index],[title],[alt],[onclick],button,a,img,span,div")).slice(0, 1500);
+    let best = null;
+    for (const el of elements) {
+      const text = `${elementText(el)} ${attr(el, "title")} ${attr(el, "alt")} ${attr(el, "src")} ${attr(el, "style")} ${attr(el, "onclick")}`.toLowerCase();
+      const rawSlot = attr(el, "data-slot") || attr(el, "data-index") || attr(el, "slot");
+      const slot = parseInt(rawSlot, 10);
+      const slotMatch = Number.isFinite(slot) && slots.includes(slot);
+      const nameMatch = names.some((needle) => text.includes(needle));
+      if (!slotMatch && !nameMatch) {
+        continue;
+      }
+      const clickable = clickableElement(el);
+      if (!clickable || typeof clickable.click !== "function") {
+        continue;
+      }
+      best = { el: clickable, slot: Number.isFinite(slot) ? slot : null, nameMatch, slotMatch };
+      break;
+    }
+    if (!best) {
+      return null;
+    }
+    try {
+      best.el.click();
+      return {
+        ok: true,
+        method: "dom_click",
+        slot: best.slot,
+        item,
+        nameMatch: best.nameMatch,
+        slotMatch: best.slotMatch,
+      };
+    } catch (error) {
+      return { ok: false, message: `dom_click_error:${safeString(error && error.message ? error.message : error, 200)}` };
+    }
+  };
+
+  const battleItemPostcondition = (kind, beforeResource, afterResource, beforeItem, afterItems) => {
+    const resourceField = kind === "health" ? "healthPercent" : kind === "prowess" ? "prowessPercent" : "";
+    const beforePercent = resourceField ? Number(beforeResource && beforeResource[resourceField]) : NaN;
+    const afterPercent = resourceField ? Number(afterResource && afterResource[resourceField]) : NaN;
+    const resourceIncreased = Number.isFinite(beforePercent) && Number.isFinite(afterPercent) && afterPercent > beforePercent;
+    let itemChanged = false;
+    let afterItem = null;
+    if (beforeItem) {
+      afterItem = (Array.isArray(afterItems) ? afterItems : []).find(
+        (candidate) =>
+          (beforeItem.id != null && candidate.id != null && String(candidate.id) === String(beforeItem.id)) ||
+          (beforeItem.slot != null && candidate.slot != null && String(candidate.slot) === String(beforeItem.slot)) ||
+          (beforeItem.name && candidate.name === beforeItem.name)
+      ) || null;
+      if (!afterItem) {
+        itemChanged = true;
+      } else {
+        const beforeQuantity = Number(beforeItem.quantity);
+        const afterQuantity = Number(afterItem.quantity);
+        const beforeCooldown = Number(beforeItem.cooldown);
+        const afterCooldown = Number(afterItem.cooldown);
+        itemChanged =
+          (Number.isFinite(beforeQuantity) && Number.isFinite(afterQuantity) && afterQuantity < beforeQuantity) ||
+          (Number.isFinite(beforeCooldown) && Number.isFinite(afterCooldown) && afterCooldown > beforeCooldown) ||
+          (beforeItem.ready === true && afterItem.ready === false) ||
+          (beforeItem.disabled === false && afterItem.disabled === true);
+      }
+    }
+    return {
+      confirmed: resourceIncreased || itemChanged,
+      resourceField,
+      beforePercent: Number.isFinite(beforePercent) ? beforePercent : null,
+      afterPercent: Number.isFinite(afterPercent) ? afterPercent : null,
+      resourceIncreased,
+      itemChanged,
+      beforeItem,
+      afterItem,
+    };
+  };
+
+  const useBattleItem = async (payload) => {
+    const kind = safeString(payload && payload.kind, 40);
+    const slots = normalizeSlots(payload && (payload.slots || payload.slot));
+    const names = normalizeNeedles(payload && (payload.names || payload.name));
+    const itemId = safeString(payload && (payload.itemId || payload.item_id), 80);
+    const preClickDelayMs = Math.max(0, parseInt(payload && payload.preClickDelayMs, 10) || 0);
+    const clickHoldMs = Math.max(0, parseInt(payload && payload.clickHoldMs, 10) || 0);
+    const verifyDelayMs = Math.max(0, Math.min(2000, parseInt(payload && payload.verifyDelayMs, 10) || 350));
+    if (!itemId && !slots.length && !names.length) {
+      return { ok: false, message: "battle_item_target_missing", kind, snapshot: battleSnapshot() };
+    }
+    const fightItem = findFightWindow();
+    const snapshot = battleSnapshot();
+    if (!fightItem || !snapshot.hasFight) {
+      return { ok: false, message: snapshot.finished ? "fight_finished" : "fight_inactive", kind, snapshot };
+    }
+    const items = Array.isArray(snapshot.items) ? snapshot.items : [];
+    const item = items.find((candidate) => battleItemMatches(candidate, itemId, slots, names)) || null;
+    const slot = item && item.slot != null ? parseInt(item.slot, 10) : slots.length ? slots[0] : null;
+    const customMethodNames = (Array.isArray(payload && payload.methodNames) ? payload.methodNames : [])
+      .map((value) => safeString(value, 120))
+      .filter(Boolean);
+    const methodNames = customMethodNames.concat([
+      ...(item && Number(item.id) > 0 && slot != null ? ["useSkill"] : []),
+      "useItem",
+      "useItemSlot",
+      "useBattleItem",
+      "usePotion",
+      "useElixir",
+      "useArtifact",
+      "useEffect",
+      "useThing",
+      "activateItem",
+    ]);
+    const owners = [
+      fightItem.win,
+      fightItem.win.fight,
+      fightItem.win.fight && fightItem.win.fight.controller,
+      fightItem.win.fight && fightItem.win.fight.ctrl,
+      fightItem.win.fight && fightItem.win.fight.model,
+    ];
+    const beforeResource = compactResourceSnapshot(resourceSnapshot());
+    await delayMs(preClickDelayMs);
+    let actionResult = null;
+    for (const owner of owners) {
+      const result = await callBattleItemMethod(owner, methodNames, slot, item);
+      if (result && result.ok) {
+        actionResult = result;
+        break;
+      }
+    }
+    if (!actionResult) {
+      const clickResult = clickBattleItemElement(item, slots, names);
+      if (clickResult && clickResult.ok) {
+        actionResult = clickResult;
+      }
+    }
+    if (!actionResult) {
+      return { ok: false, message: "battle_item_use_failed", kind, slot, item, items, snapshot };
+    }
+    await delayMs(Math.max(clickHoldMs, verifyDelayMs));
+    const afterSnapshot = battleSnapshot();
+    const afterResource = compactResourceSnapshot(resourceSnapshot());
+    const evidence = battleItemPostcondition(kind, beforeResource, afterResource, item, afterSnapshot.items);
+    return {
+      ok: evidence.confirmed,
+      message: evidence.confirmed ? "battle_item_used" : "battle_item_use_ambiguous",
+      kind,
+      slot: actionResult.slot != null ? actionResult.slot : slot,
+      item,
+      method: actionResult.method,
+      args: actionResult.args || [],
+      preClickDelayMs,
+      clickHoldMs,
+      verifyDelayMs,
+      fightPath: fightItem.path,
+      fightHref: fightItem.href,
+      evidence,
+      beforeResource,
+      afterResource,
+      afterSnapshot,
+    };
   };
 
   const findHuntApp = () => {
@@ -502,7 +882,7 @@
     return item;
   };
 
-  const huntSnapshot = () => {
+  const huntSnapshot = (compact = false) => {
     const root = window.top || window;
     const hunt = findHuntApp();
     let mainHref = "";
@@ -515,7 +895,15 @@
       rootHref: safeString(root.location && root.location.href, 240),
       mainHref,
       hasHunt: Boolean(hunt),
-      hunt: hunt ? summarizeObject(hunt, "hunt", 4, new Set()) : null,
+      hunt: hunt
+        ? compact
+          ? {
+              constructorName: safeString(hunt.constructor && hunt.constructor.name, 80),
+              model: objectPreview(hunt.model, 40),
+              controller: objectPreview(hunt.controller, 40),
+            }
+          : summarizeObject(hunt, "hunt", 4, new Set())
+        : null,
     };
   };
 
@@ -700,6 +1088,12 @@
     };
   };
 
+  const compactResourceSnapshot = (snapshot) => ({
+    ok: Boolean(snapshot && snapshot.ok),
+    healthPercent: snapshot && snapshot.healthPercent != null ? snapshot.healthPercent : null,
+    prowessPercent: snapshot && snapshot.prowessPercent != null ? snapshot.prowessPercent : null,
+  });
+
   const refreshResourceSource = () => {
     const root = window.top || window;
     try {
@@ -858,8 +1252,20 @@
     return el;
   };
 
-  const elementText = (el) =>
-    safeString([el && el.innerText, el && el.textContent, el && el.value, attr(el, "title"), attr(el, "alt"), attr(el, "onclick")].join(" "), 500);
+  const elementText = (el) => {
+    let descendantLabels = "";
+    try {
+      descendantLabels = Array.from(el && el.querySelectorAll ? el.querySelectorAll("img[alt],img[title]") : [])
+        .slice(0, 12)
+        .flatMap((image) => [attr(image, "alt"), attr(image, "title")])
+        .filter(Boolean)
+        .join(" ");
+    } catch (_) {}
+    return safeString(
+      [el && el.innerText, el && el.textContent, el && el.value, attr(el, "title"), attr(el, "alt"), descendantLabels, attr(el, "onclick")].join(" "),
+      500
+    );
+  };
 
   const elementCenter = (el) => {
     try {
@@ -1445,7 +1851,7 @@
     const names = normalizeNeedleList(payload && payload.names);
     const resources = resourceSnapshot();
     const threshold = Math.max(0, Math.min(100, toNumber(payload && payload.useWhenBelowPercent, 90)));
-    const useIfMissing = payload && payload.useIfResourcesMissing != null ? Boolean(payload.useIfResourcesMissing) : true;
+    const useIfMissing = payload && payload.useIfResourcesMissing != null ? Boolean(payload.useIfResourcesMissing) : false;
     const forceUse = Boolean(payload && payload.forceUse);
     const percent = kind === "health" ? resources.healthPercent : kind === "prowess" ? resources.prowessPercent : null;
     const needed = forceUse ? true : percent == null ? useIfMissing : percent < threshold;
@@ -1645,7 +2051,7 @@
       : ["бурдюк удали", "удаль"];
     const resources = resourceSnapshot();
     const threshold = Math.max(0, Math.min(100, toNumber(payload && payload.useWhenBelowPercent, 90)));
-    const useIfMissing = payload && payload.useIfResourcesMissing != null ? Boolean(payload.useIfResourcesMissing) : true;
+    const useIfMissing = payload && payload.useIfResourcesMissing != null ? Boolean(payload.useIfResourcesMissing) : false;
     const needsHealth = resources.healthPercent == null ? useIfMissing : resources.healthPercent < threshold;
     const needsProwess = resources.prowessPercent == null ? useIfMissing : resources.prowessPercent < threshold;
     const backpackMessage = openBackpack();
@@ -1676,7 +2082,7 @@
     const confirmed = confirmOpenDialogs();
     let huntMessage = "";
     if (payload && payload.openHuntAfter !== false) {
-      huntMessage = openHunt();
+      huntMessage = await openHunt({ verifyTimeoutMs: 2000 });
     }
     return {
       ok: attempts.some((attempt) => attempt.ok) || (!needsHealth && !needsProwess),
@@ -1867,6 +2273,42 @@
     return Number.isFinite(level) ? level : null;
   };
 
+  const normalizedNameTokens = (value) =>
+    safeString(value, 180)
+      .toLowerCase()
+      .replace(/ё/g, "е")
+      .replace(/\[\d{1,3}\]/g, " ")
+      .replace(/[^a-zа-я0-9]+/gi, " ")
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token.length >= 4);
+
+  const huntNameMatches = (targetName, allowedName) => {
+    const targetTokens = normalizedNameTokens(targetName);
+    const allowedTokens = normalizedNameTokens(allowedName);
+    if (!targetTokens.length || !allowedTokens.length) return false;
+    const targetText = targetTokens.join(" ");
+    const allowedText = allowedTokens.join(" ");
+    if (targetText.includes(allowedText) || allowedText.includes(targetText)) return true;
+    return allowedTokens.every((allowedToken) => {
+      const stem = allowedToken.slice(0, Math.min(6, allowedToken.length));
+      return targetTokens.some((targetToken) => targetToken.startsWith(stem));
+    });
+  };
+
+  const exactLabelMatches = (left, right) => {
+    const normalize = (value) =>
+      safeString(value, 240)
+        .toLowerCase()
+        .replace(/ё/g, "е")
+        .replace(/[^a-zа-я0-9]+/gi, " ")
+        .trim()
+        .replace(/\s+/g, " ");
+    const leftValue = normalize(left);
+    const rightValue = normalize(right);
+    return Boolean(leftValue && rightValue && leftValue === rightValue);
+  };
+
   const readBotLevel = (bot) => {
     if (!bot) {
       return { level: null, source: "" };
@@ -2004,7 +2446,11 @@
     const targets = rawBots
       .map((bot) => modelBotSummary(bot))
       .filter((bot) => bot.isBot && bot.botId && !bot.agrforbid && bot.fightId === 0 && bot.x != null && bot.y != null)
-      .filter((bot) => !allowedNames.length || allowedNames.some((name) => bot.name.includes(name) || bot.shortName.includes(name)))
+      .filter(
+        (bot) =>
+          !allowedNames.length ||
+          allowedNames.some((name) => huntNameMatches(bot.name, name) || huntNameMatches(bot.shortName, name))
+      )
       .filter((bot) => !allowedLevels.length || allowedLevels.includes(Number(bot.level)))
       .map((bot) => {
         const visible =
@@ -2181,81 +2627,144 @@
     };
   };
 
-  const attackVisibleBot = (payload) => {
+  const attackVisibleBot = async (payload) => {
     const visible = visibleHuntTargets(payload || {});
     const target = visible.targets[0] || null;
+    const visibleSummary = {
+      bridgeVersion: visible.bridgeVersion,
+      generatedAt: visible.generatedAt,
+      mainHref: visible.mainHref,
+      hasHunt: visible.hasHunt,
+      viewBounds: visible.viewBounds,
+      allowedLevels: visible.allowedLevels,
+      targetCount: visible.targets.length,
+      targets: visible.targets.slice(0, 5),
+    };
     if (!target) {
-      return { ok: false, message: "visible_bot_missing", visible };
+      return { ok: false, message: "visible_bot_missing", visible: visibleSummary };
     }
-    const result = attackBot({ bot_id: target.botId, confirmed: payload && payload.confirmed == null ? 1 : payload.confirmed });
+    const result = await attackBot({
+      bot_id: target.botId,
+      confirmed: payload && payload.confirmed == null ? 1 : payload.confirmed,
+      verifyTimeoutMs: payload && payload.verifyTimeoutMs,
+    });
     return {
       ok: Boolean(result.ok),
       message: result.message,
       target,
-      visible,
+      visible: visibleSummary,
     };
   };
 
-  const attackBot = (payload) => {
+  const attackBot = async (payload) => {
     const root = window.top || window;
     const botId = parseInt(payload && (payload.bot_id || payload.botId), 10);
     const confirmed = parseInt(payload && payload.confirmed, 10) || 0;
     if (!botId) {
       return { ok: false, message: "missing_bot_id" };
     }
+    let method = "";
     try {
       if (typeof root.huntAttack === "function") {
         root.huntAttack(botId, confirmed);
-        return { ok: true, message: "huntAttack", botId, confirmed };
+        method = "huntAttack";
       }
     } catch (error) {
       return { ok: false, message: `huntAttack_error:${safeString(error && error.message ? error.message : error, 200)}` };
     }
     try {
-      if (typeof root.botAttack === "function") {
+      if (!method && typeof root.botAttack === "function") {
         root.botAttack(botId, "/hunt.php", `&in[hunt]=1&in[confirmed]=${confirmed || 0}`, confirmed ? null : root.gebi && root.gebi("error"));
-        return { ok: true, message: "botAttack", botId, confirmed };
+        method = "botAttack";
       }
     } catch (error) {
       return { ok: false, message: `botAttack_error:${safeString(error && error.message ? error.message : error, 200)}` };
     }
-    return { ok: false, message: "attack_function_missing" };
+    if (!method) return { ok: false, message: "attack_function_missing" };
+    const verifyTimeoutMs = Math.max(500, Math.min(6000, parseInt(payload && payload.verifyTimeoutMs, 10) || 3500));
+    const deadline = Date.now() + verifyTimeoutMs;
+    let battle = battleSnapshot();
+    let botInfo = huntBotInfo({ bot_id: botId });
+    const confirmedAttack = () =>
+      Boolean(battle.hasFight) ||
+      Boolean(botInfo && botInfo.ok && botInfo.bot && Number(botInfo.bot.fightId) > 0);
+    while (!confirmedAttack() && Date.now() < deadline) {
+      await delayMs(100);
+      battle = battleSnapshot();
+      botInfo = huntBotInfo({ bot_id: botId });
+    }
+    const actionConfirmed = confirmedAttack();
+    return {
+      ok: actionConfirmed,
+      message: actionConfirmed ? `${method}_confirmed` : `${method}_unconfirmed`,
+      method,
+      botId,
+      confirmed,
+      verifyTimeoutMs,
+      battle,
+      bot: botInfo && botInfo.bot ? botInfo.bot : null,
+    };
   };
 
-  const openHunt = () => {
+  const huntNavigationSnapshot = () => {
     const root = window.top || window;
+    let mainHref = "";
+    try {
+      mainHref = safeString(root.frames["main_frame"].frames["main"].location.href, 240);
+    } catch (_) {}
+    return { mainHref, hasHunt: Boolean(findHuntApp()) };
+  };
+
+  const openHunt = async (payload = {}) => {
+    const root = window.top || window;
+    const before = huntNavigationSnapshot();
+    if (before.hasHunt || /\/hunt\.php(?:\?|$)/.test(before.mainHref)) {
+      return { ok: true, message: "already_hunt", before, after: before };
+    }
     try {
       if (/\/hunt\.php(?:\?|$)/.test(root.location.href)) {
-        return "already_top_hunt";
+        return { ok: true, message: "already_top_hunt", before, after: before };
       }
     } catch (_) {}
 
+    let method = "";
     try {
       const mainFrame = root.frames && root.frames["main_frame"];
       if (mainFrame) {
         if (typeof mainFrame.processMenu === "function") {
           mainFrame.processMenu("b07");
-          return "processMenu_b07";
-        }
-        if (typeof mainFrame.openHunt === "function") {
+          method = "processMenu_b07";
+        } else if (typeof mainFrame.openHunt === "function") {
           mainFrame.openHunt();
-          return "openHunt";
-        }
-        if (mainFrame.frames && mainFrame.frames["main"]) {
+          method = "openHunt";
+        } else if (mainFrame.frames && mainFrame.frames["main"]) {
           mainFrame.frames["main"].location.href = "hunt.php?update_swf=1";
-          return "main_frame_main_hunt";
+          method = "main_frame_main_hunt";
         }
       }
     } catch (error) {
-      return `frame_error:${String(error && error.message ? error.message : error)}`;
+      return { ok: false, message: `frame_error:${String(error && error.message ? error.message : error)}`, before };
     }
 
-    try {
-      root.location.href = "https://3kingdoms.ru/main.php";
-      return "main_fallback";
-    } catch (error) {
-      return `fallback_error:${String(error && error.message ? error.message : error)}`;
+    if (!method) {
+      return { ok: false, message: "open_hunt_control_missing", before };
     }
+    const verifyTimeoutMs = Math.max(250, Math.min(5000, parseInt(payload && payload.verifyTimeoutMs, 10) || 2000));
+    const deadline = Date.now() + verifyTimeoutMs;
+    let after = huntNavigationSnapshot();
+    while (!after.hasHunt && !/\/hunt\.php(?:\?|$)/.test(after.mainHref) && Date.now() < deadline) {
+      await delayMs(100);
+      after = huntNavigationSnapshot();
+    }
+    const verified = after.hasHunt || /\/hunt\.php(?:\?|$)/.test(after.mainHref);
+    return {
+      ok: verified,
+      message: verified ? `${method}_confirmed` : `${method}_unconfirmed`,
+      method,
+      before,
+      after,
+      verifyTimeoutMs,
+    };
   };
 
   const openBackpack = () => {
@@ -2311,6 +2820,1197 @@
       }
     } catch (_) {}
     return root;
+  };
+
+  const openQuests = async (payload = {}) => {
+    const before = mainContentContext();
+    if (before.pageKind === "quests") {
+      return { ok: true, message: "already_quests", before: { pageKind: before.pageKind, href: before.href } };
+    }
+    let clicked = null;
+    walkWindows(window.top || window, "top", 5, new Set(), (win, path) => {
+      if (clicked) return;
+      try {
+        const elements = Array.from(win.document.querySelectorAll("a,button,[onclick]")).slice(0, 1200);
+        for (const element of elements) {
+          const text = safeString(elementText(element), 120).toLowerCase();
+          if (text !== "квесты") continue;
+          const clickable = clickableElement(element);
+          if (!clickable || typeof clickable.click !== "function") continue;
+          clickable.click();
+          clicked = {
+            path,
+            text: safeString(elementText(element), 120),
+            href: safeString(attr(element, "href"), 200),
+            onclick: safeString(attr(element, "onclick"), 240),
+          };
+          break;
+        }
+      } catch (_) {}
+    });
+    if (!clicked) return { ok: false, message: "quests_control_missing" };
+    const verifyTimeoutMs = Math.max(250, Math.min(5000, parseInt(payload && payload.verifyTimeoutMs, 10) || 2000));
+    const deadline = Date.now() + verifyTimeoutMs;
+    let after = mainContentContext();
+    while (after.pageKind !== "quests" && Date.now() < deadline) {
+      await delayMs(100);
+      after = mainContentContext();
+    }
+    const confirmed = after.pageKind === "quests";
+    return {
+      ok: confirmed,
+      message: confirmed ? "quests_opened_confirmed" : "quests_open_unconfirmed",
+      control: clicked,
+      before: { pageKind: before.pageKind, href: before.href },
+      after: { pageKind: after.pageKind, href: after.href },
+      verifyTimeoutMs,
+    };
+  };
+
+  const pageKindFromHref = (href) => {
+    const value = safeString(href, 240).toLowerCase();
+    if (/\/fight\.php(?:\?|$)/.test(value)) return "battle";
+    if (/\/hunt\.php(?:\?|$)/.test(value)) return "hunt";
+    if (/user_quest\.php/.test(value)) return "quests";
+    if (/user\.php/.test(value) && /(?:backpack|inventory)/.test(value)) return "inventory";
+    if (/(?:market|shop|trade|auction|merchant)/.test(value)) return "shop";
+    if (/action_form\.php/.test(value)) return "action_form";
+    if (/area\.php/.test(value)) return "area";
+    if (/main\.php/.test(value)) return "main";
+    return value ? "other" : "unknown";
+  };
+
+  const mainContentContext = () => {
+    const root = window.top || window;
+    const win = findMainContentWindow(root);
+    let doc = null;
+    let href = "";
+    let title = "";
+    let text = "";
+    try {
+      doc = win && win.document ? win.document : null;
+      href = safeString(win && win.location && win.location.href, 240);
+      title = safeString(doc && doc.title, 160);
+      text = safeString(doc && doc.body && (doc.body.innerText || doc.body.textContent), 12000);
+    } catch (_) {}
+    return { root, win, doc, href, title, text, pageKind: pageKindFromHref(href) };
+  };
+
+  const elementIsVisible = (win, element) => {
+    if (!element) return false;
+    try {
+      const style = win && typeof win.getComputedStyle === "function" ? win.getComputedStyle(element) : null;
+      if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+      if (Number(element.offsetWidth) > 0 || Number(element.offsetHeight) > 0) return true;
+      return !style || style.display !== "none";
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const isQuestNavigatorLink = (element) => {
+    if (!element) return false;
+    const marker = [
+      attr(element, "title"),
+      attr(element, "aria-label"),
+      elementText(element),
+      ...Array.from(element.querySelectorAll ? element.querySelectorAll("img") : []).flatMap((image) => [
+        attr(image, "alt"),
+        attr(image, "title"),
+      ]),
+    ].join(" ");
+    return /проложить\s+путь/i.test(marker);
+  };
+
+  const questNavigatorLinks = (doc) => {
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    return Array.from(doc.querySelectorAll("a")).filter(isQuestNavigatorLink).slice(0, 100);
+  };
+
+  const questNavigatorLabel = (element) => {
+    const text = safeString(element && element.textContent, 180).replace(/проложить\s+путь/ig, "").trim();
+    if (text) return text;
+    return safeString(attr(element, "title"), 180).replace(/проложить\s+путь/ig, "").trim();
+  };
+
+  const navigatorSnapshot = () => {
+    const generatedAt = new Date().toISOString();
+    stateSnapshotSequence += 1;
+    const snapshotId = `navigator-${Date.now().toString(36)}-${stateSnapshotSequence.toString(36)}`;
+    const context = mainContentContext();
+    if (!/\/navigator\.php(?:\?|$)/i.test(context.href) || !context.doc) {
+      return { ok: false, message: "navigator_page_missing", href: context.href, snapshotId, generatedAt };
+    }
+    const inputs = Array.from(context.doc.querySelectorAll("input,button")).slice(0, 100);
+    const targetInput = inputs.find((element) => safeString(attr(element, "name"), 80) === "compassInput") || null;
+    const goButtons = inputs.filter((element) =>
+      /^(?:дойти|проложить\s+маршрут)$/i.test(
+        safeString(element.value || elementText(element), 80)
+      )
+    );
+    const visibleGoButtons = goButtons.filter((element) => elementIsVisible(context.win, element));
+    const currentLocation = /объект\s+находится\s+в\s+текущей\s+локации/i.test(context.text);
+    const routeMatch = context.text.match(/путь\s+займет\s+(\d+)\s+переход/i);
+    return {
+      ok: true,
+      message: "navigator_snapshot",
+      snapshotId,
+      generatedAt,
+      href: context.href,
+      target: safeString(targetInput && targetInput.value, 180) || null,
+      currentLocation,
+      hasRoute: visibleGoButtons.length === 1,
+      routeTransitions: routeMatch ? Number(routeMatch[1]) : null,
+      goButtonCount: goButtons.length,
+      visibleGoButtonCount: visibleGoButtons.length,
+      text: safeString(context.text, 1200),
+    };
+  };
+
+  const navigatorGo = (payload) => {
+    const before = navigatorSnapshot();
+    if (!before.ok) return before;
+    const expectedTarget = safeString(payload && payload.expectedTarget, 180);
+    if (expectedTarget && before.target && !exactLabelMatches(before.target, expectedTarget)) {
+      return { ok: false, message: "navigator_target_mismatch", expectedTarget, observedTarget: before.target };
+    }
+    if (before.currentLocation) {
+      return { ok: true, message: "navigator_already_at_target", submitted: false, before };
+    }
+    if (!before.hasRoute || before.visibleGoButtonCount !== 1) {
+      return { ok: false, message: "navigator_route_not_ready", before };
+    }
+    const context = mainContentContext();
+    const button = Array.from(context.doc.querySelectorAll("input,button")).find(
+      (element) =>
+        /^(?:дойти|проложить\s+маршрут)$/i.test(
+          safeString(element.value || elementText(element), 80)
+        ) &&
+        elementIsVisible(context.win, element)
+    );
+    if (!button || typeof button.click !== "function") {
+      return { ok: false, message: "navigator_go_not_clickable", before };
+    }
+    button.click();
+    return { ok: true, message: "navigator_go_submitted", submitted: true, before };
+  };
+
+  const navigatorCandidateSection = (element) => {
+    let node = element && element.parentElement;
+    for (let depth = 0; node && depth < 5; depth += 1) {
+      const first = node.children && node.children[0];
+      const label = safeString(first && (first.innerText || first.textContent), 80).toLowerCase();
+      if (/^(?:локации|ресурсы|монстры|персонажи|инстансы)$/.test(label)) return label;
+      node = node.parentElement;
+    }
+    return "";
+  };
+
+  const setNavigatorInputValue = (context, input, value) => {
+    try {
+      if (typeof input.focus === "function") input.focus();
+      input.value = value;
+      const EventCtor = (context.win && context.win.Event) || (typeof Event === "function" ? Event : null);
+      if (EventCtor && typeof input.dispatchEvent === "function") {
+        for (const type of ["input", "keyup", "change"]) {
+          input.dispatchEvent(new EventCtor(type, { bubbles: true }));
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const navigatorSelectTarget = async (payload = {}) => {
+    const context = mainContentContext();
+    if (!/\/navigator\.php(?:\?|$)/i.test(context.href) || !context.doc) {
+      return { ok: false, message: "navigator_page_missing", href: context.href };
+    }
+    const target = safeString(payload && payload.target, 180);
+    const kind = safeString(payload && payload.kind, 40).toLowerCase() || "location";
+    if (!target) return { ok: false, message: "navigator_target_missing" };
+    if (kind !== "location") return { ok: false, message: "navigator_target_kind_forbidden", kind };
+    const inputs = Array.from(context.doc.querySelectorAll("input,button")).slice(0, 100);
+    const targetInputs = inputs.filter((element) => safeString(attr(element, "name"), 80) === "compassInput");
+    if (targetInputs.length !== 1) {
+      return { ok: false, message: "navigator_target_input_ambiguous", inputCount: targetInputs.length };
+    }
+    const input = targetInputs[0];
+    const before = navigatorSnapshot();
+    if (
+      before.ok &&
+      before.target &&
+      exactLabelMatches(before.target, target) &&
+      (before.currentLocation || before.hasRoute)
+    ) {
+      return { ok: true, message: "navigator_target_already_selected", selected: false, target, snapshot: before };
+    }
+    if (!setNavigatorInputValue(context, input, target)) {
+      return { ok: false, message: "navigator_target_input_failed", target };
+    }
+    await delayMs(Math.max(100, Number(payload && payload.searchDelayMs) || 250));
+    const allCandidates = Array.from(
+      context.doc.querySelectorAll("div,li,a,button,[role='option']")
+    ).filter((element) => {
+      const label = safeString(element && (element.innerText || element.textContent), 180);
+      if (!exactLabelMatches(label, target)) return false;
+      return navigatorCandidateSection(element) === "локации";
+    });
+    const visibleCandidates = allCandidates.filter((element) => elementIsVisible(context.win, element));
+    const candidates = visibleCandidates.length === 1 ? visibleCandidates : allCandidates;
+    if (candidates.length !== 1) {
+      return {
+        ok: false,
+        message: candidates.length ? "navigator_location_ambiguous" : "navigator_location_missing",
+        target,
+        visibleCandidateCount: visibleCandidates.length,
+        candidateCount: allCandidates.length,
+      };
+    }
+    const candidate = candidates[0];
+    if (typeof candidate.click !== "function") {
+      return { ok: false, message: "navigator_location_not_clickable", target };
+    }
+    candidate.click();
+    await delayMs(Math.max(100, Number(payload && payload.routeDelayMs) || 350));
+    const after = navigatorSnapshot();
+    if (!after.ok || !after.target || !exactLabelMatches(after.target, target)) {
+      return { ok: false, message: "navigator_target_selection_unconfirmed", target, after };
+    }
+    if (!after.currentLocation && !after.hasRoute) {
+      return { ok: false, message: "navigator_route_not_ready", target, after };
+    }
+    return { ok: true, message: "navigator_target_selected", selected: true, target, snapshot: after };
+  };
+
+  const openLocationNavigator = () => {
+    const controls = [];
+    walkWindows(window.top || window, "top", 3, new Set(), (win) => {
+      try {
+        for (const element of Array.from(win.document.querySelectorAll("a[data-command='showExternalNavigate']"))) {
+          if (!controls.includes(element)) controls.push(element);
+        }
+      } catch (_) {}
+    });
+    if (controls.length !== 1) {
+      return {
+        ok: false,
+        message: controls.length ? "location_navigator_control_ambiguous" : "location_navigator_control_missing",
+        controlCount: controls.length,
+      };
+    }
+    if (typeof controls[0].click !== "function") {
+      return { ok: false, message: "location_navigator_control_not_clickable" };
+    }
+    controls[0].click();
+    return { ok: true, message: "location_navigator_opened", opened: true };
+  };
+
+  const openArea = async () => {
+    const before = mainContentContext();
+    const battle = battleSnapshot();
+    if (battle.rawHasFight === true || battle.hasFight === true) {
+      return { ok: false, message: "open_area_blocked_by_battle", before: before.pageKind };
+    }
+    if (before.pageKind === "area") {
+      return { ok: true, message: "area_already_open", opened: false, href: before.href };
+    }
+    const mainWindow = findMainContentWindow(window.top || window);
+    if (!mainWindow || !mainWindow.location) {
+      return { ok: false, message: "open_area_main_window_missing", before: before.pageKind };
+    }
+    mainWindow.location.href = "/area.php";
+    await delayMs(500);
+    const after = mainContentContext();
+    return {
+      ok: after.pageKind === "area",
+      message: after.pageKind === "area" ? "area_opened" : "area_open_unconfirmed",
+      opened: true,
+      before: before.pageKind,
+      after: after.pageKind,
+      href: after.href,
+    };
+  };
+
+  const openQuestNavigator = (payload) => {
+    const context = mainContentContext();
+    const target = safeString(payload && payload.target, 180);
+    if (context.pageKind !== "quests" || !context.doc) {
+      return { ok: false, message: "quest_page_missing", pageKind: context.pageKind };
+    }
+    if (!target) return { ok: false, message: "quest_navigator_target_missing" };
+    const candidates = questNavigatorLinks(context.doc);
+    const matches = candidates.filter((element) => exactLabelMatches(questNavigatorLabel(element), target));
+    if (matches.length !== 1) {
+      return {
+        ok: false,
+        message: matches.length ? "quest_navigator_link_ambiguous" : "quest_navigator_link_missing",
+        target,
+        matchCount: matches.length,
+      };
+    }
+    const link = matches[0];
+    if (typeof link.click !== "function") return { ok: false, message: "quest_navigator_link_not_clickable", target };
+    const observedTarget = questNavigatorLabel(link);
+    link.click();
+    return { ok: true, message: "quest_navigator_opened", submitted: true, target: observedTarget };
+  };
+
+  const percentFromText = (text, labels) => {
+    for (const label of labels) {
+      const match = safeString(text, 12000).match(new RegExp(`${label}\\s*[:–-]?\\s*(\\d+(?:[.,]\\d+)?)\\s*%`, "i"));
+      if (match) {
+        const value = Number(String(match[1]).replace(",", "."));
+        if (Number.isFinite(value)) return value;
+      }
+    }
+    return null;
+  };
+
+  const primitiveScriptField = (source, names) => {
+    for (const name of names) {
+      const pattern = new RegExp(`["']?${name}["']?\\s*[:=]\\s*(?:["']([^"']*)["']|(-?\\d+(?:\\.\\d+)?))`, "i");
+      const match = safeString(source, 20000).match(pattern);
+      if (!match) continue;
+      if (match[2] != null) {
+        const value = Number(match[2]);
+        return Number.isFinite(value) ? value : null;
+      }
+      return safeString(match[1], 160);
+    }
+    return null;
+  };
+
+  const playerSnapshot = () => {
+    const resources = resourceSnapshot();
+    const candidates = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      try {
+        const doc = win.document;
+        if (!doc) return;
+        const hp = doc.querySelector(".b-control-lvl__hp,[class*='control-lvl__hp']");
+        const prowess = doc.querySelector(".b-control-lvl__mp,[class*='control-lvl__mp']");
+        const control =
+          doc.querySelector("#control-lvl,.b-control-lvl,[class*='b-control-lvl']") ||
+          (hp && hp.parentElement) ||
+          (prowess && prowess.parentElement);
+        if (!control && !hp && !prowess) return;
+        const text = safeString(
+          [control && (control.innerText || control.textContent), hp && hp.textContent, prowess && prowess.textContent].join(" "),
+          2000
+        );
+        let scriptSource = "";
+        try {
+          scriptSource = Array.from(doc.scripts || [])
+            .map((script) => safeString(script && script.textContent, 5000))
+            .filter((source) => /ControlLvl|swfData\s*\(\s*["']lvl/i.test(source))
+            .join(" ");
+        } catch (_) {}
+        const compact = text.replace(/\s+/g, " ").trim();
+        const headerMatch = compact.match(/(?:^|\s)(\d{1,3})\s+([^\s]+)\s+Жизнь\s*\d/i);
+        const levelElement = control && control.querySelector
+          ? control.querySelector("[class*='level'],[class*='__lvl'],[data-level]")
+          : null;
+        const nameElement = control && control.querySelector
+          ? control.querySelector("[class*='nick'],[class*='name'],[data-nick]")
+          : null;
+        const scriptLevel = primitiveScriptField(scriptSource, ["lvl", "level"]);
+        const elementLevel = safeString(levelElement && (attr(levelElement, "data-level") || levelElement.textContent), 40);
+        const levelRaw = scriptLevel != null && scriptLevel !== "" ? scriptLevel : elementLevel || (headerMatch ? headerMatch[1] : null);
+        const level = parseInt(levelRaw, 10);
+        const name = safeString(
+          primitiveScriptField(scriptSource, ["nick", "nickname", "name"]) ||
+            (nameElement && (attr(nameElement, "data-nick") || nameElement.textContent)) ||
+            (headerMatch && headerMatch[2]),
+          120
+        );
+        const xpRaw = primitiveScriptField(scriptSource, ["exp", "experience"]);
+        const xpMaxRaw = primitiveScriptField(scriptSource, ["expMax", "exp_max", "experienceMax"]);
+        const xp = typeof xpRaw === "number" ? xpRaw : null;
+        const xpMax = typeof xpMaxRaw === "number" ? xpMaxRaw : null;
+        const calculatedXpPercent = xp != null && xpMax != null && xpMax > 0 ? Math.max(0, Math.min(100, (xp / xpMax) * 100)) : null;
+        candidates.push({
+          path,
+          href: safeString(win.location && win.location.href, 240),
+          text: compact,
+          name,
+          level: Number.isFinite(level) ? level : null,
+          xpPercent: percentFromText(compact, ["Опыт", "Experience"]) ?? calculatedXpPercent,
+          rawControl: { xp, xpMax },
+        });
+      } catch (_) {}
+    });
+    const best = candidates.find((candidate) => candidate.level != null && candidate.name) || candidates[0] || null;
+    const data = {
+      name: best ? best.name || null : null,
+      level: best ? best.level : null,
+      xpPercent: best ? best.xpPercent : null,
+      hpPercent: resources.healthPercent,
+      prowessPercent: resources.prowessPercent,
+      rawControl: best ? best.rawControl : { xp: null, xpMax: null },
+    };
+    const present = data.name || data.level != null || data.xpPercent != null || data.hpPercent != null || data.prowessPercent != null;
+    const complete = data.name && data.level != null && data.xpPercent != null && data.hpPercent != null && data.prowessPercent != null;
+    return {
+      status: complete ? "available" : present ? "partial" : "not_loaded",
+      reason: present ? null : "player_control_missing",
+      source: best ? { framePath: best.path, href: best.href } : null,
+      data,
+    };
+  };
+
+  const locationSnapshot = () => {
+    const context = mainContentContext();
+    let semanticName = "";
+    let locationId = "";
+    try {
+      const titleElement = context.doc && context.doc.querySelector
+        ? context.doc.querySelector("[data-location-name],.location-title,.b-location__title,[class*='location'][class*='title']")
+        : null;
+      semanticName = safeString(
+        titleElement && (attr(titleElement, "data-location-name") || titleElement.innerText || titleElement.textContent),
+        160
+      );
+      if (!semanticName && context.pageKind === "area") {
+        const rawLocationText = String(
+          (context.doc && context.doc.body && (context.doc.body.innerText || context.doc.body.textContent)) || ""
+        ).slice(0, 2400);
+        const compactLocationText = safeString(rawLocationText, 2400);
+        const headingMatch =
+          rawLocationText.match(/(?:^|\n)[\t ]*([^\n\r]{2,160}?)[\t ]*\r?\n[\t ]*Царство\s*:/i) ||
+          compactLocationText.match(/^(.{2,160}?)\s+Царство\s*:/i) ||
+          context.text.match(/^(.{2,160}?)\s+Царство\s*:/i);
+        semanticName = safeString(headingMatch && headingMatch[1], 160).replace(/\s+/g, " ").trim();
+      }
+      const idMatch = context.href.match(/[?&](?:location_id|loc_id|area_id)=([^&#]+)/i);
+      locationId = safeString(idMatch && decodeURIComponent(idMatch[1]), 80);
+    } catch (_) {}
+    return {
+      status: context.href ? (semanticName || locationId ? "available" : "partial") : "unknown",
+      reason: context.href ? null : "main_content_unavailable",
+      source: { framePath: "main", href: context.href },
+      data: {
+        semanticName: semanticName || null,
+        id: locationId || null,
+        pageKind: context.pageKind,
+        viewHref: context.href,
+        title: context.title,
+      },
+    };
+  };
+
+  const locationRouteSnapshot = () => {
+    const context = mainContentContext();
+    const location = locationSnapshot();
+    const rawText = String(
+      (context.doc && context.doc.body && (context.doc.body.innerText || context.doc.body.textContent)) || ""
+    );
+    const timerMatch =
+      rawText.match(/время\s+до\s+перехода\s*(\d+)\s*(?:с(?:ек)?)?/i) ||
+      context.text.match(/время\s+до\s+перехода\s*(\d+)/i);
+    const transitionTimerSeconds = timerMatch ? Number(timerMatch[1]) : null;
+    const images = [];
+    if (context.doc && typeof context.doc.querySelectorAll === "function") {
+      for (const image of Array.from(context.doc.querySelectorAll("img")).slice(0, 500)) {
+        let parent = image.parentElement || null;
+        let nearbyText = "";
+        for (let depth = 0; parent && depth < 5; depth += 1) {
+          const candidate = safeString(parent.innerText || parent.textContent, 180);
+          if (candidate && candidate.length <= 120) {
+            nearbyText = candidate;
+            break;
+          }
+          parent = parent.parentElement || null;
+        }
+        let rect = null;
+        try {
+          const rawRect = image.getBoundingClientRect && image.getBoundingClientRect();
+          if (rawRect) {
+            rect = {
+              width: Math.round(Number(rawRect.width) || 0),
+              height: Math.round(Number(rawRect.height) || 0),
+            };
+          }
+        } catch (_) {}
+        const signature = safeString(
+          [
+            attr(image, "src"),
+            attr(image, "alt"),
+            attr(image, "title"),
+            attr(image, "class"),
+            attr(image, "style"),
+          ].join(" "),
+          500
+        );
+        if (!nearbyText && !/(?:compass|navigator|route|path|way)/i.test(signature)) continue;
+        images.push({
+          index: images.length,
+          nearbyText: nearbyText || null,
+          src: safeString(attr(image, "src"), 300) || null,
+          alt: safeString(attr(image, "alt"), 120) || null,
+          title: safeString(attr(image, "title"), 120) || null,
+          className: safeString(attr(image, "class"), 160) || null,
+          style: safeString(attr(image, "style"), 300) || null,
+          rect,
+        });
+        if (images.length >= 100) break;
+      }
+    }
+    const interactiveElements = [];
+    if (context.doc && typeof context.doc.querySelectorAll === "function") {
+      for (const element of Array.from(
+        context.doc.querySelectorAll("a,button,[onclick],[style*='cursor']")
+      ).slice(0, 1000)) {
+        const text = safeString(element.innerText || element.textContent, 180);
+        if (!text || text.length > 120) continue;
+        let computedBackground = "";
+        try {
+          const computed = context.win && context.win.getComputedStyle
+            ? context.win.getComputedStyle(element)
+            : null;
+          computedBackground = safeString(
+            computed && `${computed.backgroundImage || ""} ${computed.backgroundPosition || ""}`,
+            300
+          );
+        } catch (_) {}
+        interactiveElements.push({
+          index: interactiveElements.length,
+          tag: safeString(element.tagName, 30),
+          text,
+          id: safeString(attr(element, "id"), 80) || null,
+          className: safeString(attr(element, "class"), 180) || null,
+          style: safeString(attr(element, "style"), 400) || null,
+          onclick: safeString(attr(element, "onclick"), 300) || null,
+          href: safeString(attr(element, "href"), 300) || null,
+          computedBackground: computedBackground || null,
+          parentHtml: safeString(element.parentElement && element.parentElement.outerHTML, 1200) || null,
+        });
+        if (interactiveElements.length >= 120) break;
+      }
+    }
+    const areaObject = context.win && context.win.area ? context.win.area : null;
+    const areaController = areaObject && areaObject.controller ? areaObject.controller : null;
+    const primitiveFields = (value) => {
+      const result = {};
+      if (!value) return result;
+      for (const key of Object.keys(value).slice(0, 160)) {
+        try {
+          const field = value[key];
+          if (field == null || ["string", "number", "boolean"].includes(typeof field)) result[key] = field;
+        } catch (_) {}
+      }
+      return result;
+    };
+    return {
+      ok: context.pageKind === "area" && Boolean(context.doc),
+      message: context.pageKind === "area" ? "location_route_snapshot" : "location_route_page_missing",
+      href: context.href,
+      pageKind: context.pageKind,
+      location: location.data,
+      transitionTimerSeconds,
+      timerReady: transitionTimerSeconds === 0,
+      rawTextLength: rawText.length,
+      rawText: safeString(rawText, 1600),
+      documentImageCount:
+        context.doc && typeof context.doc.querySelectorAll === "function"
+          ? context.doc.querySelectorAll("img").length
+          : null,
+      areaState: areaObject
+        ? {
+            fields: primitiveFields(areaObject),
+            controllerFields: primitiveFields(areaController),
+            keys: Object.keys(areaObject).slice(0, 160),
+            controllerKeys: areaController ? Object.keys(areaController).slice(0, 160) : [],
+          }
+        : null,
+      images,
+      interactiveElements,
+    };
+  };
+
+  const reviveControlEntries = (context) => {
+    const entries = [];
+    const documents = [];
+    const seenDocuments = new Set();
+    const addDocument = (doc) => {
+      if (doc && !seenDocuments.has(doc)) {
+        seenDocuments.add(doc);
+        documents.push(doc);
+      }
+    };
+    addDocument(context.doc);
+    walkWindows(window.top || window, "top", 4, new Set(), (win) => {
+      try {
+        addDocument(win.document);
+      } catch (_) {}
+    });
+    for (const doc of documents) {
+      let elements = [];
+      try {
+        elements = Array.from(
+          doc.querySelectorAll("a,button,input[type='button'],input[type='submit'],[onclick]")
+        ).slice(0, 1200);
+      } catch (_) {
+        continue;
+      }
+      for (const element of elements) {
+        const text = elementText(element);
+        const controlName = safeString(attr(element, "name"), 80).toLowerCase();
+        const controlValue = safeString(element && element.value, 120);
+        let surrounding = element;
+        const surroundingParts = [text, controlValue];
+        for (let depth = 0; depth < 6 && surrounding; depth += 1) {
+          surroundingParts.push(safeString(surrounding.innerText || surrounding.textContent, 500));
+          surrounding = surrounding.parentElement || null;
+        }
+        const surroundingText = safeString(surroundingParts.join(" "), 1200);
+        const prompt = /(?:желаете\s+воскреснуть|вы\s+(?:погибли|мертвы)|персонаж\s+погиб)/i.test(surroundingText);
+        const explicitlyPositive = /(?:воскрес|возрод|ожить|поднять)/i.test(text);
+        const affirmative =
+          controlName === "yes" || /^(?:да|yes|ok|воскреснуть)$/i.test(controlValue || text);
+        const negative = controlName === "no" || /^(?:нет|no|отмена)$/i.test(controlValue || text);
+        if ((!explicitlyPositive && !(prompt && affirmative)) || negative || element.disabled === true) continue;
+        try {
+          if (typeof element.getBoundingClientRect === "function") {
+            const rect = element.getBoundingClientRect();
+            if (rect && (Number(rect.width) <= 0 || Number(rect.height) <= 0)) continue;
+          }
+        } catch (_) {}
+        const explicitFree = /(?:бесплат|без\s+платы)/i.test(surroundingText);
+        const explicitZero = /(?:стоим|цена)[^\d]{0,20}0(?:[.,]0+)?(?:\s|$)/i.test(surroundingText);
+        const costMentioned = /(?:стоим|цена|кругляш|золот|монет|серебр)/i.test(surroundingText);
+        const explicitNoCostPrompt = prompt && affirmative && !costMentioned;
+        entries.push({
+          element,
+          summary: {
+            index: entries.length,
+            optionId: `revive:${entries.length}`,
+            text: safeString(text, 160),
+            href: safeString(attr(element, "href"), 200),
+            onclick: safeString(attr(element, "onclick"), 240),
+            free: Boolean(explicitFree || explicitZero || explicitNoCostPrompt),
+            safe: Boolean(explicitFree || explicitZero || explicitNoCostPrompt),
+            available: true,
+            freeEvidence: explicitFree
+              ? "explicit_free_text"
+              : explicitZero
+                ? "explicit_zero_cost"
+                : explicitNoCostPrompt
+                  ? "explicit_resurrection_prompt_without_cost"
+                  : null,
+          },
+        });
+        if (entries.length >= 10) break;
+      }
+      if (entries.length >= 10) break;
+    }
+    return entries;
+  };
+
+  const resurrectionNoticeEntry = () => {
+    const root = window.top || window;
+    try {
+      const frame = root.document && root.document.querySelector
+        ? root.document.querySelector("iframe#error")
+        : null;
+      if (!frame) return null;
+      const doc = frame.contentDocument || (frame.contentWindow && frame.contentWindow.document);
+      const text = safeString(doc && doc.body && (doc.body.innerText || doc.body.textContent), 2000);
+      if (!/Воскрешение/i.test(text) || !/Вы\s+воскрешены/i.test(text)) return null;
+      const controls = Array.from(
+        doc.querySelectorAll("button,input[type='button'],input[type='submit'],a,[onclick]")
+      ).filter((element) =>
+        [element && element.innerText, element && element.textContent, element && element.value]
+          .map((value) => safeString(value, 120))
+          .some((value) => value === "Закрыть")
+      );
+      return {
+        frame,
+        doc,
+        controls,
+        summary: {
+          frameId: safeString(frame.id, 80),
+          frameSrc: safeString(attr(frame, "src"), 500),
+          text: safeString(text, 240),
+          closeControlCount: controls.length,
+        },
+      };
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const closeResurrectionNotice = async (payload = {}) => {
+    const before = resurrectionNoticeEntry();
+    if (!before) {
+      return { ok: true, message: "resurrection_notice_absent", closed: false, confirmed: true };
+    }
+    if (before.controls.length !== 1) {
+      return {
+        ok: false,
+        message: "resurrection_notice_close_ambiguous",
+        closed: false,
+        notice: before.summary,
+      };
+    }
+    const control = before.controls[0];
+    if (!control || typeof control.click !== "function") {
+      return { ok: false, message: "resurrection_notice_close_not_clickable", notice: before.summary };
+    }
+    try {
+      control.click();
+    } catch (error) {
+      return {
+        ok: false,
+        message: `resurrection_notice_close_error:${safeString(error && error.message ? error.message : error, 200)}`,
+        notice: before.summary,
+      };
+    }
+    await delayMs(Math.max(100, Number(payload && payload.verifyDelayMs) || 250));
+    const after = resurrectionNoticeEntry();
+    return {
+      ok: !after,
+      message: after ? "resurrection_notice_close_unconfirmed" : "resurrection_notice_closed",
+      closed: true,
+      confirmed: !after,
+      before: before.summary,
+      after: after ? after.summary : null,
+    };
+  };
+
+  const nativeResurrectHandler = () => {
+    let match = null;
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      if (match) return;
+      try {
+        const handler = win.resurrect;
+        if (typeof handler !== "function") return;
+        const source = safeString(Function.prototype.toString.call(handler), 3000);
+        if (!/action_run\.php\?code=RESURRECT(?:&|['"])/i.test(source)) return;
+        match = { win, path, handler, source };
+      } catch (_) {}
+    });
+    return match;
+  };
+
+  const directPlayerHealthPercent = () => {
+    let healthPercent = null;
+    walkWindows(window.top || window, "top", 4, new Set(), (win) => {
+      if (healthPercent != null) return;
+      try {
+        const element = win.document && win.document.querySelector
+          ? win.document.querySelector(".b-control-lvl__hp,[class*='control-lvl__hp']")
+          : null;
+        const text = safeString(element && (element.innerText || element.textContent), 500);
+        const parsed = percentFromText(text, ["Жизнь", "Health", "Life"]);
+        if (parsed != null) healthPercent = parsed;
+      } catch (_) {}
+    });
+    return healthPercent;
+  };
+
+  const nativeResurrectionProbe = (context, resources) => {
+    const handler = nativeResurrectHandler();
+    const directHealthValue = directPlayerHealthPercent();
+    const directHealthPercent = directHealthValue == null ? Number.NaN : Number(directHealthValue);
+    const resourceHealthPercent = Number(resources && resources.healthPercent);
+    const healthPercent = Number.isFinite(directHealthPercent) ? directHealthPercent : resourceHealthPercent;
+    const zeroHealth = Number.isFinite(healthPercent) && healthPercent <= 0;
+    const locationText = safeString(context.text, 12000);
+    const normalizedLocationText = locationText.toLocaleLowerCase("ru-RU");
+    const locationLooksGhostly = (
+      normalizedLocationText.includes("призрак") ||
+      normalizedLocationText.includes("мертв") ||
+      normalizedLocationText.includes("мёртв")
+    );
+    const revivePage = ["area", "inventory", "hunt", "main"].includes(context.pageKind);
+    return {
+      handler,
+      handlerAvailable: Boolean(handler),
+      handlerPath: handler ? handler.path : null,
+      directHealthPercent: Number.isFinite(directHealthPercent) ? directHealthPercent : null,
+      resourceHealthPercent: Number.isFinite(resourceHealthPercent) ? resourceHealthPercent : null,
+      healthPercent: Number.isFinite(healthPercent) ? healthPercent : null,
+      zeroHealth,
+      revivePage,
+      locationLooksGhostly,
+      pageKind: context.pageKind,
+      locationText: safeString(locationText, 240),
+    };
+  };
+
+  const nativeResurrectionEntry = (context, resources, providedProbe = null) => {
+    const probe = providedProbe || nativeResurrectionProbe(context, resources);
+    const handler = probe.handler;
+    if (!handler || !probe.zeroHealth || !probe.revivePage) return null;
+    return {
+      handler,
+      summary: {
+        index: 0,
+        optionId: "revive:native-resurrect",
+        text: "resurrect()",
+        href: "/action_run.php?code=RESURRECT&url_success=/area.php&url_error=/area.php",
+        onclick: "resurrect()",
+        free: true,
+        safe: true,
+        available: true,
+        freeEvidence: "native_resurrect_handler_zero_hp_recoverable_page",
+        framePath: handler.path,
+      },
+    };
+  };
+
+  const reviveDebugCandidates = () => {
+    const candidates = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      if (candidates.length >= 80) return;
+      try {
+        try {
+          if (win.popupDialogObj && candidates.length < 80) {
+            candidates.push({
+              path,
+              tag: "WINDOW_OBJECT",
+              text: "popupDialogObj",
+              attributes: "",
+              rect: null,
+              object: summarizeObject(win.popupDialogObj, `${path}.popupDialogObj`, 3, new Set()),
+            });
+          }
+        } catch (_) {}
+        const doc = win.document;
+        const elements = doc
+          ? Array.from(
+              doc.querySelectorAll(
+                "[class*='popup'],[id*='popup'],[class*='confirm'],[id*='confirm'],[name='yes'],[name='no'],input[type='button'],input[type='submit'],button"
+              )
+            ).slice(0, 1000)
+          : [];
+        for (let index = 0; index < elements.length && candidates.length < 80; index += 1) {
+          const element = elements[index];
+          const text = safeString(element.innerText || element.textContent || element.value, 500);
+          const attributes = safeString(
+            [
+              attr(element, "id"),
+              attr(element, "class"),
+              attr(element, "name"),
+              attr(element, "value"),
+              attr(element, "onclick"),
+              attr(element, "href"),
+              attr(element, "src"),
+              attr(element, "alt"),
+              attr(element, "title"),
+            ].join(" "),
+            500
+          );
+          const resurrectionMatch = /(?:желаете\s+воскреснуть|воскрес|возрод)/i.test(
+            `${text} ${attributes}`
+          );
+          let rect = null;
+          try {
+            const rawRect = element.getBoundingClientRect && element.getBoundingClientRect();
+            if (rawRect) {
+              rect = {
+                x: Math.round(Number(rawRect.x) || 0),
+                y: Math.round(Number(rawRect.y) || 0),
+                width: Math.round(Number(rawRect.width) || 0),
+                height: Math.round(Number(rawRect.height) || 0),
+              };
+            }
+          } catch (_) {}
+          if (!resurrectionMatch && rect && (rect.width <= 0 || rect.height <= 0)) continue;
+          candidates.push({
+            path,
+            index,
+            tag: safeString(element.tagName, 30),
+            text,
+            attributes,
+            rect,
+            html: safeString(element.outerHTML, 800),
+          });
+        }
+      } catch (_) {}
+    });
+    return candidates;
+  };
+
+  const deathReviveSnapshot = () => {
+    const context = mainContentContext();
+    const entries = reviveControlEntries(context);
+    const resurrectionNotice = resurrectionNoticeEntry();
+    const resources = resourceSnapshot();
+    const nativeProbe = nativeResurrectionProbe(context, resources);
+    const nativeEntry = nativeResurrectionEntry(context, resources, nativeProbe);
+    const controls = nativeEntry ? [nativeEntry.summary] : entries.map((entry) => entry.summary);
+    let marker = /(?:желаете\s+воскреснуть|вы\s+(?:погибли|мертвы)|персонаж\s+погиб|смерть\s+персонажа)/i.test(context.text);
+    if (!marker) {
+      walkWindows(window.top || window, "top", 4, new Set(), (win) => {
+        if (marker) return;
+        try {
+          const text = safeString(win.document && win.document.body && win.document.body.innerText, 4000);
+          marker = /(?:желаете\s+воскреснуть|вы\s+(?:погибли|мертвы)|персонаж\s+погиб)/i.test(text);
+        } catch (_) {}
+      });
+    }
+    marker = marker || Boolean(nativeEntry);
+    const alivePage = ["battle", "hunt", "quests", "inventory", "area", "main"].includes(context.pageKind);
+    const aliveEvidence = !marker && controls.length === 0 && alivePage && Number(resources.healthPercent) > 0;
+    const dead = marker && controls.length > 0 ? true : aliveEvidence ? false : null;
+    const costMatch = context.text.match(/(?:стоим|цена)[^\d]{0,20}(\d+(?:[.,]\d+)?)[^\n]{0,40}/i);
+    return {
+      status: dead === true ? "available" : context.href ? "partial" : "unknown",
+      reason: dead === true ? null : "death_not_confirmed",
+      source: { framePath: "main", href: context.href },
+      data: {
+        state: dead === true ? "dead" : dead === false ? "alive" : "unknown",
+        dead,
+        reviveAvailable: controls.length > 0,
+        freeReviveAvailable: controls.some((control) => control.free === true),
+        freeReviveOptionCount: controls.filter((control) => control.free === true && control.safe === true).length,
+        reviveOptions: controls,
+        resurrectionNoticeAvailable: Boolean(resurrectionNotice),
+        resurrectionNotice: resurrectionNotice ? resurrectionNotice.summary : null,
+        costText: safeString(costMatch && costMatch[0], 120) || null,
+        diagnostics: dead === null
+          ? [{
+              source: "native_resurrection_probe",
+              handlerAvailable: nativeProbe.handlerAvailable,
+              handlerPath: nativeProbe.handlerPath,
+              directHealthPercent: nativeProbe.directHealthPercent,
+              resourceHealthPercent: nativeProbe.resourceHealthPercent,
+              healthPercent: nativeProbe.healthPercent,
+              zeroHealth: nativeProbe.zeroHealth,
+              revivePage: nativeProbe.revivePage,
+              locationLooksGhostly: nativeProbe.locationLooksGhostly,
+              pageKind: nativeProbe.pageKind,
+              locationText: nativeProbe.locationText,
+            }]
+          : [],
+      },
+    };
+  };
+
+  const reviveFree = async (payload) => {
+    const expectedCharacter = safeString(payload && payload.expectedCharacter, 120);
+    const player = playerSnapshot();
+    const observedCharacter = safeString(player && player.data && player.data.name, 120);
+    if (expectedCharacter && observedCharacter && expectedCharacter.toLowerCase() !== observedCharacter.toLowerCase()) {
+      return { ok: false, message: "revive_character_mismatch", expectedCharacter, observedCharacter };
+    }
+    const before = deathReviveSnapshot();
+    if (!before.data || before.data.dead !== true) {
+      return { ok: false, message: "death_not_confirmed", before };
+    }
+    const context = mainContentContext();
+    const nativeEntry = nativeResurrectionEntry(context, resourceSnapshot());
+    if (nativeEntry) {
+      try {
+        let mainWindow = findMainContentWindow(window.top || window);
+        if (!mainWindow || !mainWindow.location) {
+          return { ok: false, message: "free_revive_main_window_missing", option: nativeEntry.summary };
+        }
+        if (context.pageKind !== "area") {
+          mainWindow.location.href = "/area.php";
+          await delayMs(750);
+          const areaContext = mainContentContext();
+          if (areaContext.pageKind !== "area") {
+            return {
+              ok: false,
+              message: "free_revive_area_not_opened",
+              option: nativeEntry.summary,
+              beforePageKind: context.pageKind,
+              afterPageKind: areaContext.pageKind,
+            };
+          }
+          mainWindow = findMainContentWindow(window.top || window);
+        }
+        mainWindow.location.href = "/action_run.php?code=RESURRECT&url_success=/area.php&url_error=/area.php";
+      } catch (error) {
+        return {
+          ok: false,
+          message: `free_revive_native_error:${safeString(error && error.message ? error.message : error, 200)}`,
+          option: nativeEntry.summary,
+        };
+      }
+      await delayMs(Math.max(500, Number(payload && payload.verifyDelayMs) || 1500));
+      const after = deathReviveSnapshot();
+      return {
+        ok: true,
+        message: after.data && after.data.dead === false ? "free_revive_confirmed" : "free_revive_submitted",
+        submitted: true,
+        confirmed: Boolean(after.data && after.data.dead === false),
+        option: nativeEntry.summary,
+        before,
+        after,
+      };
+    }
+    const freeEntries = reviveControlEntries(context).filter((entry) => entry.summary.free === true);
+    if (freeEntries.length !== 1) {
+      return {
+        ok: false,
+        message: freeEntries.length ? "free_revive_ambiguous" : "free_revive_not_proven",
+        freeOptions: freeEntries.map((entry) => entry.summary),
+      };
+    }
+    const selected = freeEntries[0];
+    if (!selected.element || typeof selected.element.click !== "function") {
+      return { ok: false, message: "free_revive_not_clickable", option: selected.summary };
+    }
+    try {
+      selected.element.click();
+    } catch (error) {
+      return { ok: false, message: `free_revive_click_error:${safeString(error && error.message ? error.message : error, 200)}` };
+    }
+    await delayMs(Math.max(250, Number(payload && payload.verifyDelayMs) || 1000));
+    const after = deathReviveSnapshot();
+    return {
+      ok: true,
+      message: after.data && after.data.dead === false ? "free_revive_confirmed" : "free_revive_submitted",
+      submitted: true,
+      confirmed: Boolean(after.data && after.data.dead === false),
+      option: selected.summary,
+      before,
+      after,
+    };
+  };
+
+  const questSnapshot = (metadata = {}) => {
+    const context = mainContentContext();
+    const loaded = context.pageKind === "quests" || /Текущая цель:|Взятые\s+Повторяющиеся\s+Доступные/i.test(context.text);
+    if (!loaded || !context.doc) {
+      return {
+        status: "not_loaded",
+        reason: "quest_page_not_loaded",
+        source: { framePath: "main", href: context.href },
+        data: {
+          loadStatus: "not_loaded",
+          snapshotId: metadata.snapshotId || null,
+          generatedAt: metadata.generatedAt || null,
+          pageKind: context.pageKind,
+          href: context.href,
+          items: [],
+        },
+      };
+    }
+    const items = [];
+    const seen = new Set();
+    try {
+      const cancelLinks = Array.from(context.doc.querySelectorAll("a[href*='action=cancel'][href*='ref=']")).slice(0, 100);
+      for (const link of cancelLinks) {
+        const href = safeString(attr(link, "href"), 240);
+        const idMatch = href.match(/[?&]ref=(\d+)/i);
+        const questId = safeString(idMatch && idMatch[1], 40);
+        const container = (link.closest && (link.closest("table") || link.closest("tr"))) || link.parentElement;
+        const titleElement = container && container.querySelector ? container.querySelector(".npc-point__title") : null;
+        const rawText = safeString(container && (container.innerText || container.textContent), 5000);
+        const title = safeString(titleElement && (titleElement.innerText || titleElement.textContent), 220) || safeString(rawText.split("Отказаться")[0], 220);
+        const key = questId || `${title}:${items.length}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const navigation = container && container.querySelectorAll
+          ? questNavigatorLinks(container).slice(0, 30).map((element) => ({
+              text: questNavigatorLabel(element),
+              title: safeString(attr(element, "title"), 180),
+              onclick: safeString(attr(element, "onclick"), 300),
+            }))
+          : [];
+        const objectiveMatch = rawText.match(/Текущая цель:\s*([\s\S]*?)(?:Награда:|$)/i);
+        const rewardMatch = rawText.match(/Награда:\s*([\s\S]*?)$/i);
+        const objective = safeString(objectiveMatch && objectiveMatch[1], 1600) || null;
+        const objectiveKind = /(?:уби(?:ть|йте)|уничтож|побед|одол|сраз|атак)/i.test(objective || "")
+          ? "combat"
+          : "unknown";
+        items.push({
+          id: questId || null,
+          title: title || null,
+          status: "active",
+          objectiveKind,
+          objective,
+          reward: safeString(rewardMatch && rewardMatch[1], 600) || null,
+          navigation,
+        });
+      }
+    } catch (_) {}
+    return {
+      status: "available",
+      reason: null,
+      source: { framePath: "main", href: context.href },
+      data: {
+        loadStatus: "loaded",
+        snapshotId: metadata.snapshotId || null,
+        generatedAt: metadata.generatedAt || null,
+        pageKind: context.pageKind,
+        href: context.href,
+        currentLocation: null,
+        activeCount: items.length,
+        items,
+        truncated: items.length >= 100,
+      },
+    };
+  };
+
+  const shopInventorySnapshot = () => {
+    const context = mainContentContext();
+    const mode = context.pageKind === "inventory" ? "inventory" : context.pageKind === "shop" ? "shop" : null;
+    if (!mode) {
+      return { status: "not_loaded", reason: "inventory_or_shop_not_loaded", source: { framePath: "main", href: context.href }, data: { mode: null, complete: false, items: [] } };
+    }
+    const items = [];
+    const seen = new Set();
+    if (mode === "inventory") {
+      for (const entry of collectInventoryElements()) {
+        const item = entry.item;
+        if (!item || isControlQuickSlotItem(item) || !isInventoryArtifactCandidate(item)) continue;
+        const key = item.artikulId || item.cellAid || item.id || `${item.src}:${item.title}`;
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        items.push({
+          artikulId: item.artikulId || null,
+          id: item.id || null,
+          title: item.title || null,
+          count: item.count || 1,
+          src: item.src || null,
+        });
+        if (items.length >= 100) break;
+      }
+    }
+    return {
+      status: mode === "inventory" ? "available" : "partial",
+      reason: mode === "shop" ? "shop_price_parser_not_configured" : null,
+      source: { framePath: "main", href: context.href },
+      data: { mode, complete: mode === "inventory", items, truncated: items.length >= 100 },
+    };
+  };
+
+  const stateSnapshot = (payload) => {
+    const generatedAt = new Date().toISOString();
+    stateSnapshotSequence += 1;
+    const snapshotId = `${Date.now().toString(36)}-${stateSnapshotSequence.toString(36)}`;
+    const allowed = new Set(["player", "location", "deathRevive", "battle", "hunt", "quests", "shopInventory"]);
+    const includeProvided = Array.isArray(payload && payload.include);
+    const requested = includeProvided
+      ? payload.include.map((value) => safeString(value, 40)).filter((value) => allowed.has(value))
+      : [];
+    const included = includeProvided ? Array.from(new Set(requested)) : Array.from(allowed);
+    const sections = {};
+    for (const name of included) {
+      if (name === "player") sections.player = playerSnapshot();
+      else if (name === "location") sections.location = locationSnapshot();
+      else if (name === "deathRevive") sections.deathRevive = deathReviveSnapshot();
+      else if (name === "battle") sections.battle = { status: "available", reason: null, data: battleSnapshot() };
+      else if (name === "hunt") sections.hunt = { status: "available", reason: null, data: huntSnapshot(true) };
+      else if (name === "quests") sections.quests = questSnapshot({ snapshotId, generatedAt });
+      else if (name === "shopInventory") sections.shopInventory = shopInventorySnapshot();
+    }
+    return {
+      ok: true,
+      schemaVersion: 1,
+      bridgeVersion: BRIDGE_VERSION,
+      snapshotId,
+      generatedAt,
+      included,
+      sections,
+    };
   };
 
   const saveStyle = (el) => ({
@@ -2562,7 +4262,15 @@
     }
     try {
       if (data.command.type === "open_hunt") {
-        send(data.token, true, openHunt());
+        openHunt(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_hunt_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "open_quests") {
+        openQuests(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_quests_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "layout") {
@@ -2572,6 +4280,60 @@
       }
       if (data.command.type === "layout_snapshot") {
         const result = layoutSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "state_snapshot") {
+        const result = stateSnapshot(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "location_route_snapshot") {
+        const result = locationRouteSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "revive_free") {
+        reviveFree(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `revive_free_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "close_resurrection_notice") {
+        closeResurrectionNotice(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `close_resurrection_notice_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "navigator_snapshot") {
+        const result = navigatorSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "navigator_go") {
+        const result = navigatorGo(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "navigator_select_target") {
+        navigatorSelectTarget(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `navigator_select_target_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "open_location_navigator") {
+        const result = openLocationNavigator();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "open_area") {
+        openArea()
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_area_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "open_quest_navigator") {
+        const result = openQuestNavigator(data.command.payload || {});
         send(data.token, Boolean(result.ok), result);
         return;
       }
@@ -2652,18 +4414,27 @@
         return;
       }
       if (data.command.type === "use_skill_slot") {
-        const result = useSkillSlot(data.command.payload || {});
-        send(data.token, Boolean(result.ok), result);
+        useSkillSlot(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `use_skill_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "use_battle_item") {
+        useBattleItem(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `use_battle_item_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "attack_visible_bot") {
-        const result = attackVisibleBot(data.command.payload || {});
-        send(data.token, Boolean(result.ok), result);
+        attackVisibleBot(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `attack_visible_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "attack_bot") {
-        const result = attackBot(data.command.payload || {});
-        send(data.token, Boolean(result.ok), result);
+        attackBot(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `attack_bot_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       send(data.token, false, `unknown_command:${String(data.command.type)}`);

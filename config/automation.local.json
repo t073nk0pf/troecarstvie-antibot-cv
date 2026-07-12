@@ -82,7 +82,7 @@
     "use_after_cycle": true,
     "use_when_below_percent": 90,
     "force_use": false,
-    "use_if_resources_missing": true,
+    "use_if_resources_missing": false,
     "open_hunt_after": true,
     "timeout_s": 8,
     "health_restore_percent": 40,
@@ -99,6 +99,45 @@
       "малый бурдюк удали",
       "бурдюк удали"
     ]
+  },
+  "battle_item_recovery": {
+    "enabled": false,
+    "health_use_when_below_percent": 35,
+    "prowess_use_when_below_percent": 15,
+    "health_slots": [],
+    "prowess_slots": [],
+    "health_names": [],
+    "prowess_names": [],
+    "damage_boost_enabled": false,
+    "damage_boost_slots": [],
+    "damage_boost_names": [],
+    "cooldown_ms": 3000,
+    "max_uses_per_battle": 1,
+    "pre_click_delay_ms": 0,
+    "click_hold_ms": 0
+  },
+  "leveling": {
+    "enabled": false,
+    "target_level": null,
+    "required_character_name": "v3g45",
+    "snapshot_interval_ms": 1000,
+    "snapshot_stale_timeout_ms": 15000,
+    "max_deaths_per_session": 3,
+    "target_location_name": "",
+    "auto_target_level_offsets": [
+      0
+    ],
+    "free_revive_only": true,
+    "revive_verify_timeout_ms": 15000,
+    "checkpoint_interval_ms": 5000,
+    "quest_refresh_every_cycles": 5,
+    "quest_refresh_timeout_ms": 10000,
+    "auto_navigate_quest_targets": false,
+    "navigator_timeout_ms": 10000,
+    "navigator_max_transitions": 50,
+    "route_settle_ms": 3000,
+    "allow_soft_currency_purchases": false,
+    "max_soft_currency_spend": 0
   },
   "recovery": {
     "battle_active_timeout_ms": 240000,
@@ -126,6 +165,7 @@
       "green_sprite"
     ],
     "allowed_levels": [],
+    "allowed_names": [],
     "click_offset": {
       "dx": -35,
       "dy": -80

@@ -19,6 +19,11 @@ def test_run_accepts_target_level_filters() -> None:
     assert args.target_levels == ["4,5"]
 
 
+def test_run_accepts_goal_level() -> None:
+    args = build_parser().parse_args(["run", "--goal-level", "6"])
+    assert args.goal_level == 6
+
+
 def test_run_accepts_open_hunt_on_start_flag() -> None:
     args = build_parser().parse_args(["run", "--open-hunt-on-start"])
     assert args.open_hunt_on_start is True
@@ -30,8 +35,9 @@ def test_run_accepts_browser_client_id() -> None:
 
 
 def test_control_server_cli() -> None:
-    args = build_parser().parse_args(["control-server", "--config", "config/automation.local.json"])
+    args = build_parser().parse_args(["control-server", "--config", "config/automation.local.json", "--live"])
     assert args.command == "control-server"
+    assert args.live is True
     assert args.config == "config/automation.local.json"
 
 
@@ -69,6 +75,16 @@ def test_injector_layout_snapshot_cli() -> None:
     args = build_parser().parse_args(["injector-layout-snapshot", "--timeout", "1"])
     assert args.command == "injector-layout-snapshot"
     assert args.timeout == 1
+
+
+def test_injector_state_snapshot_cli() -> None:
+    args = build_parser().parse_args(
+        ["injector-state-snapshot", "--include", "player,location", "quests", "--timeout", "1", "--client-id", "chrome-test"]
+    )
+    assert args.command == "injector-state-snapshot"
+    assert args.include == ["player,location", "quests"]
+    assert args.timeout == 1
+    assert args.client_id == "chrome-test"
 
 
 def test_injector_bot_info_cli() -> None:

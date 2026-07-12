@@ -13,12 +13,21 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_INJECTOR_HOST = "127.0.0.1"
 DEFAULT_INJECTOR_PORT = 17654
-CURRENT_BRIDGE_VERSION = "2026-07-08-background-fetch"
+CURRENT_BRIDGE_VERSION = "2026-07-11-leveling-mvp-v18"
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
-    allow_reuse_port = True
+    allow_reuse_port = False
 
 
 @dataclass(frozen=True)
@@ -41,6 +50,7 @@ class BrowserInjectorServer:
         self._last_client_seen = 0.0
         self._last_client_id: str | None = None
         self._last_client_version: str | None = None
+        self._trusted_extension_origin: str | None = None
         self._api_handler: Callable[[str, str, dict[str, list[str]], dict[str, Any] | None], tuple[int, dict[str, Any]]] | None = None
 
     def set_api_handler(
@@ -56,9 +66,15 @@ class BrowserInjectorServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_OPTIONS(self) -> None:
+                if not self._origin_allowed(allow_pair=True):
+                    self._send_json({"ok": False, "error": "origin_forbidden"}, status=403)
+                    return
                 self._send_json({"ok": True})
 
             def do_GET(self) -> None:
+                if not self._origin_allowed(allow_pair=True):
+                    self._send_json({"ok": False, "error": "origin_forbidden"}, status=403)
+                    return
                 parsed = urlparse(self.path)
                 if parsed.path.startswith("/api/") and outer._api_handler is not None:
                     self._handle_api("GET", parsed.path, parse_qs(parsed.query), None)
@@ -74,9 +90,20 @@ class BrowserInjectorServer:
                 client_version = parsed_query.get("version", [None])[0]
                 client_href = parsed_query.get("href", [""])[0]
                 client_title = parsed_query.get("title", [""])[0]
+                client_profile = parsed_query.get("profile", [""])[0]
+                client_tab_id = parsed_query.get("tab", [None])[0]
+                client_opener_tab_id = parsed_query.get("opener", [None])[0]
                 with outer._lock:
                     if client_id:
-                        outer._record_client_locked(str(client_id), client_version, href=client_href, title=client_title)
+                        outer._record_client_locked(
+                            str(client_id),
+                            client_version,
+                            href=client_href,
+                            title=client_title,
+                            profile_id=client_profile,
+                            tab_id=client_tab_id,
+                            opener_tab_id=client_opener_tab_id,
+                        )
                     else:
                         outer._last_client_seen = time.monotonic()
                     if client_version:
@@ -85,6 +112,9 @@ class BrowserInjectorServer:
                 self._send_json({"ok": True, "command": command})
 
             def do_POST(self) -> None:
+                if not self._origin_allowed(allow_pair=True):
+                    self._send_json({"ok": False, "error": "origin_forbidden"}, status=403)
+                    return
                 parsed = urlparse(self.path)
                 if parsed.path.startswith("/api/") and outer._api_handler is not None:
                     payload = self._read_json_body()
@@ -105,14 +135,29 @@ class BrowserInjectorServer:
                     message=str(payload.get("message", "")),
                     client_id=None if payload.get("client_id") is None else str(payload.get("client_id")),
                 )
+                ack_error: tuple[int, str] | None = None
                 with outer._lock:
                     command_id = str(payload.get("id") or "")
                     pending = outer._pending.get(command_id)
-                    if pending is not None:
+                    if pending is None:
+                        ack_error = (404, "ack_unknown_command")
+                    else:
+                        target_client_id = str(pending.get("target_client_id") or "")
+                        if not target_client_id:
+                            ack_error = (409, "ack_command_not_claimed")
+                        elif result.client_id != target_client_id:
+                            ack_error = (409, "ack_client_mismatch")
+                        elif pending.get("result") is not None:
+                            ack_error = (409, "ack_duplicate")
+                    if pending is not None and ack_error is None:
                         pending["result"] = result
                         event = pending.get("event")
                         if isinstance(event, threading.Event):
                             event.set()
+                if ack_error is not None:
+                    status, error = ack_error
+                    self._send_json({"ok": False, "error": error}, status=status)
+                    return
                 self._send_json({"ok": True})
 
             def log_message(self, format: str, *args: object) -> None:
@@ -142,13 +187,25 @@ class BrowserInjectorServer:
                 body = json.dumps(payload).encode("utf-8")
                 self.send_response(status)
                 self.send_header("content-type", "application/json")
-                self.send_header("access-control-allow-origin", "*")
+                origin = self.headers.get("origin")
+                self.send_header("access-control-allow-origin", origin if origin and self._origin_allowed() else "*")
                 self.send_header("access-control-allow-methods", "GET,POST,OPTIONS")
                 self.send_header("access-control-allow-headers", "content-type")
                 self.send_header("access-control-allow-private-network", "true")
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _origin_allowed(self, *, allow_pair: bool = False) -> bool:
+                origin = str(self.headers.get("origin") or "").strip().lower()
+                if not origin:
+                    return True
+                if not origin.startswith("chrome-extension://"):
+                    return False
+                with outer._lock:
+                    if outer._trusted_extension_origin is None and allow_pair:
+                        outer._trusted_extension_origin = origin
+                    return origin == outer._trusted_extension_origin
 
         self._server = ReusableThreadingHTTPServer((self.host, self.port), Handler)
         self.port = int(self._server.server_address[1])
@@ -174,6 +231,11 @@ class BrowserInjectorServer:
                 if isinstance(resolved, InjectorResult):
                     return resolved
                 target_client_id = resolved
+            elif target_client_id:
+                target_client_id = self._resolve_client_alias_locked(
+                    target_client_id,
+                    required_version=required_version,
+                )
             self._pending[command_id] = {
                 "command": {
                     "id": command_id,
@@ -185,11 +247,14 @@ class BrowserInjectorServer:
                 "event": result_event,
                 "result": None,
                 "created_at": time.monotonic(),
+                "delivered_count": 0,
             }
         if not result_event.wait(timeout_s):
             with self._lock:
-                self._pending.pop(command_id, None)
-            return InjectorResult(False, "injector_timeout")
+                pending = self._pending.pop(command_id, None)
+                delivered_count = int(pending.get("delivered_count", 0) or 0) if isinstance(pending, dict) else 0
+            message = "injector_ack_timeout" if delivered_count > 0 else "injector_delivery_timeout"
+            return InjectorResult(False, message, client_id=target_client_id)
         with self._lock:
             pending = self._pending.get(command_id)
             result = pending.get("result") if isinstance(pending, dict) else None
@@ -230,6 +295,9 @@ class BrowserInjectorServer:
                         "version_ok": data.get("version") == CURRENT_BRIDGE_VERSION,
                         "href": data.get("href") or "",
                         "title": data.get("title") or "",
+                        "profile_id": data.get("profile_id") or "",
+                        "tab_id": data.get("tab_id"),
+                        "opener_tab_id": data.get("opener_tab_id"),
                         "last_seen_ago_s": max(0.0, now - last_seen),
                     }
                 )
@@ -257,7 +325,17 @@ class BrowserInjectorServer:
             "title": "",
         }
 
-    def _record_client_locked(self, client_id: str, version: str | None, *, href: str = "", title: str = "") -> None:
+    def _record_client_locked(
+        self,
+        client_id: str,
+        version: str | None,
+        *,
+        href: str = "",
+        title: str = "",
+        profile_id: object = "",
+        tab_id: object = None,
+        opener_tab_id: object = None,
+    ) -> None:
         now = time.monotonic()
         self._last_client_seen = now
         self._last_client_id = client_id
@@ -271,6 +349,9 @@ class BrowserInjectorServer:
             client["href"] = str(href)
         if title:
             client["title"] = str(title)
+        client["profile_id"] = str(profile_id or "")
+        client["tab_id"] = _optional_int(tab_id)
+        client["opener_tab_id"] = _optional_int(opener_tab_id)
 
     def _next_command_for_client_locked(self, client_id: str | None, client_version: str | None) -> dict[str, Any] | None:
         if not client_id:
@@ -285,6 +366,8 @@ class BrowserInjectorServer:
             if target_client_id is None:
                 pending["target_client_id"] = client_id
                 pending["claimed_at"] = time.monotonic()
+            pending["delivered_count"] = int(pending.get("delivered_count", 0) or 0) + 1
+            pending["last_delivered_at"] = time.monotonic()
             return dict(pending["command"])
         return None
 
@@ -303,6 +386,35 @@ class BrowserInjectorServer:
         if len(recent) > 1:
             return InjectorResult(False, f"injector_ambiguous_clients:{','.join(sorted(recent))}")
         return None
+
+    def _resolve_client_alias_locked(self, client_id: str, *, required_version: str | None) -> str:
+        now = time.monotonic()
+        current = self._clients.get(client_id)
+        if isinstance(current, dict):
+            last_seen = float(current.get("last_seen", 0.0) or 0.0)
+            version_ok = required_version is None or current.get("version") == required_version
+            if now - last_seen <= 5.0 and version_ok:
+                return client_id
+            profile_id = str(current.get("profile_id") or "")
+            tab_id = current.get("tab_id")
+        else:
+            profile_id = ""
+            tab_id = None
+        if not profile_id or tab_id is None:
+            return client_id
+        replacements = []
+        for candidate_id, data in self._clients.items():
+            if candidate_id == client_id:
+                continue
+            last_seen = float(data.get("last_seen", 0.0) or 0.0)
+            if now - last_seen > 5.0:
+                continue
+            if required_version is not None and data.get("version") != required_version:
+                continue
+            if str(data.get("profile_id") or "") != profile_id or data.get("tab_id") != tab_id:
+                continue
+            replacements.append((last_seen, candidate_id))
+        return max(replacements)[1] if replacements else client_id
 
     @property
     def last_client_id(self) -> str | None:

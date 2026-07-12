@@ -3,25 +3,42 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-08-background-fetch";
+  const bridgeVersion = "2026-07-11-leveling-mvp-v18";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
-  const clientId = getStableClientId();
+  let clientId = "";
+  let clientIdentity = null;
+  const documentNonce = createDocumentNonce();
+  const clientReady = getTabClientId();
   let busy = false;
   let lastCommandId = null;
 
-  function getStableClientId() {
-    const key = "antibotCvClientId";
+  function getTabClientId() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "antibot-cv-tab-identity", documentNonce }, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        if (!response || !response.ok || !response.clientId) {
+          reject(new Error((response && response.error) || "tab_identity_failed"));
+          return;
+        }
+        clientId = String(response.clientId);
+        clientIdentity = response;
+        resolve(clientId);
+      });
+    });
+  }
+
+  function createDocumentNonce() {
     try {
-      const existing = window.sessionStorage.getItem(key);
-      if (existing) {
-        return existing;
-      }
-      const created = `chrome-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      window.sessionStorage.setItem(key, created);
-      return created;
+      const bytes = new Uint32Array(3);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (value) => value.toString(16).padStart(8, "0")).join("");
     } catch (_) {
-      return `chrome-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.slice(0, 24);
     }
   }
 
@@ -53,14 +70,18 @@
     if (!message || message.type !== "antibot-cv-current-client") {
       return false;
     }
-    sendResponse({
-      ok: true,
-      clientId,
-      version: bridgeVersion,
-      href: window.location.href,
-      title: document.title || "",
-    });
-    return false;
+    clientReady
+      .then(() =>
+        sendResponse({
+          ok: true,
+          clientId,
+          version: bridgeVersion,
+          href: window.location.href,
+          title: document.title || "",
+        })
+      )
+      .catch((error) => sendResponse({ ok: false, error: String(error && error.message ? error.message : error) }));
+    return true;
   });
 
   async function poll() {
@@ -69,12 +90,16 @@
     }
     busy = true;
     try {
+      await clientReady;
       const params = new URLSearchParams({
         client: clientId,
         version: bridgeVersion,
         href: window.location.href,
         title: document.title || "",
       });
+      if (clientIdentity && clientIdentity.profileId) params.set("profile", String(clientIdentity.profileId));
+      if (clientIdentity && Number.isInteger(clientIdentity.tabId)) params.set("tab", String(clientIdentity.tabId));
+      if (clientIdentity && Number.isInteger(clientIdentity.openerTabId)) params.set("opener", String(clientIdentity.openerTabId));
       const data = await localFetch(`/next?${params.toString()}`);
       const command = data && data.command;
       if (command && command.id && command.id !== lastCommandId) {
@@ -139,7 +164,14 @@
   function timeoutForPageCommand(payload) {
     const rawInventoryDelay = Number(payload && payload.inventoryOpenDelayMs);
     const inventoryDelay = Number.isFinite(rawInventoryDelay) ? Math.max(0, Math.min(5000, rawInventoryDelay)) : 0;
-    return Math.max(2000, Math.min(15000, inventoryDelay + 5000));
+    const rawVerifyTimeout = Number(payload && payload.verifyTimeoutMs);
+    const verifyTimeout = Number.isFinite(rawVerifyTimeout) ? Math.max(0, Math.min(10000, rawVerifyTimeout)) : 0;
+    const rawCommandTimeout = Number(payload && payload.commandTimeoutMs);
+    const commandTimeout = Number.isFinite(rawCommandTimeout) ? Math.max(0, Math.min(15000, rawCommandTimeout)) : 0;
+    return Math.max(
+      2000,
+      Math.min(15000, Math.max(inventoryDelay + 5000, verifyTimeout + 2500, commandTimeout))
+    );
   }
 
   function runCommandInPage(command) {

@@ -2,6 +2,11 @@ const fields = [
   "configPath",
   "maxCycles",
   "targetLevels",
+  "targetNames",
+  "goalLevel",
+  "maxDeathsPerSession",
+  "targetLocationName",
+  "autoNavigateQuestTargets",
   "startDelay",
   "healthMinPercent",
   "prowessMinPercent",
@@ -21,6 +26,18 @@ const fields = [
   "combatClickIntervalMs",
   "combatPreClickDelayMs",
   "combatClickHoldMs",
+  "battleItemRecoveryEnabled",
+  "battleHealthPotionThreshold",
+  "battleProwessPotionThreshold",
+  "battleHealthPotionSlots",
+  "battleProwessPotionSlots",
+  "battleHealthPotionNames",
+  "battleProwessPotionNames",
+  "battleDamageBoostEnabled",
+  "battleDamageBoostSlots",
+  "battleDamageBoostNames",
+  "battleItemCooldownMs",
+  "battleItemMaxUsesPerBattle",
   "live",
   "noActivateApp",
   "openHuntOnStart",
@@ -32,7 +49,8 @@ const $ = (id) => document.getElementById(id);
 const defaults = {
   configPath: "config/automation.local.json",
   maxCycles: 50,
-  targetLevels: "2",
+  targetLevels: "",
+  targetNames: "",
   startDelay: 1,
   healthMinPercent: 90,
   prowessMinPercent: 90,
@@ -52,7 +70,23 @@ const defaults = {
   combatClickIntervalMs: 900,
   combatPreClickDelayMs: 0,
   combatClickHoldMs: 0,
-  live: true,
+  battleItemRecoveryEnabled: false,
+  battleHealthPotionThreshold: 35,
+  battleProwessPotionThreshold: 15,
+  battleHealthPotionSlots: "",
+  battleProwessPotionSlots: "",
+  battleHealthPotionNames: "",
+  battleProwessPotionNames: "",
+  battleDamageBoostEnabled: false,
+  battleDamageBoostSlots: "",
+  battleDamageBoostNames: "",
+  battleItemCooldownMs: 3000,
+  battleItemMaxUsesPerBattle: 1,
+  goalLevel: null,
+  maxDeathsPerSession: 3,
+  targetLocationName: "",
+  autoNavigateQuestTargets: false,
+  live: false,
   noActivateApp: true,
   openHuntOnStart: true,
   itemRecoveryEnabled: true,
@@ -112,8 +146,31 @@ function readSettings() {
     .filter(Boolean)
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0);
+  settings.targetNames = parseNameList(settings.targetNames);
   settings.combatSlotSequence = [1, 2, 3, 4, 5, 6].filter((slot) => Boolean($(`skillSlot${slot}`)?.checked));
+  settings.battleHealthPotionSlots = parseNumberList(settings.battleHealthPotionSlots);
+  settings.battleProwessPotionSlots = parseNumberList(settings.battleProwessPotionSlots);
+  settings.battleDamageBoostSlots = parseNumberList(settings.battleDamageBoostSlots);
+  settings.battleHealthPotionNames = parseNameList(settings.battleHealthPotionNames);
+  settings.battleProwessPotionNames = parseNameList(settings.battleProwessPotionNames);
+  settings.battleDamageBoostNames = parseNameList(settings.battleDamageBoostNames);
   return settings;
+}
+
+function parseNumberList(value) {
+  return String(value || "")
+    .replace(/,/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((item) => Number(item))
+    .filter((item, index, array) => Number.isInteger(item) && item >= 0 && array.indexOf(item) === index);
+}
+
+function parseNameList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function writeSettings(settings) {
@@ -147,6 +204,10 @@ function writeSettings(settings) {
       input.checked = Boolean(value);
     } else if (id === "targetLevels" && Array.isArray(value)) {
       input.value = value.join(",");
+    } else if ((id === "battleHealthPotionSlots" || id === "battleProwessPotionSlots" || id === "battleDamageBoostSlots") && Array.isArray(value)) {
+      input.value = value.join(",");
+    } else if ((id === "targetNames" || id === "battleHealthPotionNames" || id === "battleProwessPotionNames" || id === "battleDamageBoostNames") && Array.isArray(value)) {
+      input.value = value.join(", ");
     } else {
       input.value = value ?? "";
     }
@@ -292,8 +353,23 @@ function renderStatus(status, currentClient) {
   const last = status.last_status || {};
   setStatusText("botState", last.state || (running ? "STARTING" : "STOPPED"));
   setStatusText("cycleStatus", `${last.completed_cycles ?? 0}/${last.requested_cycles ?? "?"}`);
+  const playerText = last.character_name
+    ? `${last.character_name} [${last.current_level ?? "?"}] XP ${last.current_xp_percent ?? "?"}%`
+    : "-";
+  setStatusText("playerStatus", playerText);
+  setStatusText("goalStatus", last.goal_level ? `уровень ${last.goal_level}` : "не задана");
+  setStatusText(
+    "planStatus",
+    last.leveling_intent ? `${last.leveling_intent}: ${last.leveling_reason || ""}` : "-"
+  );
+  setStatusText("deathStatus", `${last.deaths_observed ?? 0}/${settingsMaxDeaths()}`);
   setStatusText("actionStatus", last.total_actions ?? 0);
   setStatusText("errorStatus", status.last_error || last.last_error || last.error_reason || last.errors || "-");
+}
+
+function settingsMaxDeaths() {
+  const value = Number($("maxDeathsPerSession")?.value);
+  return Number.isInteger(value) && value >= 0 ? value : "?";
 }
 
 async function refreshStatus() {

@@ -30,9 +30,16 @@ class ControlRun:
 
 
 class AutomationControlApi:
-    def __init__(self, injector: BrowserInjectorServer, *, default_config: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        injector: BrowserInjectorServer,
+        *,
+        default_config: str | Path | None = None,
+        allow_live: bool = False,
+    ) -> None:
         self.injector = injector
         self.default_config = str(default_config) if default_config is not None else "config/automation.local.json"
+        self.allow_live = bool(allow_live)
         self._lock = threading.RLock()
         self._runs: dict[str, ControlRun] = {}
 
@@ -45,6 +52,10 @@ class AutomationControlApi:
             return 200, self.config_snapshot()
         if path == "/api/battle-skills" and method == "GET":
             return self.battle_skills(_query_client_id(query))
+        if path == "/api/state-snapshot" and method == "GET":
+            return self.state_snapshot(_query_client_id(query), _query_include(query))
+        if path == "/api/location-route" and method == "GET":
+            return self.location_route(_query_client_id(query))
         if path == "/api/start" and method == "POST":
             return self.start(payload or {})
         if path == "/api/stop" and method == "POST":
@@ -58,7 +69,7 @@ class AutomationControlApi:
     def status(self, client_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             selected_client_id = client_id or self._single_running_client_id_locked()
-            selected_run = self._runs.get(selected_client_id or "") if selected_client_id else None
+            selected_run = self._run_for_client_locked(selected_client_id) if selected_client_id else None
             running = selected_run.running if selected_run is not None else False
             any_running = any(run.running for run in self._runs.values())
             return {
@@ -75,6 +86,7 @@ class AutomationControlApi:
                 "client": self.injector.client_snapshot(selected_client_id),
                 "clients": self._clients_locked(),
                 "required_version": CURRENT_BRIDGE_VERSION,
+                "live_allowed": self.allow_live,
             }
 
     def config_snapshot(self) -> dict[str, Any]:
@@ -86,14 +98,18 @@ class AutomationControlApi:
         return {
             "ok": True,
             "config": config_path,
+            "live_allowed": self.allow_live,
             "defaults": {
                 "max_cycles": config.max_cycles,
                 "max_session_minutes": config.max_session_minutes,
                 "target_levels": list(config.target.allowed_levels),
+                "target_names": list(config.target.allowed_names),
                 "health_min_percent": config.resources.health_min_percent,
                 "prowess_min_percent": config.resources.prowess_min_percent,
                 "recover_to_percent": config.resources.recover_to_percent,
                 "item_recovery": to_plain_dict(config.item_recovery),
+                "battle_item_recovery": to_plain_dict(config.battle_item_recovery),
+                "leveling": to_plain_dict(config.leveling),
             },
         }
 
@@ -121,15 +137,81 @@ class AutomationControlApi:
             payload["fightHref"] = parsed.get("fightHref")
         return (200 if result.ok else 502), payload
 
+    def state_snapshot(
+        self,
+        client_id: str | None = None,
+        include: list[str] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        resolved_client_id, error = self._resolve_client_id(client_id)
+        if error is not None:
+            return 409, error
+        sections = include or ["player", "location", "deathRevive", "battle", "hunt", "quests", "shopInventory"]
+        result = self.injector.execute(
+            "state_snapshot",
+            {"include": sections},
+            timeout_s=5.0,
+            client_id=resolved_client_id,
+        )
+        try:
+            snapshot = json.loads(result.message)
+        except json.JSONDecodeError:
+            snapshot = None
+        payload: dict[str, Any] = {
+            "ok": bool(result.ok and isinstance(snapshot, dict)),
+            "client_id": result.client_id or resolved_client_id,
+            "message": "state_snapshot" if isinstance(snapshot, dict) else result.message,
+            "snapshot": snapshot if isinstance(snapshot, dict) else None,
+        }
+        return (200 if payload["ok"] else 502), payload
+
+    def location_route(self, client_id: str | None = None) -> tuple[int, dict[str, Any]]:
+        resolved_client_id, error = self._resolve_client_id(client_id)
+        if error is not None:
+            return 409, error
+        result = self.injector.execute(
+            "location_route_snapshot",
+            timeout_s=5.0,
+            client_id=resolved_client_id,
+        )
+        try:
+            snapshot = json.loads(result.message)
+        except json.JSONDecodeError:
+            snapshot = None
+        payload: dict[str, Any] = {
+            "ok": bool(result.ok and isinstance(snapshot, dict)),
+            "client_id": result.client_id or resolved_client_id,
+            "message": "location_route_snapshot" if isinstance(snapshot, dict) else result.message,
+            "snapshot": snapshot if isinstance(snapshot, dict) else None,
+        }
+        return (200 if payload["ok"] else 502), payload
+
     def start(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if "live" in payload and not isinstance(payload.get("live"), bool):
+            return 400, {
+                "ok": False,
+                "error": "invalid_live_flag",
+                "message": "live must be the JSON boolean true or false",
+            }
+        if payload.get("live") is True and not self.allow_live:
+            return 403, {
+                "ok": False,
+                "error": "live_server_not_authorized",
+                "message": "Restart control-server with the explicit --live flag.",
+            }
         resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
         if error is not None:
             return 409, error
         assert resolved_client_id is not None
         with self._lock:
-            current = self._runs.get(resolved_client_id)
+            current = self._run_for_client_locked(resolved_client_id)
             if current is not None and current.running:
-                return 409, {"ok": False, "error": "already_running", "client_id": resolved_client_id, "status": self.status(resolved_client_id)}
+                return 409, {
+                    "ok": False,
+                    "error": "tab_already_running",
+                    "client_id": resolved_client_id,
+                    "running_client_id": current.client_id,
+                    "status": self.status(resolved_client_id),
+                }
             stop_event = threading.Event()
             options = self._options_from_payload(payload, browser_client_id=resolved_client_id)
             run = ControlRun(
@@ -152,7 +234,8 @@ class AutomationControlApi:
         client_id = _payload_client_id(payload or {})
         with self._lock:
             if client_id:
-                runs = [self._runs[client_id]] if client_id in self._runs else []
+                run = self._run_for_client_locked(client_id)
+                runs = [run] if run is not None else []
             else:
                 runs = [run for run in self._runs.values() if run.running]
             if not runs:
@@ -197,7 +280,7 @@ class AutomationControlApi:
             clients.append(self.injector.client_snapshot(client_id))
         for client in clients:
             client_id = str(client.get("client_id") or "")
-            run = self._runs.get(client_id)
+            run = self._run_for_client_locked(client_id)
             client["running"] = False if run is None else run.running
             client["started_at"] = None if run is None else run.started_at
             client["ended_at"] = None if run is None else run.ended_at
@@ -212,8 +295,50 @@ class AutomationControlApi:
         running = [client_id for client_id, run in self._runs.items() if run.running]
         return running[0] if len(running) == 1 else None
 
+    def _run_for_client_locked(self, client_id: str | None) -> ControlRun | None:
+        if not client_id:
+            return None
+        exact = self._runs.get(client_id)
+        if exact is not None:
+            return exact
+        target_key = self._logical_client_key(client_id)
+        if target_key is None:
+            return None
+        matches = [
+            run
+            for run in self._runs.values()
+            if self._logical_client_key(run.client_id) == target_key
+        ]
+        running = [run for run in matches if run.running]
+        if len(running) == 1:
+            return running[0]
+        return matches[0] if len(matches) == 1 else None
+
+    def _logical_client_key(self, client_id: str) -> tuple[str, int] | None:
+        client = self.injector.client_snapshot(client_id)
+        profile_id = str(client.get("profile_id") or "")
+        tab_id = _optional_int(client.get("tab_id"))
+        if not profile_id or tab_id is None:
+            return None
+        return profile_id, tab_id
+
     def _resolve_client_id(self, client_id: str | None) -> tuple[str | None, dict[str, Any] | None]:
         if client_id:
+            client = self.injector.client_snapshot(client_id)
+            if not client.get("client_seen"):
+                return None, {
+                    "ok": False,
+                    "error": "client_not_seen",
+                    "message": "The selected Chrome tab is stale or disconnected.",
+                    "client": client,
+                }
+            if not client.get("version_ok"):
+                return None, {
+                    "ok": False,
+                    "error": "client_version_mismatch",
+                    "message": "Reload the Antibot CV extension and the selected game tab.",
+                    "client": client,
+                }
             return client_id, None
         clients = [client for client in self.injector.client_snapshots(within_s=5.0) if client.get("client_seen") and client.get("version_ok")]
         if len(clients) == 1:
@@ -234,8 +359,10 @@ class AutomationControlApi:
 
     def _options_from_payload(self, payload: dict[str, Any], *, browser_client_id: str) -> AutomationRunOptions:
         target_levels = _parse_levels(payload.get("targetLevels"))
+        target_names = _parse_names(payload.get("targetNames"))
         runtime_overrides = {
             "targetLevels": target_levels,
+            "targetNames": target_names,
             "healthMinPercent": payload.get("healthMinPercent"),
             "prowessMinPercent": payload.get("prowessMinPercent"),
             "recoverToPercent": payload.get("recoverToPercent"),
@@ -251,17 +378,35 @@ class AutomationControlApi:
             "combatClickIntervalMs": payload.get("combatClickIntervalMs"),
             "combatPreClickDelayMs": payload.get("combatPreClickDelayMs"),
             "combatClickHoldMs": payload.get("combatClickHoldMs"),
+            "battleItemRecoveryEnabled": payload.get("battleItemRecoveryEnabled"),
+            "battleHealthPotionThreshold": payload.get("battleHealthPotionThreshold"),
+            "battleProwessPotionThreshold": payload.get("battleProwessPotionThreshold"),
+            "battleHealthPotionSlots": payload.get("battleHealthPotionSlots"),
+            "battleProwessPotionSlots": payload.get("battleProwessPotionSlots"),
+            "battleHealthPotionNames": payload.get("battleHealthPotionNames"),
+            "battleProwessPotionNames": payload.get("battleProwessPotionNames"),
+            "battleDamageBoostEnabled": payload.get("battleDamageBoostEnabled"),
+            "battleDamageBoostSlots": payload.get("battleDamageBoostSlots"),
+            "battleDamageBoostNames": payload.get("battleDamageBoostNames"),
+            "battleItemCooldownMs": payload.get("battleItemCooldownMs"),
+            "battleItemMaxUsesPerBattle": payload.get("battleItemMaxUsesPerBattle"),
+            "goalLevel": payload.get("goalLevel"),
+            "requiredCharacterName": payload.get("requiredCharacterName"),
+            "maxDeathsPerSession": payload.get("maxDeathsPerSession"),
+            "targetLocationName": payload.get("targetLocationName"),
+            "autoNavigateQuestTargets": payload.get("autoNavigateQuestTargets"),
             "confirmDelayMs": payload.get("confirmDelayMs"),
             "betweenItemsDelayMs": payload.get("betweenItemsDelayMs"),
         }
         runtime_overrides = {key: value for key, value in runtime_overrides.items() if value is not None}
         return AutomationRunOptions(
             config_path=str(payload.get("configPath") or self.default_config),
-            live=bool(payload.get("live", True)),
+            live=payload.get("live") is True,
             preview=bool(payload.get("preview", False)),
             max_cycles=_optional_int(payload.get("maxCycles")),
             max_session_minutes=_optional_int(payload.get("maxSessionMinutes")),
             target_allowed_levels=tuple(target_levels) if target_levels else None,
+            target_allowed_names=tuple(target_names) if target_names else None,
             start_delay=_optional_float(payload.get("startDelay")),
             activate_app=str(payload.get("activateApp") or "") or None,
             no_activate_app=bool(payload.get("noActivateApp", True)),
@@ -275,6 +420,17 @@ class AutomationControlApi:
 def _query_client_id(query: dict[str, list[str]]) -> str | None:
     value = query.get("clientId", [None])[0] or query.get("client_id", [None])[0]
     return str(value).strip() if value else None
+
+
+def _query_include(query: dict[str, list[str]]) -> list[str] | None:
+    raw_values = query.get("include", [])
+    values: list[str] = []
+    for raw in raw_values:
+        for part in str(raw).replace(",", " ").split():
+            name = part.strip()
+            if name and name not in values:
+                values.append(name)
+    return values or None
 
 
 def _payload_client_id(payload: dict[str, Any]) -> str | None:
@@ -301,6 +457,18 @@ def _parse_levels(value: object) -> list[int]:
         if level and level > 0 and level not in levels:
             levels.append(level)
     return levels
+
+
+def _parse_names(value: object) -> list[str]:
+    if value is None:
+        return []
+    raw = value.replace("\n", ",").split(",") if isinstance(value, str) else value if isinstance(value, list) else [value]
+    names: list[str] = []
+    for item in raw:
+        name = str(item).strip()
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 def _optional_int(value: object) -> int | None:

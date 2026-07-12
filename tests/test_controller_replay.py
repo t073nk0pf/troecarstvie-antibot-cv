@@ -661,6 +661,192 @@ def test_live_js_combat_uses_configured_slot_sequence(test_config: AutomationCon
     assert [request.metadata["skill_slot"] for request in sink.requests] == [2, 3]
 
 
+def test_live_battle_item_recovery_precedes_skills_and_honors_cooldown_and_max_uses(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["combat"] = {**data["combat"], "click_interval_ms": 0, "slot_sequence": [2, 3]}
+    data["resources"] = {
+        **data["resources"],
+        "enabled": True,
+        "wait_in_battle_when_low": True,
+        "fail_open_if_missing": False,
+    }
+    data["battle_item_recovery"] = {
+        **data["battle_item_recovery"],
+        "enabled": True,
+        "health_use_when_below_percent": 35,
+        "prowess_use_when_below_percent": 15,
+        "health_slots": [5],
+        "prowess_names": ["Малый бурдюк удали"],
+        "cooldown_ms": 30_000,
+        "max_uses_per_battle": 1,
+    }
+    config = AutomationConfig.from_dict(data)
+    logger = InMemoryEventLogger(dry_run=False)
+    controller = AutomationController(config, sink_mode="live", logger=logger)
+    sink = DryRunActionSink(logger)
+    controller.action_executor.sink = sink
+    controller.session.new_battle()
+    controller._safe_transition(GameState.BATTLE_ACTIVE, reason="test")
+
+    low_health = lambda: ResourceStatus(
+        health=ResourceBarStatus("health", True, 20.0, 1.0),
+        prowess=ResourceBarStatus("prowess", True, 90.0, 1.0),
+    )
+    controller._resource_status_via_injector = low_health
+
+    assert controller._continue_battle_combat(blank_frame(), None) is False
+    assert [request.action_type for request in sink.requests] == ["use_battle_item"]
+    assert sink.requests[0].metadata["kind"] == "health"
+    assert sink.requests[0].metadata["slots"] == [5]
+
+    # The cooldown prevents another item request, while combat can continue with a skill.
+    assert controller._continue_battle_combat(blank_frame(), None) is True
+    assert [request.action_type for request in sink.requests] == ["use_battle_item", "click_combat_slot"]
+    assert sink.requests[-1].metadata["skill_slot"] == 2
+
+    # Even after the cooldown has elapsed, max_uses_per_battle prevents a second item use.
+    controller._last_battle_item_recovery_monotonic = time.monotonic() - 60
+    assert controller._continue_battle_combat(blank_frame(), None) is True
+    assert [request.action_type for request in sink.requests] == [
+        "use_battle_item",
+        "click_combat_slot",
+        "click_combat_slot",
+    ]
+    assert [request.metadata["skill_slot"] for request in sink.requests[1:]] == [2, 3]
+
+
+def test_live_combat_policy_uses_allowlisted_damage_boost_once_then_skill(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["combat"] = {**data["combat"], "click_interval_ms": 0, "slot_sequence": [2, 3]}
+    data["battle_item_recovery"] = {
+        **data["battle_item_recovery"],
+        "enabled": True,
+        "damage_boost_enabled": True,
+        "damage_boost_slots": [6],
+        "damage_boost_names": ["Эликсир силы"],
+        "cooldown_ms": 0,
+        "max_uses_per_battle": 1,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.session.new_battle()
+    controller._safe_transition(GameState.BATTLE_ACTIVE, reason="test")
+    controller._resource_status_via_injector = lambda: ResourceStatus(
+        health=ResourceBarStatus("health", True, 90.0, 1.0),
+        prowess=ResourceBarStatus("prowess", True, 90.0, 1.0),
+    )
+    controller._last_battle_snapshot_cache = {
+        "hasFight": True,
+        "finished": False,
+        "myTurn": True,
+        "useSkillAvailable": True,
+        "abilities": [{"slot": 2, "name": "Сильный удар", "ready": True, "cooldown": 0}],
+        "items": [
+            {
+                "slot": 6,
+                "name": "Эликсир силы",
+                "ready": True,
+                "disabled": False,
+                "cooldown": 0,
+                "quantity": 2,
+            }
+        ],
+    }
+    controller._last_battle_snapshot_success_monotonic = time.monotonic()
+
+    assert controller._continue_battle_combat(blank_frame(), None) is False
+    assert sink.requests[-1].action_type == "use_battle_item"
+    assert sink.requests[-1].metadata["kind"] == "damage_boost"
+    assert sink.requests[-1].metadata["slots"] == [6]
+
+    assert controller._continue_battle_combat(blank_frame(), None) is True
+    assert sink.requests[-1].action_type == "click_combat_slot"
+    assert sink.requests[-1].metadata["skill_slot"] == 2
+
+
+def test_live_combat_policy_ignores_unallowlisted_item_and_waits_on_opponent_turn(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["combat"] = {**data["combat"], "click_interval_ms": 0, "slot_sequence": [2]}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.session.new_battle()
+    controller._safe_transition(GameState.BATTLE_ACTIVE, reason="test")
+    controller._resource_status_via_injector = lambda: ResourceStatus(
+        health=ResourceBarStatus("health", True, 10.0, 1.0),
+        prowess=ResourceBarStatus("prowess", True, 90.0, 1.0),
+    )
+    controller._last_battle_snapshot_cache = {
+        "hasFight": True,
+        "finished": False,
+        "myTurn": False,
+        "useSkillAvailable": True,
+        "abilities": [{"slot": 2, "name": "Удар", "ready": True, "cooldown": 0}],
+        "items": [{"slot": 9, "name": "Неизвестная банка", "ready": True, "cooldown": 0, "quantity": 9}],
+    }
+    controller._last_battle_snapshot_success_monotonic = time.monotonic()
+
+    assert controller._continue_battle_combat(blank_frame(), None) is False
+    assert sink.requests == []
+
+
+def test_live_combat_policy_ignores_positive_item_ids_in_ability_array(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.combat_policy import CombatIntent
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["combat"] = {**data["combat"], "slot_sequence": [2]}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    status = ResourceStatus(
+        health=ResourceBarStatus("health", True, 90.0, 1.0),
+        prowess=ResourceBarStatus("prowess", True, 90.0, 1.0),
+    )
+
+    decision = controller._combat_policy_decision(
+        status,
+        {
+            "hasFight": True,
+            "finished": False,
+            "myTurn": True,
+            "useSkillAvailable": True,
+            "abilities": [
+                {"id": 438, "slot": 2, "name": "Малый бурдюк жизни", "ready": True, "cooldown": 0},
+                {"id": -4626, "slot": 2, "name": "Возмездие I", "ready": True, "cooldown": 0},
+            ],
+            "items": [],
+        },
+    )
+
+    assert decision.intent is CombatIntent.USE_SKILL
+    assert decision.skill is not None
+    assert decision.skill.name == "Возмездие I"
+
+
 def test_live_js_battle_sync_creates_battle_context_before_skills(test_config: AutomationConfig) -> None:
     from src.antibot_cv.automation.config import to_plain_dict
 
@@ -678,10 +864,12 @@ def test_live_js_battle_sync_creates_battle_context_before_skills(test_config: A
     )
     controller._battle_snapshot_via_injector = lambda force=False: {
         "hasFight": True,
+        "finished": False,
+        "myTurn": True,
         "useSkillAvailable": True,
         "fightPath": "top.frames[1].frames[2]",
         "fightHref": "https://3kingdoms.ru/fight.php?1",
-        "abilities": [{"id": -4626, "slot": 2, "name": "Возмездие I"}],
+        "abilities": [{"id": -4626, "slot": 2, "name": "Возмездие I", "ready": True, "cooldown": 0}],
     }
 
     assert controller.session.battle_id is None
@@ -720,6 +908,32 @@ def test_battle_wait_timeout_extends_on_live_fight_page(test_config: AutomationC
     assert controller.session.battle_id == battle_id
     assert controller.session.recoveries == 0
     assert any(event["event_type"] == "battle_wait_extended" for event in logger.events)
+
+
+def test_live_battle_active_timeout_stops_when_bridge_state_is_ambiguous(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["recovery"] = {**data["recovery"], "battle_active_timeout_ms": 1}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    controller.session.new_battle()
+    controller.session.mark_battle_detected()
+    controller._safe_transition(GameState.BATTLE_ACTIVE, reason="test")
+    controller._state_entered_monotonic -= 1
+    controller._battle_snapshot_via_injector = lambda force=False: None
+
+    assert controller._recover_stuck_state(blank_frame()) is True
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "battle_active_timeout_unconfirmed_state"
+    assert controller.session.recoveries == 0
 
 
 def test_battle_end_timeout_extends_when_battle_still_active(test_config: AutomationConfig) -> None:
@@ -784,10 +998,12 @@ def test_battle_end_timeout_extends_on_live_fight_page(test_config: AutomationCo
     controller._state_entered_monotonic -= 1
     controller._battle_snapshot_via_injector = lambda force=False: {
         "hasFight": True,
+        "finished": False,
+        "myTurn": True,
         "useSkillAvailable": True,
         "fightPath": "top.frames[1].frames[2]",
         "fightHref": "https://3kingdoms.ru/fight.php?abc",
-        "abilities": [{"id": -4626, "slot": 2, "name": "Возмездие I"}],
+        "abilities": [{"id": -4626, "slot": 2, "name": "Возмездие I", "ready": True, "cooldown": 0}],
     }
     controller._visible_hunt_snapshot_via_injector = lambda: {
         "mainHref": "https://3kingdoms.ru/fight.php?abc",
@@ -1373,8 +1589,14 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
             "combatClickIntervalMs": "450",
             "combatPreClickDelayMs": "75",
             "combatClickHoldMs": "25",
+            "battleDamageBoostEnabled": True,
+            "battleDamageBoostSlots": [6],
+            "battleDamageBoostNames": ["Эликсир силы"],
             "recoveryHealthThreshold": "85",
             "recoveryProwessThreshold": "80",
+            "goalLevel": "6",
+            "maxDeathsPerSession": "2",
+            "targetLocationName": "Длань Рода",
         },
     )
 
@@ -1384,8 +1606,1008 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
     assert config.combat.click_interval_ms == 450
     assert config.combat.pre_click_delay_ms == 75
     assert config.combat.click_hold_ms == 25
+    assert config.battle_item_recovery.damage_boost_enabled is True
+    assert config.battle_item_recovery.damage_boost_slots == (6,)
+    assert config.battle_item_recovery.damage_boost_names == ("Эликсир силы",)
     assert config.item_recovery.health_use_when_below_percent == 85
     assert config.item_recovery.prowess_use_when_below_percent == 80
+    assert config.leveling.enabled is True
+    assert config.leveling.target_level == 6
+    assert config.leveling.max_deaths_per_session == 2
+    assert config.leveling.target_location_name == "Длань Рода"
+
+
+def test_live_leveling_goal_stops_at_confirmed_character_level(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 6,
+        "required_character_name": "v3g45",
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "sections": {
+            "player": {"status": "available", "data": {"name": "v3g45", "level": 6, "xpPercent": 0.5}},
+            "location": {"status": "partial", "data": {"pageKind": "area", "semanticName": "Длань Рода"}},
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.current_character_name == "v3g45"
+    assert controller.current_level == 6
+    assert controller.current_xp_percent == 0.5
+    assert any(event["event_type"] == "goal_level_reached" for event in controller.logger.events)
+
+
+def test_live_leveling_goal_stops_on_character_mismatch(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "sections": {
+            "player": {"status": "available", "data": {"name": "other", "level": 5, "xpPercent": 20}},
+            "location": {"status": "partial", "data": {"pageKind": "area", "semanticName": None}},
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "character_mismatch:other"
+
+
+def test_leveling_binds_first_character_when_config_name_is_empty(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "",
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    observed_name = "hero-a"
+
+    def snapshot():
+        return {
+            "schemaVersion": 1,
+            "sections": {
+                "player": {
+                    "data": {
+                        "name": observed_name,
+                        "level": 5,
+                        "xpPercent": 20,
+                        "hpPercent": 100,
+                        "prowessPercent": 100,
+                    }
+                },
+                "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+                "deathRevive": {"data": {"dead": False}},
+                "quests": {"data": {"items": []}},
+            },
+        }
+
+    controller._state_snapshot_via_injector = snapshot
+    assert controller._observe_leveling_goal() is False
+    assert controller._bound_character_name == "hero-a"
+
+    observed_name = "hero-b"
+    assert controller._observe_leveling_goal() is True
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "character_mismatch:hero-b"
+
+
+def test_leveling_policy_stops_before_actions_when_active_resources_are_unknown(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "sections": {
+            "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+            "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+            "deathRevive": {"data": {"dead": False}},
+            "quests": {"data": {"items": []}},
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "leveling_policy:unknown_observation"
+    assert sink.requests == []
+
+
+def test_leveling_stops_when_cached_snapshot_exceeds_freshness_limit(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "snapshot_stale_timeout_ms": 1000,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    cached = {
+        "schemaVersion": 1,
+        "sections": {
+            "player": {
+                "data": {
+                    "name": "v3g45",
+                    "level": 5,
+                    "xpPercent": 20,
+                    "hpPercent": 100,
+                    "prowessPercent": 100,
+                }
+            },
+            "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+            "deathRevive": {"data": {"dead": False}},
+            "quests": {"data": {"items": []}},
+        },
+    }
+    controller._state_snapshot_cache = cached
+    controller._last_state_snapshot_success_monotonic = time.monotonic() - 2
+    controller._state_snapshot_via_injector = lambda: cached
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "leveling_state_snapshot_stale"
+    assert sink.requests == []
+
+
+def test_leveling_uses_current_level_and_cached_quest_names_for_target(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "auto_target_level_offsets": [0],
+        "auto_navigate_quest_targets": True,
+    }
+    data["target"] = {**data["target"], "allowed_levels": [], "allowed_names": []}
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_level = 5
+    controller._quest_target_names = ("Волколаков-живодеров",)
+    controller._resources_allow_search = lambda frame: True
+
+    assert controller._attack_visible_target_via_injector(blank_frame()) is True
+    assert sink.requests[0].metadata["allowed_levels"] == [5]
+    assert sink.requests[0].metadata["names"] == ["Волколаков-живодеров"]
+
+
+def test_leveling_waits_for_finished_battle_resolution_with_transient_zero_resources(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    controller.state_machine.state = GameState.WAIT_BATTLE_END
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "snapshotId": "battle-finished-transient",
+        "sections": {
+            "player": {
+                "data": {
+                    "name": "v3g45",
+                    "level": 5,
+                    "xpPercent": 20,
+                    "hpPercent": 0,
+                    "prowessPercent": 0,
+                }
+            },
+            "location": {"data": {"pageKind": "battle", "semanticName": None}},
+            "deathRevive": {"data": {"dead": None, "freeReviveAvailable": False}},
+            "battle": {"data": {"rawHasFight": True, "hasFight": False, "finished": True}},
+            "quests": {"data": {"loadStatus": "not_loaded", "items": []}},
+        },
+    }
+
+    assert controller._observe_leveling_goal() is False
+    assert controller.state_machine.state is GameState.WAIT_BATTLE_END
+    assert controller.last_leveling_intent == "WAIT"
+    assert controller.last_leveling_reason == "battle_resolution_pending"
+    assert controller.last_error_reason is None
+
+
+def test_leveling_treats_confirmed_hunt_app_as_alive_when_death_marker_is_transient(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "snapshotId": "hunt-after-battle",
+        "sections": {
+            "player": {
+                "data": {
+                    "name": "v3g45",
+                    "level": 5,
+                    "xpPercent": 20,
+                    "hpPercent": 0,
+                    "prowessPercent": 0,
+                }
+            },
+            "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+            "deathRevive": {"data": {"dead": None, "freeReviveAvailable": False}},
+            "battle": {"data": {"rawHasFight": False, "hasFight": False, "finished": False}},
+            "hunt": {"data": {"hasHunt": True}},
+            "quests": {"data": {"loadStatus": "not_loaded", "items": []}},
+            "shopInventory": {"data": {"items": []}},
+        },
+    }
+
+    assert controller._observe_leveling_goal() is False
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH
+    assert controller.last_leveling_intent == "REST"
+    assert controller.last_leveling_reason == "hp_below_threshold_no_allowed_item"
+    assert controller.last_error_reason is None
+
+
+def test_leveling_does_not_filter_farm_targets_by_quest_when_quest_navigation_is_off(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "auto_navigate_quest_targets": False,
+    }
+    data["target"] = {**data["target"], "allowed_names": []}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    controller._quest_target_names = ("Волколаков-живодеров",)
+
+    assert controller._effective_target_names() == ()
+
+
+def test_leveling_revives_once_then_returns_to_hunt(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "max_deaths_per_session": 3,
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    snapshots = iter(
+        [
+            {
+                "schemaVersion": 1,
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "other", "semanticName": None}},
+                    "deathRevive": {"data": {"dead": True, "freeReviveAvailable": True}},
+                    "quests": {"data": {"items": []}},
+                },
+            },
+            {
+                "schemaVersion": 1,
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "other", "semanticName": None}},
+                    "deathRevive": {"data": {"dead": True, "freeReviveAvailable": True}},
+                    "quests": {"data": {"items": []}},
+                },
+            },
+            {
+                "schemaVersion": 1,
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+                    "deathRevive": {"data": {"dead": False, "freeReviveAvailable": False}},
+                    "quests": {"data": {"items": []}},
+                },
+            },
+        ]
+    )
+    controller._state_snapshot_via_injector = lambda: next(snapshots)
+
+    controller.process_frame(blank_frame())
+    assert controller.state_machine.state == GameState.REVIVE_PENDING
+    controller.process_frame(blank_frame())
+    assert controller.state_machine.state == GameState.REVIVE_PENDING
+    assert [request.action_type for request in sink.requests] == ["revive_free"]
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.LOCATION_SEARCH
+    assert controller.deaths_observed == 1
+    assert [request.action_type for request in sink.requests] == ["revive_free", "open_hunt"]
+
+
+def test_death_guard_blocks_recovery_until_revive_confirmed_when_leveling_disabled(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": False,
+        "required_character_name": "v3g45",
+        "max_deaths_per_session": 3,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+
+    snapshots = iter(
+        [
+            {
+                "schemaVersion": 1,
+                "snapshotId": "dead-1",
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "area", "semanticName": "Городская площадь"}},
+                    "deathRevive": {
+                        "data": {
+                            "dead": True,
+                            "freeReviveAvailable": True,
+                            "freeReviveOptionCount": 1,
+                        }
+                    },
+                },
+            },
+            {
+                "schemaVersion": 1,
+                "snapshotId": "pending-1",
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "inventory", "semanticName": None}},
+                    "deathRevive": {"data": {"dead": None, "freeReviveAvailable": False}},
+                },
+            },
+            {
+                "schemaVersion": 1,
+                "snapshotId": "alive-1",
+                "sections": {
+                    "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+                    "location": {"data": {"pageKind": "area", "semanticName": "Городская площадь"}},
+                    "deathRevive": {"data": {"dead": False, "freeReviveAvailable": False}},
+                },
+            },
+        ]
+    )
+    controller._state_snapshot_via_injector = lambda **_: next(snapshots)
+
+    assert controller._observe_death_guard(force=True) is True
+    assert controller.state_machine.state is GameState.REVIVE_PENDING
+    assert [request.action_type for request in sink.requests] == ["revive_free"]
+
+    assert controller._observe_death_guard(force=True) is True
+    assert controller.state_machine.state is GameState.REVIVE_PENDING
+    assert [request.action_type for request in sink.requests] == ["revive_free"]
+
+    assert controller._observe_death_guard(force=True) is True
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH
+    assert [request.action_type for request in sink.requests] == ["revive_free", "open_hunt"]
+
+
+def test_death_checkpoint_prefers_last_confirmed_alive_area(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {**data["leveling"], "enabled": False, "max_deaths_per_session": 3}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+
+    controller._update_location_tracking(
+        {"pageKind": "area", "semanticName": "Курганы бренности"},
+        {"dead": False},
+        {"hpPercent": 100},
+    )
+    controller.current_page_kind = "battle"
+    controller.current_location_name = None
+
+    assert controller._handle_leveling_death(
+        {"dead": True, "freeReviveAvailable": True, "freeReviveOptionCount": 1}
+    ) is True
+
+    assert controller._last_alive_location_name == "Курганы бренности"
+    assert controller._death_checkpoint is not None
+    assert controller._death_checkpoint.location == "Курганы бренности"
+    assert [request.action_type for request in sink.requests] == ["revive_free"]
+
+
+def test_confirmed_revive_opens_compass_for_different_checkpoint_location(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {**data["leveling"], "enabled": False, "max_deaths_per_session": 3}
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller._last_alive_location_name = "Курганы бренности"
+    controller.current_page_kind = "battle"
+
+    assert controller._handle_leveling_death(
+        {"dead": True, "freeReviveAvailable": True, "freeReviveOptionCount": 1}
+    ) is True
+    controller.current_page_kind = "area"
+    controller.current_location_name = "Город Барбус"
+
+    assert controller._handle_leveling_death({"dead": False, "freeReviveAvailable": False}) is True
+
+    assert controller.state_machine.state is GameState.NAVIGATOR_PENDING
+    assert controller._navigator_target_name == "Курганы бренности"
+    assert controller._navigator_requires_target_selection is True
+    assert controller._route_recovery_kind == "post_revive_location"
+    assert [request.action_type for request in sink.requests] == ["revive_free", "open_location_navigator"]
+
+
+def test_leveling_death_cap_stops_before_revive(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "max_deaths_per_session": 0,
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "sections": {
+            "player": {"data": {"name": "v3g45", "level": 5, "xpPercent": 20}},
+            "location": {"data": {"pageKind": "other", "semanticName": None}},
+            "deathRevive": {"data": {"dead": True, "freeReviveAvailable": True}},
+            "quests": {"data": {"items": []}},
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "death_recovery:max_deaths_reached"
+    assert sink.requests == []
+
+
+def test_leveling_ambiguous_revive_times_out_without_retry(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "revive_verify_timeout_ms": 1000,
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    controller.state_machine.state = GameState.REVIVE_PENDING
+    controller._revive_requested_monotonic = time.monotonic() - 2
+    controller._revive_attempted_for_current_death = True
+
+    assert controller._handle_leveling_death({"dead": None}) is True
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "free_revive_result_ambiguous"
+
+
+def test_leveling_external_revive_recovers_dead_state(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {**data["leveling"], "enabled": True, "target_level": 10}
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.state_machine.state = GameState.DEAD
+    controller._death_latched = True
+
+    assert controller._handle_leveling_death({"dead": False}) is True
+    assert controller.state_machine.state == GameState.LOCATION_SEARCH
+    assert [request.action_type for request in sink.requests] == ["open_hunt"]
+
+
+def test_leveling_revive_restores_active_quest_route_checkpoint(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "auto_navigate_quest_targets": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "hunt"
+    controller.current_location_name = "Дикий предел"
+    controller._active_quest_id = "quest-91"
+    controller._current_state_snapshot_id = "dead-state"
+
+    assert controller._handle_leveling_death(
+        {"dead": True, "freeReviveAvailable": True, "freeReviveOptionCount": 1}
+    ) is True
+    assert controller.state_machine.state is GameState.REVIVE_PENDING
+
+    controller._current_state_snapshot_id = "alive-state"
+    assert controller._handle_leveling_death({"dead": False, "freeReviveAvailable": False}) is True
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert [request.action_type for request in sink.requests] == ["revive_free", "open_quests"]
+    assert sink.requests[-1].metadata["checkpoint_quest"] == "quest-91"
+    assert sink.requests[-1].metadata["checkpoint_location"] == "Дикий предел"
+
+
+def test_leveling_periodically_refreshes_quest_targets(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["max_cycles"] = 10
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "quest_refresh_every_cycles": 5,
+    }
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False))
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "hunt"
+
+    assert controller._maybe_start_quest_refresh() is False
+    controller.session.completed_cycles = 5
+    assert controller._maybe_start_quest_refresh() is True
+    assert controller.state_machine.state == GameState.QUEST_REFRESH_PENDING
+    controller.current_page_kind = "quests"
+    controller._update_quest_target_names(
+        {
+            "items": [
+                {
+                    "objective": "Убейте Волколаков-живодеров и вернитесь к Вилене",
+                    "navigation": [
+                        {"text": "Дикий предел"},
+                    ],
+                }
+            ]
+        }
+    )
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state == GameState.LOCATION_SEARCH
+    assert controller._next_quest_refresh_cycle == 10
+    assert controller._quest_target_names == ("Волколаков-живодеров",)
+    assert controller._quest_route_locations == ("Дикий предел",)
+    assert controller._quest_target_routes == {"Волколаков-живодеров": ("Дикий предел",)}
+    assert [request.action_type for request in sink.requests] == ["open_quests", "open_hunt"]
+
+
+def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "auto_navigate_quest_targets": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+        browser_client_id="client-a",
+    )
+    controller.current_character_name = "v3g45"
+    controller.current_level = 5
+    controller.current_xp_percent = 20.0
+    controller.current_page_kind = "quests"
+    controller._quest_origin_location_name = "Старая локация"
+    controller._last_state_snapshot_client_id = "client-a"
+
+    class FakeInjector:
+        profile_id = "profile-a"
+
+        def client_snapshot(self, client_id):
+            return {
+                "client_id": client_id,
+                "client_seen": True,
+                "version_ok": True,
+                "profile_id": self.profile_id,
+                "tab_id": 17,
+            }
+
+    fake = FakeInjector()
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: fake)
+    state = {"snapshotId": "state-1", "generatedAt": time.time()}
+    section = {"source": {"href": "https://3kingdoms.ru/user_quest.php?mode=started"}}
+    quest_data = {
+        "loadStatus": "loaded",
+        "snapshotId": "state-1",
+        "generatedAt": state["generatedAt"],
+        "pageKind": "quests",
+        "href": "https://3kingdoms.ru/user_quest.php?mode=started",
+        "items": [
+            {
+                "id": "91",
+                "title": "Охота",
+                "status": "active",
+                "objectiveKind": "combat",
+                "objective": "Уничтожьте 5 волколаков-живодеров в Диком пределе.",
+                "navigation": [{"text": "Дикий предел"}],
+            }
+        ],
+    }
+
+    decision = controller._evaluate_quest_policy(state, section, quest_data)
+
+    assert decision.intent is QuestIntent.NAVIGATE
+    assert controller._quest_target_names == ("волколаков-живодеров",)
+    assert controller._quest_route_locations == ("Дикий предел",)
+    assert controller._quest_target_routes == {"волколаков-живодеров": ("Дикий предел",)}
+
+    fake.profile_id = "profile-b"
+    mismatched = controller._evaluate_quest_policy(
+        {"snapshotId": "state-2", "generatedAt": time.time()}, section, {**quest_data, "snapshotId": "state-2"}
+    )
+    assert mismatched.intent is QuestIntent.STOP_UNSAFE
+    assert mismatched.reason == "quest_snapshot_identity_mismatch"
+    assert controller._quest_target_names == ()
+    assert controller._quest_route_locations == ()
+
+
+def test_empty_loaded_quest_snapshot_cannot_start_quest_driven_farm(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "v3g45",
+        "auto_navigate_quest_targets": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+        browser_client_id="client-a",
+    )
+    controller.current_character_name = "v3g45"
+    controller.current_level = 5
+    controller.current_xp_percent = 20.0
+    controller.current_page_kind = "quests"
+    controller._quest_origin_location_name = "Лес"
+    controller._last_state_snapshot_client_id = "client-a"
+
+    class FakeInjector:
+        def client_snapshot(self, client_id):
+            return {"client_id": client_id, "profile_id": "profile-a", "tab_id": 17}
+
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: FakeInjector())
+    now = time.time()
+    decision = controller._evaluate_quest_policy(
+        {"snapshotId": "empty", "generatedAt": now},
+        {"source": {"href": "https://3kingdoms.ru/user_quest.php?mode=started"}},
+        {
+            "loadStatus": "loaded",
+            "snapshotId": "empty",
+            "generatedAt": now,
+            "pageKind": "quests",
+            "href": "https://3kingdoms.ru/user_quest.php?mode=started",
+            "items": [],
+        },
+    )
+
+    assert decision.intent is QuestIntent.STOP_UNSAFE
+    assert decision.reason == "no_active_combat_quest"
+    assert controller._quest_target_names == ()
+
+
+def test_leveling_routes_through_child_navigator_for_matching_quest_location(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.browser_injector import InjectorResult
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "auto_navigate_quest_targets": True,
+        "route_settle_ms": 1,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+        browser_client_id="parent-client",
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "quests"
+    controller._quest_refresh_requested_monotonic = time.monotonic()
+    controller._update_quest_target_names(
+        {
+            "items": [
+                {
+                    "objective": "Уничтожьте 5 волколаков-живодеров в Диком пределе.",
+                    "navigation": [{"text": "Дикий предел"}],
+                }
+            ]
+        }
+    )
+    controller._quest_policy_intent = QuestIntent.NAVIGATE
+    controller._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="test")
+
+    class FakeInjector:
+        def client_snapshot(self, client_id):
+            assert client_id == "parent-client"
+            return {"client_id": client_id, "profile_id": "profile-1", "tab_id": 101}
+
+        def client_snapshots(self, *, within_s):
+            assert within_s == 5.0
+            return [
+                {
+                    "client_id": "navigator-client",
+                    "client_seen": True,
+                    "version_ok": True,
+                    "profile_id": "profile-1",
+                    "opener_tab_id": 101,
+                    "href": "https://3kingdoms.ru/navigator.php?name=x",
+                }
+            ]
+
+        def execute(self, command, *, timeout_s, client_id):
+            assert command == "navigator_snapshot"
+            assert timeout_s == 2.5
+            assert client_id == "navigator-client"
+            return InjectorResult(
+                True,
+                json.dumps(
+                        {
+                            "snapshotId": "navigator-state-1",
+                            "generatedAt": time.time(),
+                            "href": "https://3kingdoms.ru/navigator.php?name=x",
+                            "target": "Дикий предел",
+                            "currentLocation": False,
+                            "hasRoute": True,
+                            "routeTransitions": 2,
+                            "visibleGoButtonCount": 1,
+                        }
+                ),
+                client_id=client_id,
+            )
+
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: FakeInjector())
+
+    controller._handle_quest_refresh()
+    assert controller.state_machine.state == GameState.NAVIGATOR_PENDING
+    assert controller._navigator_target_name == "Дикий предел"
+
+    controller._handle_navigator_pending()
+    assert controller.state_machine.state == GameState.ROUTE_RECOVERY
+    controller._route_go_submitted_monotonic = time.monotonic() - 1
+    controller._state_snapshot_via_injector = lambda force=False: {
+        "schemaVersion": 1,
+        "sections": {
+            "location": {
+                "status": "available",
+                "data": {"pageKind": "area", "semanticName": "Дикий предел"},
+            }
+        },
+    }
+    controller._handle_route_recovery()
+
+    assert controller.state_machine.state == GameState.LOCATION_SEARCH
+    assert [request.action_type for request in sink.requests] == [
+        "open_quest_navigator",
+        "navigator_go",
+        "open_hunt",
+    ]
+    assert sink.requests[1].metadata["navigator_client_id"] == "navigator-client"
+
+
+def test_leveling_stops_on_ambiguous_quest_route_without_opening_hunt(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "auto_navigate_quest_targets": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "quests"
+    controller._quest_refresh_requested_monotonic = time.monotonic()
+    controller._quest_route_locations = ("Дикий предел", "Прокаленное плато")
+    controller._quest_policy_intent = QuestIntent.NAVIGATE
+    controller._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="test")
+
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state == GameState.STOPPED
+    assert controller.last_error_reason == "quest_route_target_missing_or_ambiguous"
+    assert sink.requests == []
+
+
+def test_leveling_stops_when_navigator_submission_has_no_parent_page_postcondition(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "auto_navigate_quest_targets": True,
+        "route_settle_ms": 1,
+        "navigator_timeout_ms": 1,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
+    )
+    controller.state_machine.state = GameState.ROUTE_RECOVERY
+    controller._navigator_target_name = "Дикий предел"
+    controller._route_go_submitted_monotonic = time.monotonic() - 2
+    controller._state_snapshot_via_injector = lambda force=False: {
+        "schemaVersion": 1,
+        "sections": {"location": {"data": {"pageKind": "quests", "semanticName": None}}},
+    }
+
+    controller._handle_route_recovery()
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "navigator_route_result_unconfirmed"
+
+
+def test_authoritative_empty_quest_snapshot_clears_old_target_names(test_config: AutomationConfig) -> None:
+    controller = AutomationController(test_config, sink_mode="replay", logger=InMemoryEventLogger())
+    controller._quest_target_names = ("Старый моб",)
+    controller._quest_route_locations = ("Старая локация",)
+    controller._quest_target_routes = {"Старый моб": ("Старая локация",)}
+
+    controller._update_quest_target_names({"items": []})
+
+    assert controller._quest_target_names == ()
+    assert controller._quest_route_locations == ()
+    assert controller._quest_target_routes == {}
 
 
 def test_scrollbar_fallback_after_direction_search_exhausted(test_config: AutomationConfig) -> None:

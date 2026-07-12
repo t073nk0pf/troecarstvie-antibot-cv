@@ -61,10 +61,28 @@ class BlockedActionSink:
 
 
 class LiveMacActionSink:
-    def __init__(self, logger: object | None = None) -> None:
+    def __init__(self, logger: object | None = None, *, browser_client_id: str | None = None) -> None:
         self.logger = logger
+        self.browser_client_id = browser_client_id
+        self.last_ambiguous_action: str | None = None
+
+    def _execute_injector(
+        self,
+        injector: object,
+        command: str,
+        payload: dict[str, object] | None = None,
+        *,
+        timeout_s: float = 2.5,
+        client_id_override: str | None = None,
+    ) -> object:
+        kwargs: dict[str, object] = {"timeout_s": timeout_s}
+        client_id = client_id_override or self.browser_client_id
+        if client_id:
+            kwargs["client_id"] = client_id
+        return injector.execute(command, payload, **kwargs)  # type: ignore[attr-defined]
 
     def execute(self, request: ActionRequest) -> bool:
+        self.last_ambiguous_action = None
         if request.action_type == "attack_visible_target":
             injector = global_browser_injector()
             metadata = dict(request.metadata or {})
@@ -78,9 +96,11 @@ class LiveMacActionSink:
             allowed_levels = metadata.get("allowed_levels")
             if isinstance(allowed_levels, list):
                 payload["allowedLevels"] = allowed_levels
-            result = injector.execute("attack_visible_bot", payload, timeout_s=2.5)
+            payload["verifyTimeoutMs"] = 3500
+            payload["commandTimeoutMs"] = 6500
+            result = self._execute_injector(injector, "attack_visible_bot", payload, timeout_s=7.0)
             result_metadata = dict(metadata)
-            result_metadata["injector_message"] = result.message
+            result_metadata["injector_message"] = _compact_injector_message(result.message)
             result_metadata["injector_client_id"] = result.client_id
             if result.ok:
                 try:
@@ -105,7 +125,7 @@ class LiveMacActionSink:
                 self.logger,
                 "action_blocked",
                 logged_request,
-                block_reason=f"injector_attack_visible_failed:{result.message}",
+                block_reason=f"injector_attack_visible_failed:{_compact_injector_message(result.message)}",
             )
             return False
 
@@ -119,13 +139,16 @@ class LiveMacActionSink:
                     payload["preClickDelayMs"] = metadata.get("pre_click_delay_ms")
                 if "click_hold_ms" in metadata:
                     payload["clickHoldMs"] = metadata.get("click_hold_ms")
-                result = global_browser_injector().execute(
+                payload["verifyTimeoutMs"] = 900
+                payload["commandTimeoutMs"] = 4000
+                result = self._execute_injector(
+                    global_browser_injector(),
                     "use_skill_slot",
                     payload,
-                    timeout_s=2.5,
+                    timeout_s=4.5,
                 )
                 result_metadata = dict(metadata)
-                result_metadata["injector_message"] = result.message
+                result_metadata["injector_message"] = _compact_injector_message(result.message)
                 result_metadata["injector_client_id"] = result.client_id
                 result_metadata["skill_slot"] = slot
                 if result.ok:
@@ -149,16 +172,159 @@ class LiveMacActionSink:
                     self.logger,
                     "action_blocked",
                     _copy_request(request, metadata=result_metadata),
-                    block_reason=f"injector_use_skill_failed:{result.message}",
+                    block_reason=f"injector_use_skill_failed:{_compact_injector_message(result.message)}",
                 )
                 return False
+
+        if request.action_type == "use_battle_item":
+            metadata = dict(request.metadata or {})
+            payload: dict[str, object] = {
+                "kind": str(metadata.get("kind") or ""),
+                "slots": metadata.get("slots", []),
+                "names": metadata.get("names", []),
+            }
+            if "item_id" in metadata:
+                payload["itemId"] = metadata.get("item_id")
+            if "pre_click_delay_ms" in metadata:
+                payload["preClickDelayMs"] = metadata.get("pre_click_delay_ms")
+            if "click_hold_ms" in metadata:
+                payload["clickHoldMs"] = metadata.get("click_hold_ms")
+            result = self._execute_injector(
+                global_browser_injector(),
+                "use_battle_item",
+                payload,
+                timeout_s=2.5,
+            )
+            result_metadata = dict(metadata)
+            result_metadata["injector_message"] = _compact_injector_message(result.message)
+            result_metadata["injector_client_id"] = result.client_id
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                result_metadata["injector_result_message"] = parsed.get("message")
+                result_metadata["fight_path"] = parsed.get("fightPath")
+                result_metadata["fight_href"] = parsed.get("fightHref")
+                item = parsed.get("item")
+                if isinstance(item, dict):
+                    result_metadata["item_id"] = item.get("id")
+                    result_metadata["item_name"] = item.get("name")
+                    result_metadata["item_slot"] = item.get("slot")
+                result_metadata["method"] = parsed.get("method")
+                result_metadata["slot"] = parsed.get("slot")
+                result_metadata["evidence"] = parsed.get("evidence")
+            if result.ok:
+                _log_action(self.logger, "use_battle_item_js", _copy_request(request, metadata=result_metadata), dry_run=False)
+                return True
+            if parsed is not None and parsed.get("message") == "battle_item_use_ambiguous":
+                self.last_ambiguous_action = "use_battle_item"
+                _log_action(
+                    self.logger,
+                    "use_battle_item_ambiguous",
+                    _copy_request(request, metadata=result_metadata),
+                    dry_run=False,
+                )
+                return False
+            _log_action(
+                self.logger,
+                "action_blocked",
+                _copy_request(request, metadata=result_metadata),
+                block_reason=f"injector_use_battle_item_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "revive_free":
+            metadata = dict(request.metadata or {})
+            result = self._execute_injector(
+                global_browser_injector(),
+                "revive_free",
+                {
+                    "expectedCharacter": metadata.get("expected_character", ""),
+                    "verifyDelayMs": metadata.get("verify_delay_ms", 1000),
+                },
+                timeout_s=4.0,
+            )
+            result_metadata = dict(metadata)
+            result_metadata["injector_message"] = _compact_injector_message(result.message)
+            result_metadata["injector_client_id"] = result.client_id
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                result_metadata["injector_result_message"] = parsed.get("message")
+                result_metadata["submitted"] = parsed.get("submitted")
+                result_metadata["confirmed"] = parsed.get("confirmed")
+                result_metadata["option"] = parsed.get("option")
+            if result.ok and parsed is not None and parsed.get("submitted") is True:
+                _log_action(
+                    self.logger,
+                    "revive_free_submitted",
+                    _copy_request(request, metadata=result_metadata),
+                    dry_run=False,
+                )
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                _copy_request(request, metadata=result_metadata),
+                block_reason=f"injector_revive_free_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "close_resurrection_notice":
+            metadata = dict(request.metadata or {})
+            result = self._execute_injector(
+                global_browser_injector(),
+                "close_resurrection_notice",
+                {"verifyDelayMs": metadata.get("verify_delay_ms", 250)},
+                timeout_s=2.5,
+            )
+            result_metadata = dict(metadata)
+            result_metadata["injector_message"] = _compact_injector_message(result.message)
+            result_metadata["injector_client_id"] = result.client_id
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                result_metadata["injector_result_message"] = parsed.get("message")
+                result_metadata["closed"] = parsed.get("closed")
+                result_metadata["confirmed"] = parsed.get("confirmed")
+            if result.ok and parsed is not None and parsed.get("confirmed") is True:
+                _log_action(
+                    self.logger,
+                    "resurrection_notice_closed",
+                    _copy_request(request, metadata=result_metadata),
+                    dry_run=False,
+                )
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                _copy_request(request, metadata=result_metadata),
+                block_reason=f"injector_close_resurrection_notice_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
 
         if request.action_type in {"click_exit", "click_hunt"}:
             metadata = dict(request.metadata or {})
             if metadata.get("use_js_open_hunt"):
-                result = global_browser_injector().execute("open_hunt", timeout_s=2.5)
+                result = self._execute_injector(
+                    global_browser_injector(),
+                    "open_hunt",
+                    {"verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                    timeout_s=5.5,
+                )
                 result_metadata = dict(metadata)
-                result_metadata["injector_message"] = result.message
+                result_metadata["injector_message"] = _compact_injector_message(result.message)
                 result_metadata["injector_client_id"] = result.client_id
                 request = _copy_request(request, metadata=result_metadata)
                 if result.ok:
@@ -169,16 +335,21 @@ class LiveMacActionSink:
                         self.logger,
                         "action_blocked",
                         request,
-                        block_reason=f"injector_open_hunt_failed:{result.message}",
+                        block_reason=f"injector_open_hunt_failed:{_compact_injector_message(result.message)}",
                     )
                     return False
 
         if request.action_type == "open_hunt":
             injector = global_browser_injector()
-            result = injector.execute("open_hunt", timeout_s=2.5)
+            result = self._execute_injector(
+                injector,
+                "open_hunt",
+                {"verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                timeout_s=5.5,
+            )
             if result.ok:
                 metadata = dict(request.metadata or {})
-                metadata["injector_message"] = result.message
+                metadata["injector_message"] = _compact_injector_message(result.message)
                 metadata["injector_client_id"] = result.client_id
                 request = ActionRequest(
                     request.action_type,
@@ -200,7 +371,163 @@ class LiveMacActionSink:
                 self.logger,
                 "action_blocked",
                 request,
-                block_reason=f"injector_open_hunt_failed:{result.message}",
+                block_reason=f"injector_open_hunt_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "open_quests":
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_quests",
+                {"verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                timeout_s=5.5,
+            )
+            metadata = dict(request.metadata or {})
+            metadata["injector_message"] = _compact_injector_message(result.message)
+            metadata["injector_client_id"] = result.client_id
+            logged_request = _copy_request(request, metadata=metadata)
+            if result.ok:
+                _log_action(self.logger, "open_quests_requested", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_quests_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "open_quest_navigator":
+            metadata = dict(request.metadata or {})
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_quest_navigator",
+                {"target": metadata.get("target", "")},
+                timeout_s=2.5,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            if result.ok:
+                _log_action(self.logger, "quest_navigator_opened", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_quest_navigator_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "open_location_navigator":
+            metadata = dict(request.metadata or {})
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_location_navigator",
+                {},
+                timeout_s=2.5,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            if result.ok:
+                _log_action(self.logger, "location_navigator_opened", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_location_navigator_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "navigator_select_target":
+            metadata = dict(request.metadata or {})
+            navigator_client_id = str(metadata.get("navigator_client_id") or "")
+            target = str(metadata.get("target") or "").strip()
+            if not navigator_client_id or not target:
+                reason = "navigator_client_missing" if not navigator_client_id else "navigator_target_missing"
+                _log_action(self.logger, "action_blocked", request, block_reason=reason)
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "navigator_select_target",
+                {
+                    "target": target,
+                    "kind": "location",
+                    "searchDelayMs": metadata.get("search_delay_ms", 250),
+                    "routeDelayMs": metadata.get("route_delay_ms", 350),
+                },
+                timeout_s=4.0,
+                client_id_override=navigator_client_id,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and parsed is not None and parsed.get("message") in {
+                "navigator_target_selected",
+                "navigator_target_already_selected",
+            }:
+                _log_action(self.logger, "navigator_target_selected", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_navigator_select_target_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "navigator_go":
+            metadata = dict(request.metadata or {})
+            navigator_client_id = str(metadata.get("navigator_client_id") or "")
+            if not navigator_client_id:
+                _log_action(self.logger, "action_blocked", request, block_reason="navigator_client_missing")
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "navigator_go",
+                {"expectedTarget": metadata.get("target", "")},
+                timeout_s=3.0,
+                client_id_override=navigator_client_id,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and parsed is not None and (
+                parsed.get("submitted") is True or parsed.get("message") == "navigator_already_at_target"
+            ):
+                _log_action(self.logger, "navigator_go_requested", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_navigator_go_failed:{_compact_injector_message(result.message)}",
             )
             return False
 
@@ -208,13 +535,14 @@ class LiveMacActionSink:
             metadata = dict(request.metadata or {})
             if metadata.get("use_js_hunt_direction"):
                 direction = request.scan_direction or str(metadata.get("scan_direction") or "")
-                result = global_browser_injector().execute(
+                result = self._execute_injector(
+                    global_browser_injector(),
                     "hunt_move_direction",
                     {"direction": direction, "margin": int(metadata.get("margin", 35) or 0)},
                     timeout_s=2.5,
                 )
                 result_metadata = dict(metadata)
-                result_metadata["injector_message"] = result.message
+                result_metadata["injector_message"] = _compact_injector_message(result.message)
                 result_metadata["injector_client_id"] = result.client_id
                 if result.ok:
                     _log_action(
@@ -228,7 +556,7 @@ class LiveMacActionSink:
                     self.logger,
                     "action_blocked",
                     _copy_request(request, metadata=result_metadata),
-                    block_reason=f"injector_hunt_move_direction_failed:{result.message}",
+                    block_reason=f"injector_hunt_move_direction_failed:{_compact_injector_message(result.message)}",
                 )
                 return False
 
@@ -257,13 +585,14 @@ class LiveMacActionSink:
                 last_percent: float | None = None
                 for use_index in range(max_uses_per_resource):
                     open_started_at = time.monotonic()
-                    open_result = injector.execute(
+                    open_result = self._execute_injector(
+                        injector,
                         "open_recovery_item",
                         {
                             "kind": kind,
                             "names": metadata.get(names_key, []),
                             "useWhenBelowPercent": kind_threshold,
-                            "useIfResourcesMissing": bool(metadata.get("use_if_resources_missing", True)),
+                            "useIfResourcesMissing": bool(metadata.get("use_if_resources_missing", False)),
                             "forceUse": bool(metadata.get("force_use", False)),
                             "inventoryOpenDelayMs": inventory_open_delay_ms,
                         },
@@ -274,7 +603,7 @@ class LiveMacActionSink:
                         "kind": kind,
                         "use_index": use_index + 1,
                         "open_ok": open_result.ok,
-                        "open_message": open_result.message,
+                        "open_message": _compact_injector_message(open_result.message),
                         "open_client_id": open_result.client_id,
                         "open_elapsed_ms": open_elapsed_ms,
                         "open_timeout_s": open_timeout_s,
@@ -282,7 +611,7 @@ class LiveMacActionSink:
                     try:
                         parsed = json.loads(open_result.message)
                         if isinstance(parsed, dict):
-                            attempt["open_result"] = parsed
+                            attempt["open_result"] = _compact_recovery_result(parsed)
                             if parsed.get("message") == "recovery_item_not_needed":
                                 percent = parsed.get("percent")
                                 if not isinstance(percent, bool) and percent is not None:
@@ -310,7 +639,9 @@ class LiveMacActionSink:
                                 refresh_result = _refresh_resource_source_after_use(injector)
                                 if refresh_result is not None:
                                     attempt["resource_refresh_ok"] = refresh_result.ok
-                                    attempt["resource_refresh_message"] = refresh_result.message
+                                    attempt["resource_refresh_message"] = _compact_injector_message(
+                                        refresh_result.message
+                                    )
                                 percent_after = _wait_resource_percent_after_use(injector, percent_key, percent_before)
                                 if percent_after is not None:
                                     last_percent = percent_after
@@ -333,14 +664,15 @@ class LiveMacActionSink:
                     if confirm_delay_s:
                         time.sleep(confirm_delay_s)
                     confirm_started_at = time.monotonic()
-                    confirm_result = injector.execute(
+                    confirm_result = self._execute_injector(
+                        injector,
                         "confirm_action_form",
                         {},
                         timeout_s=max(0.1, timeout_s),
                     )
                     attempt["confirm_elapsed_ms"] = int((time.monotonic() - confirm_started_at) * 1000)
                     attempt["confirm_ok"] = confirm_result.ok
-                    attempt["confirm_message"] = confirm_result.message
+                    attempt["confirm_message"] = _compact_injector_message(confirm_result.message)
                     attempt["confirm_client_id"] = confirm_result.client_id
                     if confirm_result.ok:
                         if between_items_delay_s:
@@ -348,7 +680,9 @@ class LiveMacActionSink:
                         refresh_result = _refresh_resource_source_after_use(injector)
                         if refresh_result is not None:
                             attempt["resource_refresh_ok"] = refresh_result.ok
-                            attempt["resource_refresh_message"] = refresh_result.message
+                            attempt["resource_refresh_message"] = _compact_injector_message(
+                                refresh_result.message
+                            )
                         percent_after = _wait_resource_percent_after_use(
                             injector,
                             percent_key,
@@ -378,9 +712,14 @@ class LiveMacActionSink:
 
             overall_ok = all(bool(item["ok"]) for item in resource_results)
             if overall_ok and bool(metadata.get("open_hunt_after", True)):
-                hunt_result = injector.execute("open_hunt", timeout_s=2.5)
+                hunt_result = self._execute_injector(
+                    injector,
+                    "open_hunt",
+                    {"verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                    timeout_s=5.5,
+                )
                 result_metadata["open_hunt_ok"] = hunt_result.ok
-                result_metadata["open_hunt_message"] = hunt_result.message
+                result_metadata["open_hunt_message"] = _compact_injector_message(hunt_result.message)
                 result_metadata["open_hunt_client_id"] = hunt_result.client_id
             elif bool(metadata.get("open_hunt_after", True)):
                 result_metadata["open_hunt_skipped"] = "recovery_failed"
@@ -466,6 +805,70 @@ class ActionExecutor:
             elif request.action_type == "click_hunt":
                 self.session.mark_hunt()
         return succeeded
+
+
+def _compact_injector_message(message: object, *, max_length: int = 1800) -> str:
+    raw = str(message or "")
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return raw[:max_length]
+    if not isinstance(parsed, dict):
+        return raw[:max_length]
+    compact_keys = (
+        "ok",
+        "message",
+        "slot",
+        "kind",
+        "fightPath",
+        "fightHref",
+        "method",
+        "args",
+        "ability",
+        "abilityAfter",
+        "item",
+        "evidence",
+        "target",
+        "direction",
+        "submitted",
+        "confirmed",
+        "option",
+        "pageKind",
+    )
+    compact = {key: parsed[key] for key in compact_keys if key in parsed}
+    if not compact:
+        compact = {"message": parsed.get("message", "injector_result")}
+    serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
+    return serialized[:max_length]
+
+
+def _compact_recovery_result(parsed: dict[str, object]) -> dict[str, object]:
+    compact: dict[str, object] = {}
+    for key in ("ok", "message", "kind", "method", "requiresConfirm", "inventoryWaitMs", "percent"):
+        if key in parsed:
+            compact[key] = parsed[key]
+    item = parsed.get("item")
+    if isinstance(item, dict):
+        compact["item"] = {
+            key: item.get(key)
+            for key in ("id", "aid", "artikulId", "artAltTitle", "title", "count", "path")
+            if item.get(key) not in (None, "")
+        }
+    fallback = parsed.get("fallbackReason")
+    if isinstance(fallback, dict):
+        compact["fallbackReason"] = {
+            key: fallback.get(key)
+            for key in ("ok", "message", "status", "error")
+            if fallback.get(key) not in (None, "")
+        }
+    resources = parsed.get("resources")
+    if isinstance(resources, dict):
+        compact["resources"] = {
+            key: resources.get(key)
+            for key in ("ok", "healthPercent", "prowessPercent")
+            if resources.get(key) is not None
+        }
+    return compact
 
 
 def _copy_request(request: ActionRequest, *, metadata: dict[str, object]) -> ActionRequest:

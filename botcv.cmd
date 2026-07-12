@@ -13,4 +13,4 @@ if not exist "%PY%" (
   exit /b 1
 )
 
-"%PY%" -m src.antibot_cv.automation.controller control-server --config config\automation.local.json %*
+"%PY%" -m src.antibot_cv.automation.controller control-server --config config\automation.local.json --live %*
