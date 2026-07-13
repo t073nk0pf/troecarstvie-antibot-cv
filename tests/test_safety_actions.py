@@ -766,6 +766,7 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             metadata={
                 "target": "Кабан-секач [5]",
                 "link_label": "Кабанов-секачей",
+                "quest_id": "355",
             },
             dry_run=False,
         )
@@ -810,7 +811,11 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
         (
             "open_quest_navigator",
             "parent-client",
-            {"target": "Кабан-секач [5]", "linkLabel": "Кабанов-секачей"},
+            {
+                "target": "Кабан-секач [5]",
+                "linkLabel": "Кабанов-секачей",
+                "expectedQuestId": "355",
+            },
             2.5,
         ),
         ("open_location_navigator", "parent-client", {}, 2.5),

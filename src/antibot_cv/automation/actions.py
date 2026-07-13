@@ -735,6 +735,11 @@ class LiveMacActionSink:
                         if metadata.get("link_label")
                         else {}
                     ),
+                    **(
+                        {"expectedQuestId": metadata.get("quest_id")}
+                        if metadata.get("quest_id")
+                        else {}
+                    ),
                 },
                 timeout_s=2.5,
             )

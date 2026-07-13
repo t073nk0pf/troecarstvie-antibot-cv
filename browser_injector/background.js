@@ -1,7 +1,7 @@
 importScripts("update_runtime.js");
 
 const ENDPOINT = "http://127.0.0.1:17654";
-const BRIDGE_VERSION = "2026-07-13-instance-entry-v49";
+const BRIDGE_VERSION = "2026-07-13-quest-scope-v50";
 const PROFILE_ID_KEY = "antibotCvProfileId";
 let profileIdPromise = null;
 const tabSessionNonceById = new Map();

@@ -82,6 +82,8 @@ class AutomationControlApi:
             return self.open_active_quest_page(payload or {})
         if path == "/api/open-quest-navigator" and method == "POST":
             return self.open_quest_navigator(payload or {})
+        if path == "/api/open-location-navigator" and method == "POST":
+            return self.open_location_navigator(payload or {})
         if path == "/api/navigator-select-target" and method == "POST":
             return self.navigator_select_target(payload or {})
         if path == "/api/navigator-go" and method == "POST":
@@ -527,8 +529,15 @@ class AutomationControlApi:
         return self._live_action(
             payload,
             "open_quest_navigator",
-            {"target": target, "link_label": link_label},
+            {
+                "target": target,
+                "link_label": link_label,
+                "quest_id": str(payload.get("questId") or "").strip(),
+            },
         )
+
+    def open_location_navigator(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self._live_action(payload, "open_location_navigator", {})
 
     def navigator_select_target(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         navigator_client_id = str(payload.get("navigatorClientId") or "").strip()

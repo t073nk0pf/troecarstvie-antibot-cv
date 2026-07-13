@@ -1703,6 +1703,8 @@ const messages = [];
 const listeners = {};
 let clicks = 0;
 const marker = { getAttribute(name) { return name === "alt" ? "Проложить путь" : null; } };
+const cancelLink = { getAttribute(name) { return name === "href" ? "user_quest.php?action=cancel&ref=355" : null; } };
+const card = { parentElement: null, querySelectorAll(selector) { return selector === "a[href*='action=cancel']" ? [cancelLink] : []; } };
 const link = {
   textContent: "Кабанов-секачей",
   innerText: "Кабанов-секачей",
@@ -1712,6 +1714,7 @@ const link = {
     return null;
   },
   querySelectorAll(selector) { return selector === "img" ? [marker] : []; },
+  parentElement: card,
   click() { clicks += 1; },
 };
 const root = {
@@ -1738,7 +1741,7 @@ listeners.message({
     token: "quest-route-token",
     command: {
       type: "open_quest_navigator",
-      payload: { target: "Кабан-секач [5]", linkLabel: "Кабанов-секачей" },
+      payload: { target: "Кабан-секач [5]", linkLabel: "Кабанов-секачей", expectedQuestId: "355" },
     },
   },
 });
@@ -1747,6 +1750,7 @@ assert.strictEqual(messages[0].ok, true);
 const result = JSON.parse(messages[0].message);
 assert.strictEqual(result.target, "Кабан-секач [5]");
 assert.strictEqual(result.linkLabel, "Кабанов-секачей");
+assert.strictEqual(result.expectedQuestId, "355");
 assert.strictEqual(clicks, 1);
 """
     result = subprocess.run(

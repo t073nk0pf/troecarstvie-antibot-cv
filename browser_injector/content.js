@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-13-instance-entry-v49";
+  const bridgeVersion = "2026-07-13-quest-scope-v50";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";

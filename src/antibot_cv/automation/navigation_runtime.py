@@ -419,6 +419,8 @@ class NavigationRuntimeMixin:
         resume_target = self._route_resume_target_name
         if recovery_kind == "quest_accept":
             return self._on_quest_accept_route_arrived(reason)
+        if recovery_kind == "quest_dialogue":
+            return self._on_quest_dialogue_route_arrived(reason)
         if recovery_kind == "post_revive_location":
             self._log_recovery_phase(
                 "checkpoint_arrived",

@@ -415,14 +415,30 @@
     const context = mainContentContext();
     const target = safeString(payload && payload.target, 180);
     const explicitLinkLabel = safeString(payload && payload.linkLabel, 180);
+    const expectedQuestId = safeString(payload && payload.expectedQuestId, 40);
     const linkLabel = explicitLinkLabel || target;
     if (context.pageKind !== "quests" || !context.doc) {
       return { ok: false, message: "quest_page_missing", pageKind: context.pageKind };
     }
     if (!target) return { ok: false, message: "quest_navigator_target_missing" };
     const candidates = questNavigatorLinks(context.doc);
+    const belongsToQuest = (element) => {
+      if (!expectedQuestId) return true;
+      let current = element;
+      for (let depth = 0; current && depth < 12; depth += 1, current = current.parentElement) {
+        if (!current.querySelectorAll) continue;
+        const cancellationLinks = Array.from(current.querySelectorAll("a[href*='action=cancel']")).slice(0, 20);
+        const ids = cancellationLinks
+          .map((link) => safeString(attr(link, "href"), 400).match(/[?&]ref=(\d+)(?:&|$)/i))
+          .filter(Boolean)
+          .map((match) => match[1]);
+        if (ids.length) return ids.length === 1 && ids[0] === expectedQuestId;
+      }
+      return false;
+    };
     const matches = candidates.filter((element) => {
       if (!exactLabelMatches(questNavigatorLabel(element), linkLabel)) return false;
+      if (!belongsToQuest(element)) return false;
       if (!explicitLinkLabel) return true;
       const observedTarget = questNavigatorTargetFromOnclick(attr(element, "onclick"));
       return exactLabelMatches(observedTarget, target);
@@ -433,6 +449,7 @@
         message: matches.length ? "quest_navigator_link_ambiguous" : "quest_navigator_link_missing",
         target,
         linkLabel,
+        expectedQuestId: expectedQuestId || null,
         matchCount: matches.length,
       };
     }
@@ -446,6 +463,7 @@
       submitted: true,
       target,
       linkLabel: observedLinkLabel,
+      expectedQuestId: expectedQuestId || null,
     };
   };
 
