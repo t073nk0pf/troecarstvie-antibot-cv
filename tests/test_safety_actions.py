@@ -818,3 +818,63 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             3.0,
         ),
     ]
+
+
+def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> None:
+    calls: list[tuple[str, str | None, dict[str, object], float]] = []
+    sleeps: list[float] = []
+    responses = iter(
+        [
+            InjectorResult(
+                False,
+                '{"ok":false,"message":"navigator_target_missing_in_section",'
+                '"exactCandidateCount":1,"candidateCount":0}',
+                "child-client",
+            ),
+            InjectorResult(
+                True,
+                '{"ok":true,"message":"navigator_target_selected","selected":true}',
+                "child-client",
+            ),
+        ]
+    )
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
+            return next(responses)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    monkeypatch.setattr("src.antibot_cv.automation.actions.time.sleep", sleeps.append)
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "navigator_select_target",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "target_kind": "monster",
+                "navigator_client_id": "child-client",
+                "search_delay_ms": 8000,
+                "route_delay_ms": 500,
+                "retry_delay_ms": 500,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert sleeps == [0.5]
+    assert [event["event_type"] for event in logger.events[-2:]] == [
+        "navigator_target_selection_retry",
+        "navigator_target_selected",
+    ]

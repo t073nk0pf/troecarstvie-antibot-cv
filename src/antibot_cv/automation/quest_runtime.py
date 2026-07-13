@@ -363,6 +363,7 @@ class QuestRuntimeMixin:
                 self._navigator_target_kind = "location"
                 self._navigator_opened_monotonic = time.monotonic()
                 self._navigator_client_id = None
+                self._navigator_client_bound_monotonic = None
                 self._navigator_requires_target_selection = False
                 self._route_recovery_kind = "quest_location"
                 self._safe_transition(GameState.NAVIGATOR_PENDING, reason="quest_navigator_opened")
@@ -390,6 +391,7 @@ class QuestRuntimeMixin:
         self._navigator_target_kind = "location"
         self._navigator_opened_monotonic = None
         self._navigator_client_id = None
+        self._navigator_client_bound_monotonic = None
         self._navigator_existing_client_ids.clear()
         self._navigator_requires_target_selection = False
         self._route_recovery_kind = None

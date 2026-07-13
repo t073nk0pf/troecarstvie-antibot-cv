@@ -188,6 +188,7 @@ class AutomationController(
         self._navigator_target_kind = "location"
         self._navigator_opened_monotonic: float | None = None
         self._navigator_client_id: str | None = None
+        self._navigator_client_bound_monotonic: float | None = None
         self._navigator_existing_client_ids: set[str] = set()
         self._navigator_requires_target_selection = False
         self._route_recovery_kind: str | None = None

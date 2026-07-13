@@ -263,6 +263,7 @@ class LevelingRuntimeMixin:
         self._navigator_target_kind = _navigator_target_kind(target)
         self._navigator_opened_monotonic = time.monotonic()
         self._navigator_client_id = None
+        self._navigator_client_bound_monotonic = None
         self._navigator_requires_target_selection = True
         self._route_recovery_kind = "configured_location"
         self._route_go_submitted_monotonic = None

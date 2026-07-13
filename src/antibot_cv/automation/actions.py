@@ -455,31 +455,67 @@ class LiveMacActionSink:
                 reason = "navigator_client_missing" if not navigator_client_id else "navigator_target_missing"
                 _log_action(self.logger, "action_blocked", request, block_reason=reason)
                 return False
-            result = self._execute_injector(
-                global_browser_injector(),
-                "navigator_select_target",
-                {
-                    "target": target,
-                    "kind": str(metadata.get("target_kind") or "location"),
-                    "searchDelayMs": metadata.get("search_delay_ms", 250),
-                    "routeDelayMs": metadata.get("route_delay_ms", 350),
-                    "commandTimeoutMs": 9000,
-                },
-                timeout_s=10.0,
-                client_id_override=navigator_client_id,
-            )
-            result_metadata = {
-                **metadata,
-                "injector_message": _compact_injector_message(result.message),
-                "injector_client_id": result.client_id,
+            injector = global_browser_injector()
+            payload = {
+                "target": target,
+                "kind": str(metadata.get("target_kind") or "location"),
+                "searchDelayMs": metadata.get("search_delay_ms", 250),
+                "routeDelayMs": metadata.get("route_delay_ms", 350),
+                "commandTimeoutMs": 9000,
             }
-            logged_request = _copy_request(request, metadata=result_metadata)
+
+            def select_target_once():
+                return self._execute_injector(
+                    injector,
+                    "navigator_select_target",
+                    payload,
+                    timeout_s=10.0,
+                    client_id_override=navigator_client_id,
+                )
+
+            result = select_target_once()
             parsed: dict[str, object] | None = None
             try:
                 candidate = json.loads(result.message)
                 parsed = candidate if isinstance(candidate, dict) else None
             except json.JSONDecodeError:
                 parsed = None
+            initial_message = _compact_injector_message(result.message)
+            retryable_unique_result = (
+                parsed is not None
+                and parsed.get("message") == "navigator_target_missing_in_section"
+                and parsed.get("exactCandidateCount") == 1
+                and parsed.get("candidateCount") == 0
+            )
+            if retryable_unique_result:
+                retry_delay_ms = max(0, min(2000, int(metadata.get("retry_delay_ms", 500) or 0)))
+                retry_request = _copy_request(
+                    request,
+                    metadata={
+                        **metadata,
+                        "injector_message": initial_message,
+                        "injector_client_id": result.client_id,
+                        "retry_delay_ms": retry_delay_ms,
+                        "retry_limit": 1,
+                    },
+                )
+                _log_action(self.logger, "navigator_target_selection_retry", retry_request, dry_run=False)
+                if retry_delay_ms:
+                    time.sleep(retry_delay_ms / 1000)
+                result = select_target_once()
+                try:
+                    candidate = json.loads(result.message)
+                    parsed = candidate if isinstance(candidate, dict) else None
+                except json.JSONDecodeError:
+                    parsed = None
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            if initial_message != result_metadata["injector_message"]:
+                result_metadata["initial_injector_message"] = initial_message
+            logged_request = _copy_request(request, metadata=result_metadata)
             if result.ok and parsed is not None and parsed.get("message") in {
                 "navigator_target_selected",
                 "navigator_target_already_selected",
@@ -887,6 +923,7 @@ def _compact_injector_message(message: object, *, max_length: int = 1800) -> str
         "candidateSections",
         "visibleCandidateCount",
         "contextChanges",
+        "inputCount",
     )
     compact = {key: parsed[key] for key in compact_keys if key in parsed}
     if not compact:

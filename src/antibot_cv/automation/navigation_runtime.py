@@ -20,6 +20,8 @@ from src.antibot_cv.entity_detection.target_locator import LocatedTarget
 from src.antibot_cv.viewport.coordinates import Point, Rect
 from src.antibot_cv.viewport.scrollbar import ScrollDirection
 
+NAVIGATOR_TARGET_INPUT_SETTLE_S = 4.0
+
 
 class NavigationRuntimeMixin:
     def _handle_location_frame(self, frame: np.ndarray) -> None:
@@ -84,10 +86,16 @@ class NavigationRuntimeMixin:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
                 self._stop_leveling_unsafe("navigator_child_timeout")
             return
-        self._navigator_client_id = str(child.get("client_id") or "") or None
+        resolved_client_id = str(child.get("client_id") or "") or None
+        if resolved_client_id != self._navigator_client_id:
+            self._navigator_client_id = resolved_client_id
+            self._navigator_client_bound_monotonic = time.monotonic()
         if not self._navigator_client_id:
             return
         if self._navigator_requires_target_selection:
+            bound = self._navigator_client_bound_monotonic or time.monotonic()
+            if time.monotonic() - bound < NAVIGATOR_TARGET_INPUT_SETTLE_S:
+                return
             request = ActionRequest(
                 "navigator_select_target",
                 cycle_id=self.session.cycle_id,
@@ -97,8 +105,9 @@ class NavigationRuntimeMixin:
                     "target": self._navigator_target_name or "",
                     "target_kind": self._navigator_target_kind,
                     "navigator_client_id": self._navigator_client_id,
-                    "search_delay_ms": 7000,
+                    "search_delay_ms": 8000,
                     "route_delay_ms": 500,
+                    "retry_delay_ms": 500,
                     "reason": self._route_recovery_kind,
                 },
             )
@@ -197,11 +206,16 @@ class NavigationRuntimeMixin:
             if client.get("client_seen")
             and client.get("version_ok")
             and str(client.get("client_id") or "") not in self._navigator_existing_client_ids
-            and client.get("opener_tab_id") == parent_tab_id
             and str(client.get("profile_id") or "") == parent_profile
             and "/navigator.php" in str(client.get("href") or "")
         ]
-        return candidates[0] if len(candidates) == 1 else None
+        linked = [client for client in candidates if client.get("opener_tab_id") == parent_tab_id]
+        if len(linked) == 1:
+            return linked[0]
+        if linked:
+            return None
+        unlinked = [client for client in candidates if client.get("opener_tab_id") is None]
+        return unlinked[0] if len(unlinked) == 1 else None
 
     def _navigator_client_ids_for_parent(self) -> set[str]:
         if not self.browser_client_id:
@@ -219,7 +233,6 @@ class NavigationRuntimeMixin:
                 str(client.get("client_id"))
                 for client in injector.client_snapshots(within_s=5.0)
                 if client.get("client_seen")
-                and client.get("opener_tab_id") == parent_tab_id
                 and str(client.get("profile_id") or "") == parent_profile
                 and "/navigator.php" in str(client.get("href") or "")
                 and client.get("client_id")
@@ -422,6 +435,7 @@ class NavigationRuntimeMixin:
         self._navigator_target_kind = _navigator_target_kind(target)
         self._navigator_opened_monotonic = time.monotonic()
         self._navigator_client_id = None
+        self._navigator_client_bound_monotonic = None
         self._navigator_requires_target_selection = True
         self._route_recovery_kind = kind
         self._route_go_submitted_monotonic = None

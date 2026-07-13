@@ -46,6 +46,8 @@ def _run_route_leg(
     current_location_id: str,
     destination_location_id: str,
 ) -> None:
+    controller._navigator_client_id = "navigator-client"
+    controller._navigator_client_bound_monotonic = time.monotonic() - 5
     controller._handle_navigator_pending()
     assert controller.state_machine.state is GameState.NAVIGATOR_PENDING, {
         "destination_id": controller._route_destination_id,
