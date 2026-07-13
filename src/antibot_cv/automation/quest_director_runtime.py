@@ -403,6 +403,26 @@ class QuestDirectorRuntime:
         )
         self.completed_since_refresh += 1
 
+    def confirm_terminal_removal(self, quest_id: str) -> None:
+        """Release a lease only after a terminal action and a fresh full absence."""
+
+        if not self.active_snapshot_fresh or not self.active_catalog.complete:
+            raise RuntimeError("terminal quest removal requires a fresh complete active catalogue")
+        if any(quest.id == quest_id for quest in self.active_quests):
+            raise RuntimeError("terminal quest is still active")
+        if self.chain.lease is None or self.chain.lease.quest_id != quest_id:
+            raise RuntimeError("terminal quest does not match pinned chain")
+        self.chain.release_completed(quest_id)
+        if self.active_objective is not None and self.active_objective.quest_id == quest_id:
+            self.active_objective = None
+        self.active_objective_revision = None
+        self.objective_refresh = None
+        self.supported_objectives = tuple(
+            objective for objective in self.supported_objectives if objective.quest_id != quest_id
+        )
+        self.unchanged_victory_refreshes = 0
+        self.completed_since_refresh += 1
+
     def expire_available_snapshot(self) -> None:
         self.available_snapshot_fresh = False
 

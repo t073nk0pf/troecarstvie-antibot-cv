@@ -821,7 +821,18 @@ class QuestRuntimeMixin:
                 None,
             )
             if entry is None:
-                return self._stop_leveling_unsafe("quest_dialogue_terminal_evidence_unverified")
+                try:
+                    director.confirm_terminal_removal(pending.objective.quest_id)
+                    self._quest_dialogue.finish_verified(
+                        quest_id=pending.objective.quest_id,
+                        previous_fingerprint=pending.objective.fingerprint,
+                    )
+                except RuntimeError as exc:
+                    return self._stop_leveling_unsafe(
+                        f"quest_dialogue_terminal_evidence_unverified:{exc}"
+                    )
+                self._quest_policy_intent = None
+                return True
             from src.antibot_cv.automation.quest_objective_runtime import quest_step_fingerprint
 
             refreshed_fingerprint, reason = quest_step_fingerprint(entry)

@@ -244,6 +244,23 @@ def test_preferred_chain_refreshes_active_first_and_preempts_intake(tmp_path) ->
     assert restored.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
 
 
+def test_confirmed_terminal_removal_releases_persisted_chain(tmp_path) -> None:
+    state_path = tmp_path / "quest-chain.json"
+    runtime = QuestDirectorRuntime(pinned_quest_id="246", chain_state_path=state_path)
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1, active_monster("246")))
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert state_path.exists()
+
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1))
+    runtime.confirm_terminal_removal("246")
+
+    assert runtime.chain.lease is None
+    assert not state_path.exists()
+    assert runtime.completed_since_refresh == 1
+
+
 def test_execution_fails_closed_without_complete_active_catalog() -> None:
     runtime = QuestDirectorRuntime()
     runtime.begin_catalog_refresh()
