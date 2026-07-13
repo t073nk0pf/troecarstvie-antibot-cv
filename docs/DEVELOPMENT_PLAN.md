@@ -51,7 +51,10 @@ preserves the destination across PvP or death, and waits for proven arrival
 before hunt resumes. The route mechanics passed a manual live test and the
 integrated controller loop is covered by automated tests. The remaining M1
 gate is a full live death-to-return acceptance run, followed by three
-consecutive natural recovery runs.
+consecutive natural recovery runs. The runtime now records a correlated
+nine-phase recovery evidence chain, and a read-only offline validator
+identifies missing or out-of-order phases from a run log. Offline readiness is
+diagnostic only and does not satisfy the live exit gate.
 
 The local v29 bridge also includes a bounded quest observation slice: active
 and available cards, route labels, and explicit objective progress are parsed,

@@ -1,5 +1,25 @@
 # Development Log
 
+## 2026-07-13 - M1 Recovery Evidence And Obsolete Sprite Cleanup
+
+- Removed the obsolete `mob_sprite_01..03` assets, template configuration,
+  `sprite_template_ids` policy, CV template fallback, and its asset-coupled
+  regression. Live target selection remains the guarded JS path; the separate
+  `green_sprite` color fallback remains available for replay/CV diagnostics.
+- Added one `recovery_id` across the M1 evidence chain: death, revive request,
+  revive confirmation, resurrection notice close, resources ready, checkpoint
+  arrival, original destination arrival, hunt open, and terminal completion.
+- Terminal `death_recovery_completed` is emitted only after a successful hunt
+  open and only when every required earlier phase was observed in order.
+- Added a pure offline validator plus `assess-m1-recovery --events <path>` for
+  deterministic post-run evidence checks. The result is deliberately named
+  `offline_ready`; it never closes the live acceptance gate.
+- Added positive and fail-closed runtime regressions plus validator and CLI
+  tests. The full automated suite, architecture checks, Python compilation,
+  template validation, and `git diff --check` pass. The complete live
+  death-to-return run and three consecutive natural recoveries are still
+  required before M1 can be marked complete.
+
 ## 2026-07-13 - Quest Snapshot And Post-Revive Resource Gate
 
 - Added an explicit `POST_REVIVE_RECOVERY` state that confirms configured

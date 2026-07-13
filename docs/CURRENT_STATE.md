@@ -47,6 +47,9 @@ leveling product.
 - Quest snapshots distinguish active and available quest cards, preserve the
   quest ID and route labels, and parse explicit objective progress such as
   `5/5`. Completed objectives stop safely before an unimplemented turn-in.
+- M1 recovery telemetry now correlates every required phase under one
+  `recovery_id`. A deterministic offline validator reports missing or
+  out-of-order evidence without claiming that the live gate passed.
 
 ## Confirmed Live Evidence
 
@@ -122,9 +125,9 @@ allow battle/death recovery to finish, and then resume from the saved route.
 - Recovery items work through the direct command, but the same operation in a
   long automatic cycle still needs a fresh regression test.
 - Multi-window addressing exists, but concurrent long runs need soak testing.
-- Legacy CV fallback paths still coexist with JS control. Keep changes inside
-  their owning runtime module and remove a fallback only with focused replay
-  coverage.
+- Some UI and replay CV fallbacks still coexist with JS control. Mob sprite
+  template targeting has been removed; keep any remaining fallback changes
+  inside their owning runtime module with focused replay coverage.
 - A bridge code change requires reloading the unpacked extension and refreshing
   the game page. The Python and extension bridge version must match.
 - Bridge v29 passes automated bridge and policy tests but still needs a fresh
@@ -177,6 +180,17 @@ Run the test suite:
 ```bash
 python -m pytest -q
 ```
+
+Assess one recorded M1 recovery run without performing any game action:
+
+```bash
+python -m src.antibot_cv.automation.controller assess-m1-recovery \
+  --events runs/<session-id>/events.jsonl
+```
+
+`offline_ready: true` means the recorded phases are internally complete. M1
+still requires the documented live run and three consecutive natural recovery
+passes.
 
 ## Next Session Checklist
 

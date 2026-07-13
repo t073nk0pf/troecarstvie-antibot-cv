@@ -174,6 +174,8 @@ class AutomationController(
         self._init_quest_runtime()
         self.deaths_observed = 0
         self._death_latched = False
+        self._active_recovery_id: str | None = None
+        self._recovery_phase_events: list[str] = []
         self._revive_requested_monotonic: float | None = None
         self._revive_attempted_for_current_death = False
         self._post_revive_recovery_started_monotonic: float | None = None

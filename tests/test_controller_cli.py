@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from src.antibot_cv.automation.controller import build_parser
+import json
+
+from src.antibot_cv.automation.controller import build_parser, main
+from src.antibot_cv.telemetry.m1_recovery import M1_RECOVERY_PHASES
 
 
 def test_run_accepts_no_hotkeys_flag() -> None:
@@ -39,6 +42,47 @@ def test_control_server_cli() -> None:
     assert args.command == "control-server"
     assert args.live is True
     assert args.config == "config/automation.local.json"
+
+
+def test_assess_m1_recovery_cli_reports_offline_readiness(tmp_path, capsys) -> None:
+    events_path = tmp_path / "events.jsonl"
+    events_path.write_text(
+        "".join(
+            json.dumps({"recovery_id": "recovery-1", "event_type": phase}) + "\n"
+            for phase in M1_RECOVERY_PHASES
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["assess-m1-recovery", "--events", str(events_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert payload["offline_ready"] is True
+    assert payload["complete_attempts"] == 1
+
+
+def test_assess_m1_recovery_cli_fails_when_latest_attempt_is_incomplete(tmp_path, capsys) -> None:
+    events_path = tmp_path / "events.jsonl"
+    phases = [("complete", phase) for phase in M1_RECOVERY_PHASES]
+    phases += [("incomplete", phase) for phase in M1_RECOVERY_PHASES[:-1]]
+    events_path.write_text(
+        "".join(
+            json.dumps({"recovery_id": recovery_id, "event_type": phase}) + "\n"
+            for recovery_id, phase in phases
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["assess-m1-recovery", "--events", str(events_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert payload["offline_ready"] is False
+    assert payload["latest_attempt_passed"] is False
+    assert payload["consecutive_complete_attempts"] == 0
+    assert payload["longest_complete_streak"] == 1
 
 
 def test_injector_hunt_snapshot_cli() -> None:

@@ -405,4 +405,7 @@ class QuestRuntimeMixin:
             time.monotonic() + self.config.recovery.viewport_exhausted_pause_ms / 1000
         )
         self._safe_transition(GameState.LOCATION_SEARCH, reason=reason)
+        if self.state_machine.state is GameState.LOCATION_SEARCH:
+            self._log_recovery_phase("hunt_opened", reason=reason)
+            self._complete_death_recovery_evidence(reason)
         return True

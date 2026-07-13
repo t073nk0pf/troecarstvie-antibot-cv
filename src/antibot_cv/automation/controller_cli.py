@@ -23,6 +23,7 @@ from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.detection.resources import ResourceDetector, ResourceStatus
 from src.antibot_cv.detection.templates import TemplateRegistry
 from src.antibot_cv.telemetry.event_logger import InMemoryEventLogger
+from src.antibot_cv.telemetry.m1_recovery import assess_m1_recovery
 from src.antibot_cv.viewport.coordinates import Rect
 
 
@@ -61,6 +62,31 @@ def command_validate_templates(args: argparse.Namespace) -> int:
     payload = [{"template_id": issue.template_id, "path": issue.path, "message": issue.message} for issue in issues]
     print(json.dumps({"ok": not issues, "issues": payload}, ensure_ascii=False, indent=2, sort_keys=True))
     return 1 if issues else 0
+
+
+def command_assess_m1_recovery(args: argparse.Namespace) -> int:
+    events_path = Path(args.events)
+    try:
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps(
+                {"ok": False, "events": str(events_path), "error": str(exc)},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    result = assess_m1_recovery(events)
+    payload = {"ok": True, "events": str(events_path), **result}
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if result["offline_ready"] else 1
 
 def command_inspect_resources(args: argparse.Namespace) -> int:
     config = load_config(args.config)
@@ -803,6 +829,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate-templates")
     validate.add_argument("--config", default=None)
     validate.set_defaults(func=command_validate_templates)
+
+    assess_recovery = subparsers.add_parser("assess-m1-recovery")
+    assess_recovery.add_argument("--events", required=True, help="Path to a run events.jsonl file")
+    assess_recovery.set_defaults(func=command_assess_m1_recovery)
 
     inspect_resources = subparsers.add_parser("inspect-resources")
     inspect_resources.add_argument("--config", default=None)

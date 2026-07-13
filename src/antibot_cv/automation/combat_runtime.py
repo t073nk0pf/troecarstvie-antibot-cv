@@ -430,7 +430,12 @@ class CombatRuntimeMixin:
         location_section = sections.get("location")
         location = location_section.get("data") if isinstance(location_section, dict) else None
         self._update_location_tracking(location, death_data, player)
-        if isinstance(death_data, dict) and death_data.get("resurrectionNoticeAvailable") is True:
+        if (
+            isinstance(death_data, dict)
+            and death_data.get("dead") is False
+            and death_data.get("resurrectionNoticeAvailable") is True
+        ):
+            self._log_recovery_phase("revive_confirmed", reason="resurrection_notice_available")
             request = ActionRequest(
                 "close_resurrection_notice",
                 cycle_id=self.session.cycle_id,
@@ -440,10 +445,12 @@ class CombatRuntimeMixin:
                     "verify_delay_ms": 250,
                     "reason": "post_revive_confirmation",
                     "snapshot_id": self._current_state_snapshot_id,
+                    "recovery_id": self._active_recovery_id,
                 },
             )
             if not self.action_executor.execute(request):
                 return self._stop_leveling_unsafe("resurrection_notice_close_failed")
+            self._log_recovery_phase("notice_closed", reason="resurrection_notice_closed")
             return True
         return self._handle_leveling_death(death_data)
 

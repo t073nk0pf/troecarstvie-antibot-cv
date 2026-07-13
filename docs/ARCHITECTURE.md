@@ -30,6 +30,8 @@ browser bundle reproducibility contract.
 - `controller_cli.py`: CLI commands and argument parsing only.
 - `runtime_helpers.py`: pure normalization and CV helper functions.
 - `runtime_constants.py`: shared runtime constants without behavior.
+- `telemetry/m1_recovery.py`: pure ordered recovery-evidence validation; it
+  performs no game actions and cannot close the live acceptance gate.
 
 The mixins preserve the existing `AutomationController` API while keeping each
 domain independently inspectable. A later change may replace mixins with

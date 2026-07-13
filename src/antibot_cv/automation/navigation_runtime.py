@@ -365,13 +365,30 @@ class NavigationRuntimeMixin:
         return payload if isinstance(payload, dict) else None
 
     def _finish_route_arrival(self, reason: str) -> bool:
+        recovery_kind = self._route_recovery_kind
         resume_target = self._route_resume_target_name
+        if recovery_kind == "post_revive_location":
+            self._log_recovery_phase(
+                "checkpoint_arrived",
+                location_name=self.current_location_name,
+                reason=reason,
+            )
         if resume_target and not _same_location_name(self.current_location_name, resume_target):
             self._route_resume_target_name = None
             return self._start_location_route(
                 resume_target,
                 kind="interrupted_route_resume",
                 reason="interrupted_route_resume",
+            )
+        if recovery_kind in {
+            "post_revive_location",
+            "post_revive_route_resume",
+            "interrupted_route_resume",
+        }:
+            self._log_recovery_phase(
+                "original_destination_arrived",
+                location_name=self.current_location_name,
+                reason=reason,
             )
         return self._finish_quest_refresh_to_hunt(reason)
 

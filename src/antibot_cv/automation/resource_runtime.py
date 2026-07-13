@@ -37,6 +37,12 @@ class ResourceRuntimeMixin:
         )
         if not missing and not low:
             reason = self._post_revive_resume_reason or "post_revive_resources_ready"
+            self._log_recovery_phase(
+                "resources_ready",
+                reason=reason,
+                health_percent=status.health.percent,
+                prowess_percent=status.prowess.percent,
+            )
             self._resume_after_post_revive_recovery(reason)
             return
 

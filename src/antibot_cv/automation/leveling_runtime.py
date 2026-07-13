@@ -27,6 +27,7 @@ from src.antibot_cv.automation.runtime_helpers import (
     same_location_name as _same_location_name,
 )
 from src.antibot_cv.automation.state_machine import GameState
+from src.antibot_cv.telemetry.m1_recovery import M1_RECOVERY_PHASES
 
 
 class LevelingRuntimeMixin:
@@ -430,6 +431,8 @@ class LevelingRuntimeMixin:
                 previous_location = self._confirmed_recovery_location()
                 event_id = self._current_state_snapshot_id or f"death:{self.session.cycle_id}:{self.deaths_observed + 1}"
                 self._death_latched = True
+                self._active_recovery_id = event_id
+                self._recovery_phase_events.clear()
                 self.deaths_observed += 1
                 self._death_recovery_policy.record_death(event_id)
                 self._death_checkpoint = RecoveryCheckpoint(
@@ -447,6 +450,13 @@ class LevelingRuntimeMixin:
                     cycle_id=self.session.cycle_id,
                     deaths_observed=self.deaths_observed,
                     max_deaths=self.config.leveling.max_deaths_per_session,
+                    checkpoint_activity=previous_activity,
+                    checkpoint_location=previous_location,
+                    checkpoint_quest=self._active_quest_id,
+                    recovery_id=event_id,
+                )
+                self._log_recovery_phase(
+                    "death_detected",
                     checkpoint_activity=previous_activity,
                     checkpoint_location=previous_location,
                     checkpoint_quest=self._active_quest_id,
@@ -482,11 +492,13 @@ class LevelingRuntimeMixin:
                     or self.config.leveling.required_character_name,
                     "verify_delay_ms": 1000,
                     "revive_option_id": recovery.option_id,
+                    "recovery_id": self._active_recovery_id,
                 },
             )
             self._revive_attempted_for_current_death = True
             if not self.action_executor.execute(request):
                 return self._stop_leveling_unsafe("free_revive_action_rejected")
+            self._log_recovery_phase("revive_requested", revive_option_id=recovery.option_id)
             self._revive_requested_monotonic = time.monotonic()
             self._safe_transition(GameState.REVIVE_PENDING, reason="free_revive_submitted")
             return True
@@ -506,15 +518,18 @@ class LevelingRuntimeMixin:
             if recovery.decision is RecoveryDecision.STOP_UNSAFE:
                 return self._stop_leveling_unsafe(f"death_recovery:{recovery.reason}")
             if recovery.decision in {RecoveryDecision.RESTORE_CHECKPOINT, RecoveryDecision.COMPLETE}:
+                self._log_recovery_phase("revive_confirmed", reason="free_revive_confirmed")
                 return self._complete_revive_recovery("free_revive_confirmed")
             return True
         if self.state_machine.state == GameState.DEAD and dead is False:
+            self._log_recovery_phase("revive_confirmed", reason="external_revive_confirmed")
             return self._complete_revive_recovery("external_revive_confirmed")
         if dead is False:
             self._death_latched = False
         return False
 
     def _complete_revive_recovery(self, reason: str) -> bool:
+        self._log_recovery_phase("revive_confirmed", reason=reason)
         self._death_latched = False
         self._revive_attempted_for_current_death = False
         self._revive_requested_monotonic = None
@@ -551,9 +566,8 @@ class LevelingRuntimeMixin:
         self._post_revive_recovery_attempts = 0
         self._post_revive_resume_reason = None
         self._safe_transition(GameState.ROUTE_RECOVERY, reason="post_revive_resources_confirmed")
-        if (
-            not _same_location_name(self.current_location_name, checkpoint_location)
-        ):
+        at_checkpoint = _same_location_name(self.current_location_name, checkpoint_location)
+        if not at_checkpoint:
             self._start_location_route(
                 checkpoint_location,
                 kind="post_revive_location",
@@ -572,6 +586,11 @@ class LevelingRuntimeMixin:
                 route_kind=self._route_recovery_kind,
             )
             return True
+        self._log_recovery_phase(
+            "checkpoint_arrived",
+            location_name=self.current_location_name,
+            reason="post_revive_checkpoint_already_current",
+        )
         if self._route_resume_target_name and not _same_location_name(
             self.current_location_name,
             self._route_resume_target_name,
@@ -611,6 +630,11 @@ class LevelingRuntimeMixin:
                 checkpoint_quest=self._death_checkpoint.quest,
             )
             return True
+        self._log_recovery_phase(
+            "original_destination_arrived",
+            location_name=self.current_location_name,
+            reason="post_revive_original_destination_is_current",
+        )
         request = ActionRequest(
             "open_hunt",
             cycle_id=self.session.cycle_id,
@@ -625,6 +649,9 @@ class LevelingRuntimeMixin:
             time.monotonic() + self.config.recovery.viewport_exhausted_pause_ms / 1000
         )
         self._safe_transition(GameState.LOCATION_SEARCH, reason="post_revive_hunt_opened")
+        if self.state_machine.state is GameState.LOCATION_SEARCH:
+            self._log_recovery_phase("hunt_opened", reason="post_revive_hunt_opened")
+            self._complete_death_recovery_evidence(reason)
         self.logger.log_event(
             "post_revive_route_recovered",
             state=self.state_machine.state.value,
@@ -633,6 +660,60 @@ class LevelingRuntimeMixin:
             reason=reason,
         )
         return True
+
+    def _log_recovery_phase(self, event_type: str, **fields: object) -> bool:
+        recovery_id = str(self._active_recovery_id or "").strip()
+        if not recovery_id or event_type not in M1_RECOVERY_PHASES:
+            return False
+        if event_type in self._recovery_phase_events:
+            return False
+        next_index = len(self._recovery_phase_events)
+        expected = M1_RECOVERY_PHASES[next_index] if next_index < len(M1_RECOVERY_PHASES) else None
+        if event_type != expected:
+            self.logger.log_event(
+                "death_recovery_phase_rejected",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                recovery_id=recovery_id,
+                phase=event_type,
+                expected_phase=expected,
+            )
+            return False
+        self._recovery_phase_events.append(event_type)
+        self.logger.log_event(
+            event_type,
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            recovery_id=recovery_id,
+            deaths_observed=self.deaths_observed,
+            **fields,
+        )
+        return True
+
+    def _complete_death_recovery_evidence(self, reason: str) -> bool:
+        recovery_id = str(self._active_recovery_id or "").strip()
+        if not recovery_id:
+            return False
+        missing = [phase for phase in M1_RECOVERY_PHASES[:-1] if phase not in self._recovery_phase_events]
+        if missing:
+            self.logger.log_event(
+                "death_recovery_evidence_incomplete",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                recovery_id=recovery_id,
+                reason=reason,
+                missing_phases=missing,
+                observed_phases=[phase for phase in M1_RECOVERY_PHASES if phase in self._recovery_phase_events],
+            )
+            return False
+        completed = self._log_recovery_phase("death_recovery_completed", reason=reason)
+        if completed:
+            self._active_recovery_id = None
+            self._recovery_phase_events.clear()
+        return completed
 
     def _confirmed_recovery_location(self) -> str | None:
         for candidate in (
