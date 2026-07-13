@@ -1038,6 +1038,14 @@ class QuestRuntimeMixin:
         if self._handle_pending_quest_acceptance():
             return
         started = self._quest_refresh_requested_monotonic or time.monotonic()
+        if (
+            self._quest_director is not None
+            and self._quest_active_snapshot_requested
+            and self._quest_active_page_requested is None
+            and not self._quest_director.active_catalog.complete
+        ):
+            self._request_active_quest_snapshot("quest_active_next_page")
+            return
         if self._quest_director is not None and self._quest_director.refresh_in_progress:
             if self._quest_catalog_page_requested is not None:
                 timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))

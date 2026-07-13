@@ -3337,6 +3337,61 @@ def test_autonomous_quest_director_enters_profit_farm_only_after_fresh_empty_cat
     assert [request.action_type for request in sink.requests][-1] == "open_quest_catalog"
 
 
+def test_autonomous_quest_director_collects_every_active_page_before_deciding(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "quests"
+    director = controller._quest_director
+    assert director is not None
+    director.begin_catalog_refresh()
+    director.ingest_catalog_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [],
+            "truncated": False,
+        }
+    )
+
+    assert controller._request_active_quest_snapshot("test_active_refresh")
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "currentPage": 0,
+            "pageCount": 2,
+            "hasNextPage": True,
+            "snapshotId": "active-page-0",
+            "items": [],
+            "truncated": False,
+        }
+    )
+
+    controller._handle_quest_refresh()
+
+    assert [(request.action_type, request.metadata["page"]) for request in sink.requests] == [
+        ("open_active_quest_page", 0),
+        ("open_active_quest_page", 1),
+    ]
+    assert controller.last_error_reason is None
+
+
 def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(
     test_config: AutomationConfig,
     monkeypatch,
