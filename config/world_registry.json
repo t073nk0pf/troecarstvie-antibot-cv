@@ -122,6 +122,17 @@
     }
   },
   "npcs": {
+    "121:4": {
+      "areaObjectId": "4",
+      "locationId": "121",
+      "name": "Дом Ютлана"
+    },
+    "121:5": {
+      "areaObjectId": "5",
+      "locationId": "121",
+      "name": "Алхимик Филонид",
+      "npcInstanceId": "70"
+    },
     "201:7": {
       "areaObjectId": "7",
       "locationId": "201",
