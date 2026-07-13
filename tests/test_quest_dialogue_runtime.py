@@ -149,7 +149,7 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
             questActions=[
                 {
                     "questId": "246",
-                    "title": "ХВОРЬ  СКАКУНОВ",
+                    "title": "Разговор с Филонидом о подозрительном сене",
                     "action": "open",
                     "visible": True,
                     "disabled": False,
@@ -165,6 +165,9 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
         )
     )
     assert opened.intent is QuestDialogueIntent.OPEN_QUEST
+    assert opened.action_metadata["expected_title"] == (
+        "Разговор с Филонидом о подозрительном сене"
+    )
     runtime.acknowledge(opened)
 
     answered = runtime.decide_dialog(

@@ -229,15 +229,17 @@ class QuestDialogueRuntime:
                 snapshot.get("questActions"),
                 quest_id=pending.objective.quest_id,
                 action="open",
-                title=pending.objective.quest_title,
             )
             if len(opens) != 1:
                 raise QuestDialogueError("dialogue_open_missing_or_ambiguous", "quest open action is missing or ambiguous")
+            observed_title = _bounded_text(opens[0].get("title"), max_length=220)
+            if not observed_title:
+                raise QuestDialogueError("dialogue_open_invalid", "quest open title is missing")
             return self._remember(
                 QuestDialogueDecision(
                     QuestDialogueIntent.OPEN_QUEST,
                     "npc_quest_action",
-                    _metadata(**common, action="open"),
+                    _metadata(**{**common, "expected_title": observed_title}, action="open"),
                     "quest_dialogue_open_failed",
                     pending.objective.quest_id,
                     snapshot_id,
