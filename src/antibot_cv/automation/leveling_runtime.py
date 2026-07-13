@@ -58,6 +58,34 @@ class LevelingRuntimeMixin:
             self._last_alive_location_name = self.current_location_name
             self._quest_origin_location_name = self.current_location_name
 
+    def _bind_or_reject_character(self, observed_name: str) -> bool:
+        name = str(observed_name or "").strip()
+        if not name:
+            return False
+        expected_name = str(self._bound_character_name or "").strip()
+        if expected_name and name.casefold() != expected_name.casefold():
+            self.last_error_reason = f"character_mismatch:{name}"
+            self.logger.log_event(
+                "session_stopped",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                reason="character_mismatch",
+                expected_character=expected_name,
+                observed_character=name,
+            )
+            self._safe_transition(GameState.STOPPED, reason="character_mismatch")
+            return True
+        if self._bound_character_name is None:
+            self._bound_character_name = name
+            self.logger.log_event(
+                "character_bound",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                character_name=name,
+                browser_client_id=self.browser_client_id,
+            )
+        return False
+
     def _observe_leveling_goal(self) -> bool:
         leveling = self.config.leveling
         if self.config.dry_run or not leveling.enabled:
@@ -120,27 +148,7 @@ class LevelingRuntimeMixin:
                 page_kind=self.current_page_kind,
                 location_name=self.current_location_name,
             )
-        if self._bound_character_name is None:
-            self._bound_character_name = name
-            self.logger.log_event(
-                "character_bound",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                character_name=name,
-                browser_client_id=self.browser_client_id,
-            )
-        required_name = self._bound_character_name
-        if name.casefold() != required_name.casefold():
-            self.last_error_reason = f"character_mismatch:{name}"
-            self.logger.log_event(
-                "session_stopped",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                reason="character_mismatch",
-                expected_character=required_name,
-                observed_character=name,
-            )
-            self._safe_transition(GameState.STOPPED, reason="character_mismatch")
+        if self._bind_or_reject_character(name):
             return True
         target_level = _optional_int(leveling.target_level)
         if target_level is not None and level >= target_level:
@@ -470,8 +478,7 @@ class LevelingRuntimeMixin:
                 battle_id=self.session.battle_id,
                 dry_run=self.config.dry_run,
                 metadata={
-                    "expected_character": self.current_character_name
-                    or self._bound_character_name
+                    "expected_character": self._bound_character_name
                     or self.config.leveling.required_character_name,
                     "verify_delay_ms": 1000,
                     "revive_option_id": recovery.option_id,
@@ -547,26 +554,13 @@ class LevelingRuntimeMixin:
         if (
             not _same_location_name(self.current_location_name, checkpoint_location)
         ):
-            request = ActionRequest(
-                "open_location_navigator",
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                dry_run=self.config.dry_run,
-                metadata={
-                    "reason": "post_revive_location_route",
-                    "checkpoint_location": checkpoint_location,
-                },
+            self._start_location_route(
+                checkpoint_location,
+                kind="post_revive_location",
+                reason="post_revive_location_route",
             )
-            if not self.action_executor.execute(request):
-                return self._stop_leveling_unsafe("post_revive_location_navigator_open_failed")
-            self._navigator_target_name = checkpoint_location
-            self._navigator_target_kind = "location"
-            self._navigator_opened_monotonic = time.monotonic()
-            self._navigator_client_id = None
-            self._navigator_requires_target_selection = True
-            self._route_recovery_kind = "post_revive_location"
-            self._route_go_submitted_monotonic = None
-            self._safe_transition(GameState.NAVIGATOR_PENDING, reason="post_revive_location_navigator_opened")
+            if self.state_machine.state is not GameState.NAVIGATOR_PENDING:
+                return True
             self.logger.log_event(
                 "post_revive_route_recovery_started",
                 state=self.state_machine.state.value,

@@ -418,9 +418,9 @@ class CombatRuntimeMixin:
             level = _optional_int(player.get("level"))
             xp_percent = _optional_float(player.get("xpPercent"))
             if name:
+                if self._bind_or_reject_character(name):
+                    return True
                 self.current_character_name = name
-                if self._bound_character_name is None:
-                    self._bound_character_name = name
             if level is not None:
                 self.current_level = level
             if xp_percent is not None:

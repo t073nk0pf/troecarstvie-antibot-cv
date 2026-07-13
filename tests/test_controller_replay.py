@@ -1781,6 +1781,47 @@ def test_live_leveling_goal_stops_on_character_mismatch(test_config: AutomationC
     assert controller.last_error_reason == "character_mismatch:other"
 
 
+def test_death_guard_rejects_wrong_character_before_revive(test_config: AutomationConfig) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 10,
+        "required_character_name": "hero-a",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller._state_snapshot_via_injector = lambda **_: {
+        "schemaVersion": 1,
+        "snapshotId": "wrong-character-death",
+        "sections": {
+            "player": {"data": {"name": "hero-b", "level": 5, "xpPercent": 20}},
+            "location": {"data": {"pageKind": "area", "semanticName": "Городская площадь"}},
+            "deathRevive": {
+                "data": {
+                    "dead": True,
+                    "freeReviveAvailable": True,
+                    "freeReviveOptionCount": 1,
+                }
+            },
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "character_mismatch:hero-b"
+    assert sink.requests == []
+
+
 def test_leveling_binds_first_character_when_config_name_is_empty(test_config: AutomationConfig) -> None:
     from src.antibot_cv.automation.config import to_plain_dict
 
@@ -2249,6 +2290,11 @@ def test_confirmed_revive_opens_compass_for_different_checkpoint_location(
     controller.action_executor.sink = sink
     controller._last_alive_location_name = "Курганы бренности"
     controller.current_page_kind = "battle"
+    controller._navigator_client_ids_for_parent = lambda: {"existing-navigator"}
+    controller._route_destination_name = "stale destination"
+    controller._route_destination_id = "stale-id"
+    controller._route_expected_transitions = 99
+    controller._route_step_submitted_from_id = "stale-step"
 
     assert controller._handle_leveling_death(
         {"dead": True, "freeReviveAvailable": True, "freeReviveOptionCount": 1}
@@ -2263,7 +2309,45 @@ def test_confirmed_revive_opens_compass_for_different_checkpoint_location(
     assert controller._navigator_target_name == "Курганы бренности"
     assert controller._navigator_requires_target_selection is True
     assert controller._route_recovery_kind == "post_revive_location"
+    assert controller._navigator_existing_client_ids == {"existing-navigator"}
+    assert controller._route_destination_name is None
+    assert controller._route_destination_id is None
+    assert controller._route_expected_transitions is None
+    assert controller._route_step_submitted_from_id is None
     assert [request.action_type for request in sink.requests] == ["revive_free", "open_location_navigator"]
+
+
+def test_post_revive_navigator_rejection_stops_without_started_telemetry(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    controller.state_machine.state = GameState.POST_REVIVE_RECOVERY
+    controller.current_location_name = "Город Барбус"
+    controller._death_checkpoint = RecoveryCheckpoint(
+        activity=GameState.LOCATION_SEARCH.value,
+        location="Курганы бренности",
+        quest=None,
+        snapshot_id="dead-navigator-rejected",
+    )
+    controller._post_revive_recovery_started_monotonic = time.monotonic()
+    controller.action_executor.execute = lambda request: False
+
+    _complete_post_revive_resource_gate(controller)
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "post_revive_location_route_navigator_open_failed"
+    assert not any(
+        event["event_type"] == "post_revive_route_recovery_started"
+        for event in controller.logger.events
+    )
 
 
 def test_post_revive_unknown_checkpoint_stops_without_hunt(test_config: AutomationConfig) -> None:
