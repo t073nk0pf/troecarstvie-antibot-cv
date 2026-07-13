@@ -120,6 +120,14 @@ class QuestRuntimeMixin:
                 and director_decision.quest is not None
             ):
                 director_quest_id = director_decision.quest.id
+                if self._quest_director.active_objective is None:
+                    return PolicyQuestDecision(
+                        QuestIntent.START_FARM,
+                        "quest_director_non_combat_execution_pending",
+                        quest_id=director_decision.quest.id,
+                        quest_title=director_decision.quest.title,
+                        snapshot_id=str(quest_data.get("snapshotId") or "") or None,
+                    )
         from src.antibot_cv.automation.browser_injector import global_browser_injector
 
         client_id = self._last_state_snapshot_client_id or self.browser_client_id or ""

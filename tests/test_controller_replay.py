@@ -3643,6 +3643,62 @@ def test_empty_loaded_quest_snapshot_cannot_start_quest_driven_farm(
     assert controller._quest_target_names == ()
 
 
+def test_pinned_dialogue_quest_bypasses_legacy_combat_policy_stop(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+        "pinned_quest_id": "246",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    controller.current_level = 5
+    director = controller._quest_director
+    assert director is not None
+    item = {
+        "id": "246",
+        "title": "Хворь скакунов",
+        "status": "active",
+        "objective": "Отправляйтесь к алхимику Филониду в Туманные луга.",
+        "navigation": [{"text": "Туманные луга", "target": "Туманные луга"}],
+        "progress": None,
+    }
+    director.begin_active_refresh()
+    director.ingest_active_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [item],
+            "truncated": False,
+        }
+    )
+
+    decision = controller._evaluate_quest_policy(
+        {"snapshotId": "dialogue-active"},
+        {"source": {"href": "https://3kingdoms.ru/user_quest.php?mode=started"}},
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "snapshotId": "dialogue-active",
+            "items": [item],
+        },
+    )
+
+    assert decision.intent is QuestIntent.START_FARM
+    assert decision.reason == "quest_director_non_combat_execution_pending"
+    assert decision.quest_id == "246"
+
+
 def test_leveling_routes_through_child_navigator_for_matching_quest_location(
     test_config: AutomationConfig,
     monkeypatch,
