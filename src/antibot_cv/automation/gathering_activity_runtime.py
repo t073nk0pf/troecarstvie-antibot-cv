@@ -101,11 +101,24 @@ def gathering_progress(plan: GatheringPlan, inventory_items: Sequence[Mapping[st
             return GatheringProgress(False, (), plan.requirements)
         key = _normalized(raw_name)
         totals[key] = totals.get(key, 0) + raw_count
-    collected = tuple((requirement.name, totals.get(_normalized(requirement.name), 0)) for requirement in plan.requirements)
+    resolved_totals: dict[str, int] = {}
+    for requirement in plan.requirements:
+        requirement_key = _normalized(requirement.name)
+        exact = totals.get(requirement_key)
+        if exact is not None:
+            resolved_totals[requirement_key] = exact
+            continue
+        candidates = [
+            count
+            for inventory_name, count in totals.items()
+            if _same_resource_lexeme(requirement_key, inventory_name)
+        ]
+        resolved_totals[requirement_key] = candidates[0] if len(candidates) == 1 else 0
+    collected = tuple((requirement.name, resolved_totals[_normalized(requirement.name)]) for requirement in plan.requirements)
     missing = tuple(
-        GatheringRequirement(requirement.name, requirement.required - totals.get(_normalized(requirement.name), 0))
+        GatheringRequirement(requirement.name, requirement.required - resolved_totals[_normalized(requirement.name)])
         for requirement in plan.requirements
-        if totals.get(_normalized(requirement.name), 0) < requirement.required
+        if resolved_totals[_normalized(requirement.name)] < requirement.required
     )
     return GatheringProgress(not missing, collected, missing)
 
@@ -125,3 +138,27 @@ def _activity_from_text(value: str) -> GatheringActivity:
 
 def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
+
+
+def _same_resource_lexeme(requirement: str, inventory_name: str) -> bool:
+    """Accept a unique Russian case inflection, never a broad substring match."""
+
+    requirement_words = requirement.split()
+    inventory_words = inventory_name.split()
+    if len(requirement_words) != len(inventory_words) or not requirement_words:
+        return False
+    return all(
+        _same_word_lexeme(expected, observed)
+        for expected, observed in zip(requirement_words, inventory_words)
+    )
+
+
+def _same_word_lexeme(expected: str, observed: str) -> bool:
+    if expected == observed:
+        return True
+    shared = 0
+    for left, right in zip(expected, observed):
+        if left != right:
+            break
+        shared += 1
+    return shared >= 4 and shared >= min(len(expected), len(observed)) - 2
