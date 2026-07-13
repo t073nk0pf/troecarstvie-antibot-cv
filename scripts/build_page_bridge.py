@@ -10,6 +10,7 @@ MODULES = (
     "00_core_combat.js",
     "10_hunt_inventory.js",
     "20_hunt_actions.js",
+    "21_gathering_activity.js",
     "30_navigation_death.js",
     "32_instance_actions.js",
     "35_npc_quests.js",

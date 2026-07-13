@@ -213,6 +213,15 @@ class QuestChainRuntime:
         if self.state_path is not None:
             self.state_path.unlink(missing_ok=True)
 
+    def release_deferred(self, quest_id: str) -> None:
+        """Release a chain that was explicitly deferred, never count it completed."""
+
+        if self.lease is None or self.lease.quest_id != quest_id:
+            raise RuntimeError("deferred quest does not match pinned chain")
+        self.lease = None
+        if self.state_path is not None:
+            self.state_path.unlink(missing_ok=True)
+
     def _persist(self) -> None:
         payload = self.checkpoint()
         if self.state_path is not None and payload is not None:

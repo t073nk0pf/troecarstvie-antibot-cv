@@ -21,6 +21,10 @@ from src.antibot_cv.automation.quest_intake_runtime import (
     QuestIntakeIntent,
     QuestIntakeRuntime,
 )
+from src.antibot_cv.automation.gathering_activity_runtime import (
+    GatheringPlanStatus,
+    parse_gathering_plan,
+)
 from src.antibot_cv.automation.quest_policy import (
     Quest as PolicyQuest,
     QuestDecision as PolicyQuestDecision,
@@ -598,7 +602,7 @@ class QuestRuntimeMixin:
                         self._quest_director.active_objective is None
                         and decision.quest is not None
                     ):
-                        return self._begin_quest_dialogue(decision.quest.id)
+                        return self._begin_non_combat_quest_executor(decision.quest.id)
                     if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
                         self._quest_refresh_requested_monotonic = time.monotonic()
                         self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="quest_active_execution_ready")
@@ -747,6 +751,68 @@ class QuestRuntimeMixin:
             return self._stop_leveling_unsafe("quest_accept_route_arrival_mismatch")
         return self._open_area_for_quest_accept(reason)
 
+    def _begin_non_combat_quest_executor(self, quest_id: str) -> bool:
+        """Choose a bounded executor for a non-monster quest step."""
+
+        director = self._quest_director
+        if director is None:
+            return self._stop_leveling_unsafe("quest_executor_director_missing")
+        entry = next(
+            (candidate for candidate in director.active_catalog.result if candidate.id == quest_id),
+            None,
+        )
+        if entry is None:
+            return self._stop_leveling_unsafe("quest_executor_entry_missing")
+        if str(entry.data.get("objectiveKind") or "").strip().casefold() != "collect":
+            return self._begin_quest_dialogue(quest_id)
+        plan = parse_gathering_plan(entry)
+        self.logger.log_event(
+            "quest_gathering_plan",
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            quest_id=quest_id,
+            quest_title=entry.title,
+            status=plan.status.value,
+            activity=plan.activity.value if plan.activity is not None else None,
+            requirements=[{"name": item.name, "required": item.required} for item in plan.requirements],
+            reason=plan.reason,
+        )
+        if plan.status is GatheringPlanStatus.READY:
+            return self._defer_active_quest(quest_id, "gathering_node_discovery_required")
+        return self._defer_active_quest(quest_id, f"gathering_plan:{plan.reason}")
+
+    def _defer_active_quest(self, quest_id: str, detail: str) -> bool:
+        """Keep a non-terminal blocker auditable while releasing the scheduler."""
+
+        director = self._quest_director
+        if director is None:
+            return self._stop_leveling_unsafe("quest_defer_director_missing")
+        normalized_detail = str(detail or "").strip()
+        if "ambiguous" in normalized_detail:
+            reason = "dialogue_choice_ambiguous"
+        elif normalized_detail.startswith("gathering_"):
+            reason = "gathering_unavailable"
+        elif normalized_detail.startswith("quest_dialogue"):
+            reason = "dialogue_unavailable"
+        else:
+            return self._stop_leveling_unsafe(f"quest_deferral_unclassified:{normalized_detail}")
+        try:
+            director.defer_active_quest(quest_id, reason)
+        except (RuntimeError, ValueError) as exc:
+            return self._stop_leveling_unsafe(f"quest_defer_failed:{exc}")
+        self._quest_dialogue.pending = None
+        self._quest_policy_intent = None
+        self.logger.log_event(
+            "quest_deferred",
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            quest_id=quest_id,
+            reason=reason,
+            detail=normalized_detail[:500],
+            deferred_active=dict(director.deferred_active),
+        )
+        return self._finish_quest_refresh_to_hunt(f"quest_deferred:{reason}")
+
     def _begin_quest_dialogue(self, quest_id: str) -> bool:
         director = self._quest_director
         if director is None:
@@ -771,7 +837,7 @@ class QuestRuntimeMixin:
                 parsed = self._quest_dialogue.begin(entry, already_at_location=True)
         except (QuestDialogueError, RuntimeError, ValueError) as exc:
             reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
-            return self._stop_leveling_unsafe(f"quest_dialogue_begin:{reason}")
+            return self._defer_active_quest(quest_id, f"quest_dialogue_begin:{reason}")
         self.logger.log_event(
             "quest_dialogue_started",
             state=self.state_machine.state.value,
@@ -1127,7 +1193,7 @@ class QuestRuntimeMixin:
                 and self._quest_director.active_objective is None
                 and decision.quest is not None
             ):
-                self._begin_quest_dialogue(decision.quest.id)
+                self._begin_non_combat_quest_executor(decision.quest.id)
                 return
         if self.current_page_kind == "quests":
             if (

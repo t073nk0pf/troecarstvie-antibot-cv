@@ -764,6 +764,11 @@
         send(data.token, Boolean(result.ok), result);
         return;
       }
+      if (data.command.type === "gathering_node_snapshot") {
+        const result = gatheringNodeSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
       if (data.command.type === "resource_snapshot") {
         const result = resourceSnapshot();
         send(data.token, Boolean(result.ok), result);

@@ -56,6 +56,7 @@ class QuestDirectorRuntime:
         self.pending_accept: QuestRef | None = None
         self.active_objective: QuestObjective | None = None
         self.supported_objectives: tuple[QuestObjective, ...] = ()
+        self.deferred_active: dict[str, str] = {}
         preferred = str(pinned_quest_id or "").strip()
         if preferred and (not preferred.isdecimal() or int(preferred) <= 0):
             raise ValueError("pinned quest id must be a positive decimal identity")
@@ -226,7 +227,9 @@ class QuestDirectorRuntime:
             active_snapshot_fresh=self.active_snapshot_fresh,
             refresh_in_progress=self.refresh_in_progress,
             completed_since_refresh=self.completed_since_refresh,
-            active_quests=self.active_quests,
+            active_quests=tuple(
+                quest for quest in self.active_quests if quest.id not in self.deferred_active
+            ),
             available_quests=self.available_quests,
             intake_queue=self.intake_queue,
         )
@@ -289,6 +292,12 @@ class QuestDirectorRuntime:
         if result is None:
             return self.active_catalog.next_page
         self.active_quests = tuple(QuestRef(entry.id, entry.title) for entry in result)
+        active_ids = {entry.id for entry in result}
+        self.deferred_active = {
+            quest_id: reason
+            for quest_id, reason in self.deferred_active.items()
+            if quest_id in active_ids
+        }
         self.active_snapshot_fresh = True
         if self.chain.lease is None and self.preferred_quest_id:
             preferred = next(
@@ -391,6 +400,7 @@ class QuestDirectorRuntime:
         if not any(quest.id == quest_id for quest in self.active_quests):
             raise RuntimeError("completed quest was not active")
         self.active_quests = tuple(quest for quest in self.active_quests if quest.id != quest_id)
+        self.deferred_active.pop(quest_id, None)
         if self.active_objective is not None and self.active_objective.quest_id == quest_id:
             self.active_objective = None
             self.active_objective_revision = None
@@ -402,6 +412,33 @@ class QuestDirectorRuntime:
             objective for objective in self.supported_objectives if objective.quest_id != quest_id
         )
         self.completed_since_refresh += 1
+
+    def defer_active_quest(self, quest_id: str, reason: str) -> None:
+        """Record a bounded non-terminal blocker and let the scheduler continue."""
+
+        normalized_id = str(quest_id or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if (
+            not normalized_id.isdecimal()
+            or int(normalized_id) <= 0
+            or not normalized_reason
+            or len(normalized_reason) > 160
+            or not all(char.islower() or char.isdigit() or char == "_" for char in normalized_reason)
+        ):
+            raise ValueError("invalid deferred quest identity or reason")
+        if not any(quest.id == normalized_id for quest in self.active_quests):
+            raise RuntimeError("deferred quest was not active")
+        self.deferred_active[normalized_id] = normalized_reason
+        if self.active_objective is not None and self.active_objective.quest_id == normalized_id:
+            self.active_objective = None
+            self.active_objective_revision = None
+            self.objective_refresh = None
+            self.unchanged_victory_refreshes = 0
+        self.supported_objectives = tuple(
+            objective for objective in self.supported_objectives if objective.quest_id != normalized_id
+        )
+        if self.chain.lease is not None and self.chain.lease.quest_id == normalized_id:
+            self.chain.release_deferred(normalized_id)
 
     def confirm_terminal_removal(self, quest_id: str) -> None:
         """Release a lease only after a terminal action and a fresh full absence."""
