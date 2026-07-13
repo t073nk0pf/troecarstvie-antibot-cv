@@ -63,9 +63,13 @@ class QuestRuntimeMixin:
                 refresh_every_completed=max(1, int(self.config.leveling.quest_refresh_every_completed)),
                 catalog_max_pages=max(1, int(self.config.leveling.quest_catalog_max_pages)),
                 pinned_quest_id=self.config.leveling.pinned_quest_id,
-                chain_state_path=_quest_chain_state_path(
-                    self.config.runs_dir,
-                    self.config.leveling.required_character_name,
+                chain_state_path=(
+                    None
+                    if self.config.dry_run
+                    else _quest_chain_state_path(
+                        self.config.runs_dir,
+                        self.config.leveling.required_character_name,
+                    )
                 ),
             )
             if self.config.leveling.autonomous_quest_director
