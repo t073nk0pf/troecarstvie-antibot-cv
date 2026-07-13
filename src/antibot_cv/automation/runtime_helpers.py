@@ -53,8 +53,10 @@ def is_semantic_location_name(value: object) -> bool:
 
 
 def navigator_target_kind(value: object) -> str:
-    del value
-    return "auto"
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if re.search(r"\[\s*\d+\s*\]\s*$", text):
+        return "monster"
+    return "location"
 
 
 def clean_quest_route_label(value: object) -> str | None:

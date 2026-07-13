@@ -463,8 +463,9 @@ class LiveMacActionSink:
                     "kind": str(metadata.get("target_kind") or "location"),
                     "searchDelayMs": metadata.get("search_delay_ms", 250),
                     "routeDelayMs": metadata.get("route_delay_ms", 350),
+                    "commandTimeoutMs": 5000,
                 },
-                timeout_s=4.0,
+                timeout_s=6.0,
                 client_id_override=navigator_client_id,
             )
             result_metadata = {

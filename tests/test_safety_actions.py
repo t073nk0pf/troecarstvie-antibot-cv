@@ -715,7 +715,7 @@ def test_live_recovery_items_does_not_open_hunt_when_resource_not_confirmed(monk
 
 
 def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypatch) -> None:
-    calls: list[tuple[str, str | None, dict[str, object]]] = []
+    calls: list[tuple[str, str | None, dict[str, object], float]] = []
 
     class FakeInjector:
         def execute(
@@ -726,7 +726,7 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             timeout_s: float = 2.5,
             client_id: str | None = None,
         ) -> InjectorResult:
-            calls.append((command, client_id, dict(payload or {})))
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
             if command in {"open_quest_navigator", "open_location_navigator"}:
                 return InjectorResult(True, '{"submitted":true}', client_id)
             if command == "navigator_select_target":
@@ -796,8 +796,8 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
     )
 
     assert calls == [
-        ("open_quest_navigator", "parent-client", {"target": "Дикий предел"}),
-        ("open_location_navigator", "parent-client", {}),
+        ("open_quest_navigator", "parent-client", {"target": "Дикий предел"}, 2.5),
+        ("open_location_navigator", "parent-client", {}, 2.5),
         (
             "navigator_select_target",
             "child-client",
@@ -806,12 +806,15 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
                 "kind": "monster",
                 "searchDelayMs": 250,
                 "routeDelayMs": 350,
+                "commandTimeoutMs": 5000,
             },
+            6.0,
         ),
-        ("navigator_go", "child-client", {"expectedTarget": "Дикий предел"}),
+        ("navigator_go", "child-client", {"expectedTarget": "Дикий предел"}, 3.0),
         (
             "location_route_step",
             "parent-client",
             {"expectedCurrentLocationId": "102", "navigationDelayMs": 75},
+            3.0,
         ),
     ]

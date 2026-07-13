@@ -97,7 +97,7 @@ class NavigationRuntimeMixin:
                     "target": self._navigator_target_name or "",
                     "target_kind": self._navigator_target_kind,
                     "navigator_client_id": self._navigator_client_id,
-                    "search_delay_ms": 1500,
+                    "search_delay_ms": 3000,
                     "route_delay_ms": 500,
                     "reason": self._route_recovery_kind,
                 },
