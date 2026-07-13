@@ -160,7 +160,7 @@ class NavigationRuntimeMixin:
             navigator_client_id=self._navigator_client_id,
         )
         if route_decision.action is RouteAction.ARRIVED:
-            if self._route_recovery_kind != "quest_accept":
+            if self._route_recovery_kind not in {"quest_accept", "quest_dialogue"}:
                 self._finish_route_arrival("navigator_target_current_location")
                 return
             request = ActionRequest(

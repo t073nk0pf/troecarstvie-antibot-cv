@@ -3873,6 +3873,53 @@ def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(
     assert not controller._quest_dialogue_snapshot_pending("dialogue_npc_snapshot_invalid")
 
 
+def test_dialogue_route_verifies_area_when_navigator_reports_already_arrived(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.browser_injector import InjectorResult
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    controller = AutomationController(
+        test_config, sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.state_machine.state = GameState.NAVIGATOR_PENDING
+    controller._navigator_target_name = "Туманные луга"
+    controller._navigator_client_id = "navigator-client"
+    controller._navigator_requires_target_selection = False
+    controller._route_recovery_kind = "quest_dialogue"
+    controller._find_navigator_client = lambda: {"client_id": "navigator-client"}
+
+    class FakeInjector:
+        def execute(self, command, *, timeout_s, client_id):
+            return InjectorResult(
+                True,
+                json.dumps(
+                    {
+                        "snapshotId": "dialogue-arrived",
+                        "generatedAt": time.time(),
+                        "href": "https://3kingdoms.ru/navigator.php?name=x",
+                        "target": "Туманные луга",
+                        "currentLocation": True,
+                        "hasRoute": False,
+                        "routeTransitions": 0,
+                        "visibleGoButtonCount": 0,
+                    }
+                ),
+                client_id=client_id,
+            )
+
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: FakeInjector())
+
+    controller._handle_navigator_pending()
+
+    assert controller.state_machine.state is GameState.ROUTE_RECOVERY
+    assert [request.action_type for request in sink.requests] == ["open_area"]
+    assert controller._route_expected_transitions == 0
+
+
 def test_leveling_stops_on_ambiguous_quest_route_without_opening_hunt(
     test_config: AutomationConfig,
 ) -> None:
