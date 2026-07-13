@@ -221,6 +221,7 @@ class LevelingRuntimeMixin:
             or not target
             or self.state_machine.state not in {GameState.LOCATION_SEARCH, GameState.VIEWPORT_SCAN}
             or _same_location_name(self.current_location_name, target)
+            or _same_location_name(self._configured_route_completed_target, target)
         ):
             return False
         if self.current_page_kind not in {"area", "hunt", "main"}:

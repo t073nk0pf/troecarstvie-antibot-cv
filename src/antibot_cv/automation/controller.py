@@ -198,6 +198,7 @@ class AutomationController(
         self._route_step_submitted_from_id: str | None = None
         self._route_step_submitted_monotonic: float | None = None
         self._route_resume_target_name: str | None = None
+        self._configured_route_completed_target: str | None = None
         self._death_checkpoint: RecoveryCheckpoint | None = None
         self._death_recovery_policy = DeathRecoveryPolicy(
             max_deaths=max(0, int(config.leveling.max_deaths_per_session)),

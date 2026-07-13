@@ -2578,6 +2578,42 @@ def test_configured_location_route_waits_for_exact_arrival(test_config: Automati
     assert sink.requests == []
 
 
+def test_configured_monster_route_is_not_reopened_after_confirmed_arrival(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 9,
+        "target_location_name": "Белая Рысь [6]",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.state_machine.state = GameState.ROUTE_RECOVERY
+    controller._navigator_target_name = "Белая Рысь [6]"
+    controller._route_destination_name = "Белая Рысь [6]"
+    controller._route_recovery_kind = "configured_location"
+    controller.current_location_name = "Порт безбрежного моря"
+
+    assert controller._finish_route_arrival("navigator_route_id_confirmed") is True
+
+    assert controller._configured_route_completed_target == "Белая Рысь [6]"
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH
+    controller.current_page_kind = "hunt"
+    controller.current_location_name = "Порт безбрежного моря"
+    assert controller._maybe_start_configured_location_route() is False
+    assert [request.action_type for request in sink.requests] == ["open_hunt"]
+
+
 def test_location_route_executes_one_confirmed_step_per_location(test_config: AutomationConfig) -> None:
     from src.antibot_cv.automation.config import to_plain_dict
 

@@ -366,6 +366,7 @@ class NavigationRuntimeMixin:
 
     def _finish_route_arrival(self, reason: str) -> bool:
         recovery_kind = self._route_recovery_kind
+        arrival_target = self._route_destination_name or self._navigator_target_name
         resume_target = self._route_resume_target_name
         if recovery_kind == "post_revive_location":
             self._log_recovery_phase(
@@ -379,6 +380,17 @@ class NavigationRuntimeMixin:
                 resume_target,
                 kind="interrupted_route_resume",
                 reason="interrupted_route_resume",
+            )
+        configured_target = str(self.config.leveling.target_location_name or "").strip()
+        if configured_target and _same_location_name(arrival_target, configured_target):
+            self._configured_route_completed_target = configured_target
+            self.logger.log_event(
+                "configured_location_route_completed",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                target=configured_target,
+                location_name=self.current_location_name,
+                reason=reason,
             )
         if recovery_kind in {
             "post_revive_location",
