@@ -3370,6 +3370,9 @@ def test_autonomous_quest_director_collects_every_active_page_before_deciding(
     )
 
     assert controller._request_active_quest_snapshot("test_active_refresh")
+    controller._handle_quest_refresh()
+    assert controller.last_error_reason is None
+    assert len(sink.requests) == 1
     controller._observe_autonomous_quest_snapshot(
         {
             "loadStatus": "loaded",
