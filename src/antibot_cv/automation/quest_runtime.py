@@ -816,7 +816,11 @@ class QuestRuntimeMixin:
         return self._open_area_for_quest_dialogue(reason)
 
     def _quest_dialogue_snapshot_pending(self, unsafe_reason: str) -> bool:
-        if unsafe_reason not in {"dialogue_npc_snapshot_invalid", "dialogue_snapshot_invalid"}:
+        if unsafe_reason not in {
+            "dialogue_npc_snapshot_invalid",
+            "dialogue_snapshot_invalid",
+            "dialogue_action_missing",
+        }:
             return False
         started = self._quest_refresh_requested_monotonic or time.monotonic()
         timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
