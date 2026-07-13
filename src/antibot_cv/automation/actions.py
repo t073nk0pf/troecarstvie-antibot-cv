@@ -5,6 +5,9 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
+from src.antibot_cv.automation.action_route_helpers import (
+    route_confirmation_reason as _route_confirmation_reason,
+)
 from src.antibot_cv.automation.browser_injector import global_browser_injector
 from src.antibot_cv.automation.resource_action_helpers import (
     refresh_resource_source_after_use,
@@ -101,6 +104,9 @@ class LiveMacActionSink:
             allowed_levels = metadata.get("allowed_levels")
             if isinstance(allowed_levels, list):
                 payload["allowedLevels"] = allowed_levels
+            allowed_bot_ids = metadata.get("allowed_bot_ids")
+            if isinstance(allowed_bot_ids, list):
+                payload["allowedBotIds"] = allowed_bot_ids
             payload["verifyTimeoutMs"] = 3500
             payload["commandTimeoutMs"] = 6500
             result = self._execute_injector(injector, "attack_visible_bot", payload, timeout_s=7.0)
@@ -131,6 +137,49 @@ class LiveMacActionSink:
                 "action_blocked",
                 logged_request,
                 block_reason=f"injector_attack_visible_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+        if request.action_type == "enter_instance":
+            injector = global_browser_injector()
+            metadata = dict(request.metadata or {})
+            expected_name = str(metadata.get("expected_name") or "").strip()
+            expected_snapshot_id = str(metadata.get("expected_snapshot_id") or "").strip()
+            if not expected_name or not expected_snapshot_id:
+                _log_action(self.logger, "action_blocked", request, block_reason="instance_identity_missing")
+                return False
+            result = self._execute_injector(
+                injector,
+                "enter_instance",
+                {
+                    "expectedName": expected_name,
+                    "expectedSnapshotId": expected_snapshot_id,
+                    "navigationDelayMs": max(25, min(250, int(metadata.get("navigation_delay_ms") or 75))),
+                },
+                timeout_s=3.5,
+            )
+            parsed = _parse_injector_dict(result.message)
+            submitted = bool(
+                result.ok
+                and isinstance(parsed, dict)
+                and parsed.get("message") == "instance_entry_submitted"
+                and parsed.get("submitted") is True
+            )
+            logged_request = _copy_request(
+                request,
+                metadata={
+                    **metadata,
+                    "injector_message": _compact_injector_message(result.message),
+                    "injector_client_id": result.client_id,
+                },
+            )
+            if submitted:
+                _log_action(self.logger, "instance_entry_requested", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_enter_instance_failed:{_compact_injector_message(result.message)}",
             )
             return False
 
@@ -612,6 +661,7 @@ class LiveMacActionSink:
             expected_title = str(metadata.get("expected_title") or "").strip()
             action = str(metadata.get("action") or "").strip().lower()
             expected_ref = str(metadata.get("expected_ref") or "").strip()
+            expected_point_id = str(metadata.get("expected_point_id") or "").strip()
             expected_text = str(metadata.get("expected_text") or "").strip()
             valid = (
                 expected_snapshot_id.startswith("npc-dialog-")
@@ -620,14 +670,15 @@ class LiveMacActionSink:
                 and int(npc_id) > 0
                 and quest_id.isdecimal()
                 and int(quest_id) > 0
-                and 0 < len(expected_title) <= 220
-                and action in {"open", "answer", "accept"}
+                and (action == "done" or 0 < len(expected_title) <= 220)
+                and action in {"open", "answer", "accept", "done"}
                 and (
                     action == "open"
                     or (
                         0 < len(expected_text) <= 1200
                         and (
                             action == "accept"
+                            or (action == "done" and expected_point_id.isdecimal() and int(expected_point_id) > 0)
                             or (expected_ref.isdecimal() and int(expected_ref) > 0)
                         )
                     )
@@ -646,7 +697,8 @@ class LiveMacActionSink:
                     "expectedTitle": expected_title,
                     "action": action,
                     "expectedRef": expected_ref if action == "answer" else None,
-                    "expectedText": expected_text if action in {"answer", "accept"} else None,
+                    "expectedPointId": expected_point_id if action == "done" else None,
+                    "expectedText": expected_text if action in {"answer", "accept", "done"} else None,
                 },
                 timeout_s=3.0,
             )
@@ -1351,61 +1403,6 @@ def _parse_injector_dict(message: object) -> dict[str, object] | None:
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, dict) else None
-
-
-def _route_snapshot_fingerprint(
-    snapshot: object,
-) -> tuple[str, str, tuple[str, ...], str] | None:
-    if not isinstance(snapshot, dict):
-        return None
-    if snapshot.get("message") != "location_route_snapshot" or snapshot.get("pageKind") != "area":
-        return None
-    current_location_id = str(snapshot.get("currentLocationId") or "").strip()
-    target_location_id = str(snapshot.get("targetLocationId") or "").strip()
-    raw_path = snapshot.get("foundPath")
-    if not current_location_id or not target_location_id or not isinstance(raw_path, list):
-        return None
-    found_path = tuple(str(item or "").strip() for item in raw_path)
-    if any(not item for item in found_path):
-        return None
-    transition = snapshot.get("nextTransition")
-    next_location_id = (
-        str(transition.get("locId") or "").strip() if isinstance(transition, dict) else ""
-    )
-    return current_location_id, target_location_id, found_path, next_location_id
-
-
-def _route_confirmation_reason(
-    before: object,
-    after: object,
-    expected_transitions: object,
-) -> str:
-    if (
-        not isinstance(expected_transitions, int)
-        or isinstance(expected_transitions, bool)
-        or expected_transitions <= 0
-    ):
-        return "expected_transition_count_invalid"
-    after_fingerprint = _route_snapshot_fingerprint(after)
-    if after_fingerprint is None:
-        return "parent_route_after_unconfirmed"
-    current_location_id, target_location_id, found_path, next_location_id = after_fingerprint
-    if target_location_id == "0":
-        return "parent_route_target_missing"
-    if current_location_id == target_location_id:
-        return "parent_route_already_at_target"
-    if len(found_path) != expected_transitions:
-        return "parent_route_transition_count_mismatch"
-    if not found_path or found_path[-1] != target_location_id:
-        return "parent_route_destination_disconnected"
-    if next_location_id != found_path[0]:
-        return "parent_route_next_transition_disconnected"
-    before_fingerprint = _route_snapshot_fingerprint(before)
-    if before_fingerprint is None:
-        return "confirmed_connected_route_after_unconfirmed_before"
-    if after_fingerprint == before_fingerprint:
-        return "parent_route_unchanged_after_go"
-    return "confirmed_changed_connected_route"
 
 
 def _compact_recovery_result(parsed: dict[str, object]) -> dict[str, object]:

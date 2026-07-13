@@ -217,7 +217,7 @@ def test_execution_fails_closed_without_complete_active_catalog() -> None:
     assert decision.reason == "quest_objective_active_catalog_incomplete"
 
 
-def test_execution_requires_full_refresh_after_progress_and_stops_on_completed_step() -> None:
+def test_execution_requires_full_refresh_and_keeps_completed_step_on_pinned_chain() -> None:
     runtime = QuestDirectorRuntime()
     runtime.begin_catalog_refresh()
     runtime.ingest_catalog_page(catalog_page(0, 1))
@@ -238,9 +238,45 @@ def test_execution_requires_full_refresh_after_progress_and_stops_on_completed_s
     runtime.ingest_active_page(
         active_page(0, 1, active_monster("2", progress={"current": 5, "required": 5, "complete": True}))
     )
-    stopped = runtime.decision(current_level_cap=5)
-    assert stopped.intent is QuestDirectorIntent.STOP_UNSAFE
-    assert "objective" in stopped.reason
+    continued = runtime.decision(current_level_cap=5)
+    assert continued.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert continued.quest is not None and continued.quest.id == "2"
+    assert runtime.chain.lease is not None and runtime.chain.lease.quest_id == "2"
+    assert runtime.active_objective is not None and runtime.active_objective.complete is True
+
+
+def test_pinned_chain_survives_catalogue_reordering_and_unsupported_next_step() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1, active_monster("2"), active_monster("3", target="Лиса [4]")))
+    first = runtime.decision(current_level_cap=5)
+    assert first.quest is not None and first.quest.id == "2"
+
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(
+        active_page(
+            0,
+            1,
+            active_monster("3", target="Лиса [4]"),
+            {
+                "id": "2",
+                "title": "Quest 2",
+                "status": "active",
+                "objective": "Поговорите с алхимиком.",
+                "navigation": [{"text": "Туманные луга", "target": "Туманные луга"}],
+                "progress": None,
+            },
+        )
+    )
+
+    decision = runtime.decision(current_level_cap=5)
+    assert decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert decision.quest is not None and decision.quest.id == "2"
+    assert decision.reason == "pinned_chain_requires_non_monster_executor"
+    assert runtime.chain.lease is not None and runtime.chain.lease.quest_id == "2"
+    assert runtime.active_objective is None
 
 
 def test_execution_stops_after_bounded_confirmed_victories_without_progress() -> None:

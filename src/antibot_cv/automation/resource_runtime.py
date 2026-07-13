@@ -509,6 +509,11 @@ class ResourceRuntimeMixin:
             "location_name": self.current_location_name,
             "quest_origin_location": self._quest_origin_location_name,
             "active_quest_id": self._active_quest_id,
+            "quest_chain": (
+                None
+                if self._quest_director is None
+                else self._quest_director.chain.checkpoint()
+            ),
             "quest_policy_intent": None if self._quest_policy_intent is None else self._quest_policy_intent.value,
             "quest_target_names": list(self._quest_target_names),
             "quest_route_locations": list(self._quest_route_locations),

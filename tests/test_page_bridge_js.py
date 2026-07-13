@@ -918,7 +918,17 @@ def test_page_bridge_opens_only_snapshot_bound_exact_npc() -> None:
 const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
-const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const moduleNames = [
+  "00_core_combat.js",
+  "10_hunt_inventory.js",
+  "20_hunt_actions.js",
+  "30_navigation_death.js",
+  "35_npc_quests.js",
+  "40_state_layout_dispatch.js",
+];
+const source = `(() => {\n${moduleNames.map((name) =>
+  fs.readFileSync(`browser_injector/page_bridge_modules/${name}`, "utf8")
+).join("\n")}\n})();`;
 const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
 const messages = [];
 const listeners = {};
@@ -926,6 +936,7 @@ let clicks = 0;
 let questClicks = 0;
 let answerClicks = 0;
 let acceptClicks = 0;
+let doneClicks = 0;
 const shell = {};
 const npcElement = {
   tagName: "SPAN",
@@ -1008,13 +1019,28 @@ const acceptButton = {
   closest() { return acceptForm; },
   click() { acceptClicks += 1; },
 };
+const doneImage = {
+  getAttribute(name) { return name === "alt" ? "Завершить задание" : null; },
+};
+const doneForm = {
+  action: "npc.php?f_id=6&npc_id=75&quest_id=315&point_id=402&action=done&secret",
+  getAttribute(name) { return name === "action" ? this.action : null; },
+};
+const doneButton = {
+  tagName: "BUTTON", innerText: "", textContent: "", disabled: false, form: doneForm,
+  getAttribute() { return null; },
+  getClientRects() { return [{ width: 100, height: 30 }]; },
+  querySelector(selector) { return selector === "img[alt]" ? doneImage : null; },
+  closest() { return doneForm; },
+  click() { doneClicks += 1; },
+};
 const terminalDocument = {
   title: "Письмо моряку",
   readyState: "complete",
   body: { innerText: "Письмо моряку Моряк Кентур Ваша цель: доставить письмо", textContent: "" },
   querySelectorAll(selector) {
     if (selector === "h2") return [header, detailTitle];
-    if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [acceptButton];
+    if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [acceptButton, doneButton];
     return [];
   },
 };
@@ -1115,10 +1141,40 @@ async function command(type, payload = {}) {
   assert.strictEqual(answered.ok, true);
   assert.strictEqual(answerClicks, 1);
   const terminal = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  assert.strictEqual(terminal.message.doneActions.length, 2);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(terminal.message.doneActions[1])),
+    {
+      questId: "315", action: "done", pointId: "402", text: "Завершить задание",
+      npcId: "6", npcInstanceId: "75", visible: true, disabled: false,
+    }
+  );
   assert.strictEqual(terminal.message.acceptActions.length, 1);
   assert.strictEqual(terminal.message.acceptActions[0].text, "Взять задание");
-  const accepted = await command("npc_quest_action", {
+  const wrongPoint = await command("npc_quest_action", {
     expectedSnapshotId: terminal.message.snapshotId,
+    npcId: "6",
+    questId: "315",
+    action: "done",
+    expectedPointId: "401",
+    expectedText: "Завершить задание",
+  });
+  assert.strictEqual(wrongPoint.ok, false);
+  assert.strictEqual(wrongPoint.message.message, "npc_quest_action_missing");
+  assert.strictEqual(doneClicks, 0);
+  const completed = await command("npc_quest_action", {
+    expectedSnapshotId: terminal.message.snapshotId,
+    npcId: "6",
+    questId: "315",
+    action: "done",
+    expectedPointId: "402",
+    expectedText: "Завершить задание",
+  });
+  assert.strictEqual(completed.ok, true);
+  assert.strictEqual(doneClicks, 1);
+  const acceptSnapshot = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  const accepted = await command("npc_quest_action", {
+    expectedSnapshotId: acceptSnapshot.message.snapshotId,
     npcId: "6",
     questId: "314",
     expectedTitle: "Письмо моряку",
@@ -1379,6 +1435,71 @@ assert.strictEqual(goClicks, 1);
         check=False,
     )
 
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_snapshots_and_enters_exact_instance() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const location = {
+  _href: "https://3kingdoms.ru/area.php",
+  get href() { return this._href; },
+  set href(value) { this._href = String(value); },
+};
+const document = {
+  title: "", readyState: "complete",
+  body: { innerText: "Заброшенные копи объекты Огненный провал", textContent: "" },
+  querySelector() { return null; }, querySelectorAll() { return []; },
+};
+const root = {
+  name: "top", location, frames: [], document, setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {}, postMessage(message) { messages.push(message); },
+  area: {
+    model: { area: { title: "Заброшенные копи", items: [
+      { id: 2, name: "Огненный провал", type: "instance", href: "/instance.php?action=enter&id=79" },
+      { id: 13, name: "Дом Норида", type: "npc", href: "/npc.php?action=enter&ref=822" },
+    ] } },
+    controller: { compass: { data: { location: 123, target: 0, foundPath: [] } } },
+  },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: { source: `antibot-cv-content:${version}`, token: "inst", command: { type, payload } } });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+(async () => {
+  const snapshot = await command("instance_entrance_snapshot", { expectedName: "Огненный провал" });
+  assert.strictEqual(snapshot.ok, true);
+  assert.strictEqual(snapshot.message.currentLocationId, "123");
+  assert.strictEqual(snapshot.message.candidateCount, 1);
+  assert.strictEqual(snapshot.message.candidates[0].href, "/instance.php?action=enter&id=79");
+  const stale = await command("enter_instance", { expectedName: "Огненный провал", expectedSnapshotId: "wrong" });
+  assert.strictEqual(stale.ok, false);
+  assert.strictEqual(stale.message.message, "instance_snapshot_stale");
+  const entered = await command("enter_instance", {
+    expectedName: "Огненный провал",
+    expectedSnapshotId: snapshot.message.snapshotId,
+    navigationDelayMs: 25,
+  });
+  assert.strictEqual(entered.ok, true);
+  assert.strictEqual(entered.message.message, "instance_entry_submitted");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.strictEqual(location.href, "/instance.php?action=enter&id=79");
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -1794,6 +1915,118 @@ assert.strictEqual(onlyLevelSeven.message.targets[0].botId, 3);
 const questInflection = command("visible_hunt_targets", { margin: 35, allowedLevels: [5], names: ["Волколаков-живодеров"] });
 assert.strictEqual(questInflection.message.targets.length, 1);
 assert.strictEqual(questInflection.message.targets[0].botId, 4);
+"""
+    result = subprocess.run(
+        ["node", "-e", script],
+        cwd=".",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_filters_and_attacks_visible_hunt_target_by_exact_bot_id() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const moduleNames = [
+  "00_core_combat.js",
+  "10_hunt_inventory.js",
+  "20_hunt_actions.js",
+  "30_navigation_death.js",
+  "35_npc_quests.js",
+  "40_state_layout_dispatch.js",
+];
+const source = `(() => {\n${moduleNames.map((name) =>
+  fs.readFileSync(`browser_injector/page_bridge_modules/${name}`, "utf8")
+).join("\n")}\n})();`;
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const bots = [
+  { id: 610, name: "Попутный волк [5]", shortName: "Попутный волк [5]", lvl: 5, x: 100, y: 100, fightId: 0, agrforbid: false, isBot: true },
+  { id: 611, name: "Основной бес [5]", shortName: "Основной бес [5]", lvl: 5, x: 120, y: 120, fightId: 0, agrforbid: false, isBot: true },
+];
+const main = { location: { href: "https://3kingdoms.ru/hunt.php" } };
+const mainFrame = { frames: [main] };
+mainFrame.frames.main = main;
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/main.php" },
+  frames: [mainFrame],
+  document: { title: "", querySelectorAll() { return []; } },
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  setTimeout,
+};
+root.frames.main_frame = mainFrame;
+root.top = root;
+root.window = root;
+root.hunt = {
+  model: { bots: { list: bots } },
+  view: {
+    width: 750,
+    height: 750,
+    viewBounds: { x: 0, y: 0, w: 750, h: 750, ap: 0, rp: 0 },
+    content: { x: 0, y: 0, bots: { x: 0, y: 0, children: [] } },
+  },
+};
+root.getHuntApp = () => root.hunt;
+let attackedBotId = null;
+root.huntAttack = (botId) => {
+  attackedBotId = botId;
+  const bot = bots.find((candidate) => candidate.id === botId);
+  if (bot) bot.fightId = 77;
+};
+
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: { source: `antibot-cv-content:${version}`, token: "token", command: { type, payload } },
+  });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const prioritized = await command("visible_hunt_targets", {
+    names: ["Основной бес", "Попутный волк"],
+  });
+  assert.deepStrictEqual(prioritized.message.targets.map((target) => target.botId), [611, 610]);
+  assert.deepStrictEqual(prioritized.message.targets.map((target) => target.targetPriority), [0, 1]);
+
+  const visible = await command("visible_hunt_targets", { allowedBotIds: [611] });
+  assert.strictEqual(visible.ok, true);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(visible.message.allowedBotIds)), [611]);
+  assert.deepStrictEqual(visible.message.targets.map((target) => target.botId), [611]);
+
+  const alias = await command("visible_hunt_targets", { allowedBotIds: [], botId: "610" });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(alias.message.allowedBotIds)), [610]);
+  assert.deepStrictEqual(alias.message.targets.map((target) => target.botId), [610]);
+
+  const attacked = await command("attack_visible_bot", { allowedBotIds: [611], confirmed: 1, verifyTimeoutMs: 500 });
+  assert.strictEqual(attacked.ok, true);
+  assert.strictEqual(attackedBotId, 611);
+  assert.strictEqual(attacked.message.target.botId, 611);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(attacked.message.visible.allowedBotIds)), [611]);
+
+  const missing = await command("attack_visible_bot", { allowedBotIds: [999], confirmed: 1 });
+  assert.strictEqual(missing.ok, false);
+  assert.strictEqual(missing.message.message, "visible_bot_missing");
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(missing.message.visible.allowedBotIds)), [999]);
+})().catch((error) => { console.error(error); process.exit(1); });
 """
     result = subprocess.run(
         ["node", "-e", script],

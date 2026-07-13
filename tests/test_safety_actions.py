@@ -991,9 +991,10 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
                 "npcId": "13",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
-                "action": "open",
-                "expectedRef": None,
-                "expectedText": None,
+                    "action": "open",
+                    "expectedRef": None,
+                    "expectedPointId": None,
+                    "expectedText": None,
             },
             3.0,
             "parent-client",
@@ -1005,9 +1006,10 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
                 "npcId": "13",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
-                "action": "answer",
-                "expectedRef": "3441",
-                "expectedText": "Поклон тебе, почтенный воевода!",
+                    "action": "answer",
+                    "expectedRef": "3441",
+                    "expectedPointId": None,
+                    "expectedText": "Поклон тебе, почтенный воевода!",
             },
             3.0,
             "parent-client",
@@ -1019,9 +1021,10 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
                 "npcId": "13",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
-                "action": "accept",
-                "expectedRef": None,
-                "expectedText": "Взять задание",
+                    "action": "accept",
+                    "expectedRef": None,
+                    "expectedPointId": None,
+                    "expectedText": "Взять задание",
             },
             3.0,
             "parent-client",
@@ -1383,6 +1386,47 @@ def test_live_open_area_uses_bounded_bridge_command(monkeypatch) -> None:
     assert sink.execute(ActionRequest("open_area", metadata={"reason": "checkpoint"}, dry_run=False))
     assert calls == [("open_area", {"commandTimeoutMs": 4000}, 5.0)]
     assert logger.events[-1]["event_type"] == "open_area_requested"
+
+
+def test_live_enter_instance_requires_bound_snapshot(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s))
+            return InjectorResult(
+                True,
+                '{"ok":true,"message":"instance_entry_submitted","submitted":true}',
+                "parent-client",
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+    assert not sink.execute(ActionRequest("enter_instance", metadata={"expected_name": "Огненный провал"}, dry_run=False))
+    assert calls == []
+    assert sink.execute(
+        ActionRequest(
+            "enter_instance",
+            metadata={"expected_name": "Огненный провал", "expected_snapshot_id": "instance-1"},
+            dry_run=False,
+        )
+    )
+    assert calls == [
+        (
+            "enter_instance",
+            {"expectedName": "Огненный провал", "expectedSnapshotId": "instance-1", "navigationDelayMs": 75},
+            3.5,
+        )
+    ]
+    assert logger.events[-1]["event_type"] == "instance_entry_requested"
 
 
 def test_live_open_area_confirms_delayed_area_navigation(monkeypatch) -> None:

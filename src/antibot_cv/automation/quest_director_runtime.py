@@ -17,7 +17,12 @@ from src.antibot_cv.automation.quest_objective_runtime import (
     ObjectiveSelectionStatus,
     QuestObjective,
     compare_refreshed_objective,
+    collect_monster_hunt_objectives,
     select_monster_hunt_objective,
+)
+from src.antibot_cv.automation.quest_chain_runtime import (
+    ChainRefreshState,
+    QuestChainRuntime,
 )
 
 
@@ -46,13 +51,18 @@ class QuestDirectorRuntime:
         self.intake_queue: tuple[QuestRef, ...] = ()
         self.pending_accept: QuestRef | None = None
         self.active_objective: QuestObjective | None = None
+        self.supported_objectives: tuple[QuestObjective, ...] = ()
+        self.chain = QuestChainRuntime()
         self.active_objective_revision: int | None = None
         self.objective_refresh: ObjectiveRefreshComparison | None = None
         self.max_unchanged_victories = max_unchanged_victories
         self.unchanged_victory_refreshes = 0
         self._active_refresh_after_victory = False
+        self._current_level_cap: int | None = None
 
     def decision(self, *, current_level_cap: int | None = None) -> QuestDirectorDecision:
+        if current_level_cap is not None:
+            self._current_level_cap = current_level_cap
         if self.pending_accept is not None:
             return QuestDirectorDecision(
                 QuestDirectorIntent.WAIT,
@@ -76,8 +86,7 @@ class QuestDirectorRuntime:
                     intake_queue=self.intake_queue,
                 )
             if self.objective_refresh is not None and self.objective_refresh.state in {
-                ObjectiveRefreshState.ADVANCED,
-                ObjectiveRefreshState.QUEST_REMOVED,
+                ObjectiveRefreshState.QUEST_REMOVED_UNVERIFIED,
                 ObjectiveRefreshState.REGRESSED_UNSAFE,
             }:
                 return QuestDirectorDecision(
@@ -85,7 +94,38 @@ class QuestDirectorRuntime:
                     f"quest_objective_refresh:{self.objective_refresh.reason}",
                     intake_queue=self.intake_queue,
                 )
-            if self.active_objective is None:
+            collection = collect_monster_hunt_objectives(
+                self.active_catalog.result,
+                current_level_cap=current_level_cap,
+            )
+            if collection.status is ObjectiveSelectionStatus.UNSAFE:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.STOP_UNSAFE,
+                    f"quest_objective_collection:{collection.reason}",
+                    intake_queue=self.intake_queue,
+                )
+            self.supported_objectives = collection.objectives
+            lease = self.chain.lease
+            if lease is not None:
+                self.active_objective = next(
+                    (objective for objective in collection.objectives if objective.quest_id == lease.quest_id),
+                    None,
+                )
+                locked = next((quest for quest in self.active_quests if quest.id == lease.quest_id), None)
+                if locked is None:
+                    return QuestDirectorDecision(
+                        QuestDirectorIntent.STOP_UNSAFE,
+                        "pinned_quest_missing_without_terminal_evidence",
+                        intake_queue=self.intake_queue,
+                    )
+                if self.active_objective is None:
+                    return QuestDirectorDecision(
+                        QuestDirectorIntent.EXECUTE_ACTIVE,
+                        "pinned_chain_requires_non_monster_executor",
+                        quest=locked,
+                        intake_queue=self.intake_queue,
+                    )
+            elif self.active_objective is None:
                 selection = select_monster_hunt_objective(
                     self.active_catalog.result,
                     current_level_cap=current_level_cap,
@@ -97,6 +137,7 @@ class QuestDirectorRuntime:
                         intake_queue=self.intake_queue,
                     )
                 self.active_objective = selection.objective
+                self.chain.pin(selection.objective, revision=self.active_catalog.revision)
                 self.active_objective_revision = self.active_catalog.revision
                 self.unchanged_victory_refreshes = 0
             result = QuestDirectorDecision(
@@ -183,7 +224,7 @@ class QuestDirectorRuntime:
             comparison = compare_refreshed_objective(
                 previous,
                 result,
-                current_level_cap=previous.monster.level,
+                current_level_cap=self._current_level_cap or 0,
             )
             progressed = (
                 comparison.state is ObjectiveRefreshState.SAME_STEP
@@ -203,9 +244,33 @@ class QuestDirectorRuntime:
                         "quest_progress_unchanged_after_victory_budget",
                     )
             self.objective_refresh = comparison
-            if comparison.state is ObjectiveRefreshState.SAME_STEP and comparison.refreshed is not None:
+            if comparison.state in {
+                ObjectiveRefreshState.SAME_STEP,
+                ObjectiveRefreshState.STEP_CHANGED,
+                ObjectiveRefreshState.STEP_COMPLETED,
+            } and comparison.refreshed is not None:
                 self.active_objective = comparison.refreshed
                 self.active_objective_revision = self.active_catalog.revision
+            elif comparison.state is ObjectiveRefreshState.STEP_CHANGED:
+                self.active_objective = None
+                self.active_objective_revision = self.active_catalog.revision
+        if self.chain.lease is not None:
+            chain_refresh = self.chain.reconcile(
+                result,
+                current_level_cap=self._current_level_cap or 0,
+            )
+            if chain_refresh.state in {
+                ChainRefreshState.LOOP_UNSAFE,
+                ChainRefreshState.REMOVED_UNVERIFIED,
+                ChainRefreshState.REGRESSED_UNSAFE,
+            }:
+                self.objective_refresh = ObjectiveRefreshComparison(
+                    ObjectiveRefreshState.REGRESSED_UNSAFE,
+                    chain_refresh.objective,
+                    chain_refresh.reason,
+                )
+            self.active_objective = chain_refresh.objective
+            self.active_objective_revision = self.active_catalog.revision
         self._active_refresh_after_victory = False
         return None
 
@@ -246,6 +311,11 @@ class QuestDirectorRuntime:
             self.active_objective_revision = None
             self.objective_refresh = None
             self.unchanged_victory_refreshes = 0
+        if self.chain.lease is not None and self.chain.lease.quest_id == quest_id:
+            self.chain.release_completed(quest_id)
+        self.supported_objectives = tuple(
+            objective for objective in self.supported_objectives if objective.quest_id != quest_id
+        )
         self.completed_since_refresh += 1
 
     def expire_available_snapshot(self) -> None:

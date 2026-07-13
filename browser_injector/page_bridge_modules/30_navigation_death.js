@@ -246,10 +246,16 @@
     const target = safeString(payload && payload.target, 180);
     const kind = safeString(payload && payload.kind, 40).toLowerCase() || "location";
     if (!target) return { ok: false, message: "navigator_target_missing" };
-    if (!new Set(["auto", "location", "monster"]).has(kind)) {
+    if (!new Set(["auto", "location", "monster", "instance"]).has(kind)) {
       return { ok: false, message: "navigator_target_kind_forbidden", kind };
     }
-    const expectedSection = kind === "monster" ? "монстры" : kind === "location" ? "локации" : null;
+    const expectedSection = kind === "monster"
+      ? "монстры"
+      : kind === "location"
+        ? "локации"
+        : kind === "instance"
+          ? "инстансы"
+          : null;
     const inputs = Array.from(context.doc.querySelectorAll("input,button")).slice(0, 100);
     const targetInputs = inputs.filter((element) => safeString(attr(element, "name"), 80) === "compassInput");
     if (targetInputs.length !== 1) {

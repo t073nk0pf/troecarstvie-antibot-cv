@@ -141,12 +141,12 @@ def test_refresh_comparison_handles_same_step_completion_removal_and_regression(
 
     assert same.state is ObjectiveRefreshState.SAME_STEP
     assert progressed.state is ObjectiveRefreshState.SAME_STEP
-    assert completed.state is ObjectiveRefreshState.ADVANCED
-    assert removed.state is ObjectiveRefreshState.QUEST_REMOVED
+    assert completed.state is ObjectiveRefreshState.STEP_COMPLETED
+    assert removed.state is ObjectiveRefreshState.QUEST_REMOVED_UNVERIFIED
     assert regressed.state is ObjectiveRefreshState.REGRESSED_UNSAFE
 
 
-def test_changed_supported_step_is_advanced_but_changed_identity_is_unsafe() -> None:
+def test_changed_supported_step_is_changed_but_changed_identity_is_unsafe() -> None:
     selected = select_monster_hunt_objective((entry(),), current_level_cap=10).objective
     assert selected is not None
     next_step = entry(
@@ -159,5 +159,5 @@ def test_changed_supported_step_is_advanced_but_changed_identity_is_unsafe() -> 
         selected, (entry(title="Другой квест"),), current_level_cap=10
     )
 
-    assert changed.state is ObjectiveRefreshState.ADVANCED
+    assert changed.state is ObjectiveRefreshState.STEP_CHANGED
     assert changed_title.state is ObjectiveRefreshState.REGRESSED_UNSAFE

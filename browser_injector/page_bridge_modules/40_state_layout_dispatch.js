@@ -693,6 +693,16 @@
           .catch((error) => send(data.token, false, `location_route_step_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
+      if (data.command.type === "instance_entrance_snapshot") {
+        const result = instanceEntranceSnapshot(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "enter_instance") {
+        const result = enterInstance(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
       if (data.command.type === "revive_free") {
         reviveFree(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))

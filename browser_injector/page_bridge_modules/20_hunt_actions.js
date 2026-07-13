@@ -161,6 +161,31 @@
     return levels.sort((left, right) => left - right);
   };
 
+  const normalizeBotIdList = (value) => {
+    const raw = Array.isArray(value) ? value : value == null ? [] : [value];
+    const botIds = [];
+    for (const item of raw) {
+      const parts = typeof item === "string" ? item.split(/[,\s]+/) : [item];
+      for (const part of parts) {
+        const botId = Number(part);
+        if (Number.isInteger(botId) && botId > 0 && !botIds.includes(botId)) {
+          botIds.push(botId);
+        }
+      }
+    }
+    return botIds.sort((left, right) => left - right);
+  };
+
+  const botIdFilterFromPayload = (payload) => {
+    const raw = [];
+    for (const key of ["allowedBotIds", "allowed_bot_ids", "botIds", "botId"]) {
+      const value = payload && payload[key];
+      if (Array.isArray(value)) raw.push(...value);
+      else if (value != null) raw.push(value);
+    }
+    return normalizeBotIdList(raw);
+  };
+
   const parseLevelFromName = (value) => {
     const text = safeString(value, 180);
     const match = text.match(/\[(\d{1,3})\](?!.*\[\d{1,3}\])/);
@@ -320,6 +345,7 @@
     const allowedLevels = normalizeLevelList(
       payload && (payload.allowedLevels || payload.allowed_levels || payload.levels || payload.targetLevels)
     );
+    const allowedBotIds = botIdFilterFromPayload(payload);
     const viewBounds = hunt.view.viewBounds || {};
     const bounds = {
       x: toNumber(viewBounds.x, 0),
@@ -344,6 +370,7 @@
     const targets = rawBots
       .map((bot) => modelBotSummary(bot))
       .filter((bot) => bot.isBot && bot.botId && !bot.agrforbid && bot.fightId === 0 && bot.x != null && bot.y != null)
+      .filter((bot) => !allowedBotIds.length || allowedBotIds.includes(bot.botId))
       .filter(
         (bot) =>
           !allowedNames.length ||
@@ -358,6 +385,9 @@
           bot.y <= bounds.y + bounds.h + margin;
         return {
           ...bot,
+          targetPriority: allowedNames.length
+            ? allowedNames.findIndex((name) => huntNameMatches(bot.name, name) || huntNameMatches(bot.shortName, name))
+            : 0,
           visible,
           screenX: layer.contentX + (bot.x - bounds.x),
           screenY: layer.contentY + (bot.y - bounds.y),
@@ -365,7 +395,11 @@
         };
       })
       .filter((bot) => bot.visible)
-      .sort((left, right) => left.distanceToViewportCenter - right.distanceToViewportCenter || left.botId - right.botId);
+      .sort((left, right) =>
+        left.targetPriority - right.targetPriority ||
+        left.distanceToViewportCenter - right.distanceToViewportCenter ||
+        left.botId - right.botId
+      );
     const displayChildren = botsLayer && Array.isArray(botsLayer.children)
       ? botsLayer.children.slice(0, 40).map((node, index) => displayNodeSummary(node, index))
       : [];
@@ -376,6 +410,7 @@
       mainHref,
       hasHunt: true,
       viewBounds: bounds,
+      allowedBotIds,
       allowedLevels,
       layer,
       targets,
@@ -532,7 +567,8 @@
     const requestedLevels = normalizeLevelList(
       payload && (payload.allowedLevels || payload.allowed_levels || payload.levels || payload.targetLevels)
     );
-    if (!requestedNames.length && !requestedLevels.length) {
+    const requestedBotIds = botIdFilterFromPayload(payload);
+    if (!requestedNames.length && !requestedLevels.length && !requestedBotIds.length) {
       return { ok: false, message: "target_filter_required" };
     }
     const visible = visibleHuntTargets(payload || {});
@@ -543,6 +579,7 @@
       mainHref: visible.mainHref,
       hasHunt: visible.hasHunt,
       viewBounds: visible.viewBounds,
+      allowedBotIds: visible.allowedBotIds,
       allowedLevels: visible.allowedLevels,
       targetCount: visible.targets.length,
       targets: visible.targets.slice(0, 5),

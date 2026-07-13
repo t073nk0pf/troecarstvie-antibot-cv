@@ -24,8 +24,9 @@ class ObjectiveSelectionStatus(str, Enum):
 
 class ObjectiveRefreshState(str, Enum):
     SAME_STEP = "same_step"
-    ADVANCED = "advanced"
-    QUEST_REMOVED = "quest_removed"
+    STEP_CHANGED = "step_changed"
+    STEP_COMPLETED = "step_completed"
+    QUEST_REMOVED_UNVERIFIED = "quest_removed_unverified"
     REGRESSED_UNSAFE = "regressed_unsafe"
 
 
@@ -63,6 +64,13 @@ class ObjectiveSelection:
 
 
 @dataclass(frozen=True)
+class ObjectiveCollection:
+    status: ObjectiveSelectionStatus
+    objectives: tuple[QuestObjective, ...]
+    reason: str
+
+
+@dataclass(frozen=True)
 class ObjectiveRefreshComparison:
     state: ObjectiveRefreshState
     refreshed: QuestObjective | None
@@ -82,19 +90,36 @@ def select_monster_hunt_objective(
     The accumulator's stable flattened order is retained as ``source_order``.
     """
 
+    collected = collect_monster_hunt_objectives(entries, current_level_cap=current_level_cap)
+    if collected.status is ObjectiveSelectionStatus.UNSAFE:
+        return ObjectiveSelection(collected.status, None, collected.reason)
+    if collected.objectives:
+        return ObjectiveSelection(
+            ObjectiveSelectionStatus.SELECTED,
+            collected.objectives[0],
+            "monster_hunt_selected",
+        )
+    return ObjectiveSelection(ObjectiveSelectionStatus.NONE_SUPPORTED, None, collected.reason)
+
+
+def collect_monster_hunt_objectives(
+    entries: Sequence[ActiveQuestEntry], *, current_level_cap: int
+) -> ObjectiveCollection:
+    """Return every safe monster objective in stable catalogue order."""
+
     if not _positive_int(current_level_cap):
-        return ObjectiveSelection(ObjectiveSelectionStatus.UNSAFE, None, "invalid_current_level_cap")
+        return ObjectiveCollection(ObjectiveSelectionStatus.UNSAFE, (), "invalid_current_level_cap")
     if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
-        return ObjectiveSelection(ObjectiveSelectionStatus.UNSAFE, None, "active_catalog_invalid")
+        return ObjectiveCollection(ObjectiveSelectionStatus.UNSAFE, (), "active_catalog_invalid")
 
     seen: set[str] = set()
     supported: list[QuestObjective] = []
     unsafe_reasons: list[str] = []
     for order, entry in enumerate(entries):
         if not isinstance(entry, ActiveQuestEntry):
-            return ObjectiveSelection(ObjectiveSelectionStatus.UNSAFE, None, "active_catalog_invalid")
+            return ObjectiveCollection(ObjectiveSelectionStatus.UNSAFE, (), "active_catalog_invalid")
         if entry.id in seen:
-            return ObjectiveSelection(ObjectiveSelectionStatus.UNSAFE, None, "duplicate_quest_id")
+            return ObjectiveCollection(ObjectiveSelectionStatus.UNSAFE, (), "duplicate_quest_id")
         seen.add(entry.id)
         parsed, reason = _parse_monster_objective(entry, source_order=order)
         if parsed is None:
@@ -108,11 +133,17 @@ def select_monster_hunt_objective(
         supported.append(parsed)
 
     if supported:
-        selected = min(supported, key=lambda item: (item.source_order, int(item.quest_id)))
-        return ObjectiveSelection(ObjectiveSelectionStatus.SELECTED, selected, "monster_hunt_selected")
+        ordered = tuple(sorted(supported, key=lambda item: (item.source_order, int(item.quest_id))))
+        return ObjectiveCollection(ObjectiveSelectionStatus.SELECTED, ordered, "monster_hunts_collected")
     if unsafe_reasons:
-        return ObjectiveSelection(ObjectiveSelectionStatus.UNSAFE, None, unsafe_reasons[0])
-    return ObjectiveSelection(ObjectiveSelectionStatus.NONE_SUPPORTED, None, "no_supported_monster_hunt")
+        return ObjectiveCollection(ObjectiveSelectionStatus.UNSAFE, (), unsafe_reasons[0])
+    return ObjectiveCollection(ObjectiveSelectionStatus.NONE_SUPPORTED, (), "no_supported_monster_hunt")
+
+
+def quest_step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
+    """Public generic fingerprint used by the chain lease across executor types."""
+
+    return _step_fingerprint(entry)
 
 
 def compare_refreshed_objective(
@@ -136,18 +167,50 @@ def compare_refreshed_objective(
         if entry.id == previous.quest_id:
             matches.append((order, entry))
     if not matches:
-        return ObjectiveRefreshComparison(ObjectiveRefreshState.QUEST_REMOVED, None, "quest_removed_from_active_catalog")
+        return ObjectiveRefreshComparison(
+            ObjectiveRefreshState.QUEST_REMOVED_UNVERIFIED,
+            None,
+            "quest_removed_without_bound_terminal_action",
+        )
 
     order, entry = matches[0]
     if entry.title != previous.quest_title:
         return ObjectiveRefreshComparison(ObjectiveRefreshState.REGRESSED_UNSAFE, None, "quest_identity_changed")
+    fingerprint, fingerprint_reason = _step_fingerprint(entry)
+    if fingerprint is None:
+        return ObjectiveRefreshComparison(
+            ObjectiveRefreshState.REGRESSED_UNSAFE,
+            None,
+            fingerprint_reason,
+        )
     refreshed, reason = _parse_monster_objective(entry, source_order=order)
+    if fingerprint != previous.fingerprint:
+        if refreshed is None:
+            state = (
+                ObjectiveRefreshState.STEP_CHANGED
+                if reason.startswith("unsupported_")
+                else ObjectiveRefreshState.REGRESSED_UNSAFE
+            )
+            return ObjectiveRefreshComparison(state, None, reason)
+        if refreshed.monster.level > current_level_cap:
+            return ObjectiveRefreshComparison(
+                ObjectiveRefreshState.REGRESSED_UNSAFE,
+                refreshed,
+                "next_monster_above_character_level",
+            )
+        if refreshed.complete:
+            return ObjectiveRefreshComparison(
+                ObjectiveRefreshState.STEP_COMPLETED,
+                refreshed,
+                "changed_quest_step_already_complete",
+            )
+        return ObjectiveRefreshComparison(
+            ObjectiveRefreshState.STEP_CHANGED,
+            refreshed,
+            "quest_step_fingerprint_changed",
+        )
     if refreshed is None or refreshed.monster.level > current_level_cap:
         return ObjectiveRefreshComparison(ObjectiveRefreshState.REGRESSED_UNSAFE, None, reason)
-    if refreshed.required != previous.required and None not in (refreshed.required, previous.required):
-        return ObjectiveRefreshComparison(ObjectiveRefreshState.REGRESSED_UNSAFE, refreshed, "required_count_changed")
-    if refreshed.fingerprint != previous.fingerprint:
-        return ObjectiveRefreshComparison(ObjectiveRefreshState.ADVANCED, refreshed, "quest_step_fingerprint_changed")
     if previous.complete and not refreshed.complete:
         return ObjectiveRefreshComparison(ObjectiveRefreshState.REGRESSED_UNSAFE, refreshed, "quest_completion_regressed")
     if previous.progress is not None and refreshed.progress is not None:
@@ -158,7 +221,11 @@ def compare_refreshed_objective(
         and refreshed.required is not None
         and refreshed.progress >= refreshed.required
     ):
-        return ObjectiveRefreshComparison(ObjectiveRefreshState.ADVANCED, refreshed, "quest_step_completed")
+        return ObjectiveRefreshComparison(
+            ObjectiveRefreshState.STEP_COMPLETED,
+            refreshed,
+            "quest_step_completed",
+        )
     return ObjectiveRefreshComparison(ObjectiveRefreshState.SAME_STEP, refreshed, "quest_step_unchanged")
 
 
@@ -166,19 +233,17 @@ def _parse_monster_objective(
     entry: ActiveQuestEntry, *, source_order: int
 ) -> tuple[QuestObjective | None, str]:
     data = entry.data
-    if not isinstance(data, Mapping) or data.get("status") != "active":
-        return None, "unsafe_active_identity"
-    if data.get("id") != entry.id or data.get("title") != entry.title:
-        return None, "unsafe_active_identity"
+    fingerprint, fingerprint_reason = _step_fingerprint(entry)
+    if fingerprint is None:
+        return None, fingerprint_reason
     objective = data.get("objective")
-    if not isinstance(objective, str) or objective != objective.strip() or not objective:
-        return None, "unsafe_missing_objective"
+    assert isinstance(objective, str)
     navigation = data.get("navigation")
-    if not isinstance(navigation, (tuple, list)) or not navigation:
+    assert isinstance(navigation, (tuple, list))
+    if not navigation:
         return None, "unsupported_navigation_missing"
 
     candidates: list[tuple[int, MonsterTarget, str]] = []
-    fingerprint_navigation: list[tuple[str, str]] = []
     for index, raw in enumerate(navigation):
         if not isinstance(raw, Mapping):
             return None, "unsafe_navigation_mapping"
@@ -190,7 +255,6 @@ def _parse_monster_objective(
             return None, "unsafe_navigation_target"
         if not isinstance(label, str) or label != label.strip() or not label:
             return None, "unsafe_navigation_label"
-        fingerprint_navigation.append((target, label))
         match = _MONSTER_TARGET.fullmatch(target)
         if match:
             candidates.append(
@@ -209,22 +273,6 @@ def _parse_monster_objective(
     if progress_reason:
         return None, progress_reason
 
-    canonical_objective = _PROGRESS_RATIO.sub("#/#", objective)
-    encoded = json.dumps(
-        {
-            "quest_id": entry.id,
-            "quest_title": entry.title,
-            "objective": canonical_objective,
-            "monster_target": monster.target,
-            "navigator_label": navigator_label,
-            "navigation": fingerprint_navigation,
-            "required": required,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    fingerprint = hashlib.sha256(encoded).hexdigest()
     return (
         QuestObjective(
             ObjectiveKind.MONSTER_HUNT,
@@ -241,6 +289,49 @@ def _parse_monster_objective(
         ),
         "monster_hunt_supported",
     )
+
+
+def _step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
+    """Fingerprint one current step independently from its supported executor."""
+
+    data = entry.data
+    if not isinstance(data, Mapping) or data.get("status") != "active":
+        return None, "unsafe_active_identity"
+    if data.get("id") != entry.id or data.get("title") != entry.title:
+        return None, "unsafe_active_identity"
+    objective = data.get("objective")
+    if not isinstance(objective, str) or objective != objective.strip() or not objective:
+        return None, "unsafe_missing_objective"
+    navigation = data.get("navigation")
+    if not isinstance(navigation, (tuple, list)):
+        return None, "unsafe_navigation_mapping"
+    fingerprint_navigation: list[tuple[str, str]] = []
+    for raw in navigation:
+        if not isinstance(raw, Mapping):
+            return None, "unsafe_navigation_mapping"
+        target = raw.get("target")
+        label = raw.get("text")
+        if not isinstance(target, str) or target != target.strip() or not target:
+            return None, "unsafe_navigation_target"
+        if not isinstance(label, str) or label != label.strip() or not label:
+            return None, "unsafe_navigation_label"
+        fingerprint_navigation.append((target, label))
+    _, required, _, progress_reason = _parse_progress(data.get("progress"))
+    if progress_reason:
+        return None, progress_reason
+    encoded = json.dumps(
+        {
+            "quest_id": entry.id,
+            "quest_title": entry.title,
+            "objective": _PROGRESS_RATIO.sub("#/#", objective),
+            "navigation": fingerprint_navigation,
+            "required": required,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), "quest_step_fingerprint"
 
 
 def _parse_progress(raw: object) -> tuple[int | None, int | None, bool, str | None]:

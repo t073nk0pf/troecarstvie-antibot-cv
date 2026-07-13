@@ -13,6 +13,7 @@ from src.antibot_cv.automation.config import to_plain_dict
 from src.antibot_cv.automation.controller import AutomationRunOptions, load_config, run_automation
 from src.antibot_cv.automation.safety import SafetyGuard
 from src.antibot_cv.automation.session import SessionState
+from src.antibot_cv.automation.world_registry import WorldRegistry
 
 
 @dataclass
@@ -43,6 +44,7 @@ class AutomationControlApi:
         self.injector = injector
         self.default_config = str(default_config) if default_config is not None else "config/automation.local.json"
         self.allow_live = bool(allow_live)
+        self.world_registry = WorldRegistry(Path(self.default_config).with_name("world_registry.json"))
         self._lock = threading.RLock()
         self._runs: dict[str, ControlRun] = {}
 
@@ -63,6 +65,13 @@ class AutomationControlApi:
             return self.npc_dialog(_query_client_id(query), _query_text(query, "expectedName"))
         if path == "/api/location-route" and method == "GET":
             return self.location_route(_query_client_id(query))
+        if path == "/api/instance-entrance" and method == "GET":
+            return self.instance_entrance(
+                _query_client_id(query),
+                _query_text(query, "expectedName"),
+            )
+        if path == "/api/enter-instance" and method == "POST":
+            return self.enter_instance(payload or {})
         if path == "/api/location-route-step" and method == "POST":
             return self.location_route_step(payload or {})
         if path == "/api/open-exact-npc" and method == "POST":
@@ -71,6 +80,12 @@ class AutomationControlApi:
             return self.npc_quest_action(payload or {})
         if path == "/api/open-active-quest-page" and method == "POST":
             return self.open_active_quest_page(payload or {})
+        if path == "/api/open-quest-navigator" and method == "POST":
+            return self.open_quest_navigator(payload or {})
+        if path == "/api/navigator-select-target" and method == "POST":
+            return self.navigator_select_target(payload or {})
+        if path == "/api/navigator-go" and method == "POST":
+            return self.navigator_go(payload or {})
         if path == "/api/open-area" and method == "POST":
             return self.open_area(payload or {})
         if path == "/api/start" and method == "POST":
@@ -200,6 +215,8 @@ class AutomationControlApi:
             "message": "location_route_snapshot" if isinstance(snapshot, dict) else result.message,
             "snapshot": snapshot if isinstance(snapshot, dict) else None,
         }
+        if isinstance(snapshot, dict):
+            self.world_registry.observe_route(snapshot)
         return (200 if payload["ok"] else 502), payload
 
     def area_npcs(self, client_id: str | None = None, expected_name: str | None = None) -> tuple[int, dict[str, Any]]:
@@ -208,6 +225,54 @@ class AutomationControlApi:
             client_id=client_id,
             payload={"expectedName": str(expected_name or "")[:180]},
         )
+
+    def instance_entrance(
+        self,
+        client_id: str | None = None,
+        expected_name: str | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        return self._structured_snapshot(
+            "instance_entrance_snapshot",
+            client_id=client_id,
+            payload={"expectedName": str(expected_name or "")[:180]},
+        )
+
+    def enter_instance(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        expected_name = str(payload.get("expectedName") or "").strip()
+        expected_snapshot_id = str(payload.get("expectedSnapshotId") or "").strip()
+        if not expected_name or not expected_snapshot_id:
+            return 400, {"ok": False, "error": "instance_identity_missing"}
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        session = SessionState(requested_cycles=1)
+        submitted = ActionExecutor(
+            guard=guard,
+            session=session,
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        ).execute(
+            ActionRequest(
+                "enter_instance",
+                dry_run=False,
+                metadata={
+                    "expected_name": expected_name,
+                    "expected_snapshot_id": expected_snapshot_id,
+                    "navigation_delay_ms": 75,
+                },
+            )
+        )
+        return (200 if submitted else 409), {
+            "ok": submitted,
+            "submitted": submitted,
+            "client_id": resolved_client_id,
+            "error": None if submitted else "instance_entry_blocked",
+        }
 
     def npc_dialog(self, client_id: str | None = None, expected_name: str | None = None) -> tuple[int, dict[str, Any]]:
         return self._structured_snapshot(
@@ -237,6 +302,13 @@ class AutomationControlApi:
             "message": command if isinstance(snapshot, dict) else result.message,
             "snapshot": snapshot if isinstance(snapshot, dict) else None,
         }
+        if isinstance(snapshot, dict):
+            if command == "area_npc_snapshot":
+                self.world_registry.observe_area_npcs(snapshot)
+            elif command == "npc_dialog_snapshot":
+                self.world_registry.observe_npc_dialog(snapshot)
+            elif command == "instance_entrance_snapshot":
+                self.world_registry.observe_instances(snapshot)
         return (200 if response["ok"] else 502), response
 
     def location_route_step(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -408,6 +480,7 @@ class AutomationControlApi:
                     "expected_title": payload.get("expectedTitle"),
                     "action": payload.get("action"),
                     "expected_ref": payload.get("expectedRef"),
+                    "expected_point_id": payload.get("expectedPointId"),
                     "expected_text": payload.get("expectedText"),
                 },
             )
@@ -446,6 +519,70 @@ class AutomationControlApi:
             "submitted": submitted,
             "client_id": resolved_client_id,
             "error": None if submitted else "open_active_quest_page_blocked",
+        }
+
+    def open_quest_navigator(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        target = str(payload.get("target") or "").strip()
+        link_label = str(payload.get("linkLabel") or target).strip()
+        return self._live_action(
+            payload,
+            "open_quest_navigator",
+            {"target": target, "link_label": link_label},
+        )
+
+    def navigator_select_target(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        navigator_client_id = str(payload.get("navigatorClientId") or "").strip()
+        target = str(payload.get("target") or "").strip()
+        return self._live_action(
+            payload,
+            "navigator_select_target",
+            {
+                "navigator_client_id": navigator_client_id,
+                "target": target,
+                "target_kind": str(payload.get("targetKind") or "location").strip(),
+                "search_delay_ms": int(payload.get("searchDelayMs") or 300),
+                "route_delay_ms": int(payload.get("routeDelayMs") or 500),
+                "retry_delay_ms": int(payload.get("retryDelayMs") or 600),
+            },
+        )
+
+    def navigator_go(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        return self._live_action(
+            payload,
+            "navigator_go",
+            {
+                "navigator_client_id": str(payload.get("navigatorClientId") or "").strip(),
+                "target": str(payload.get("target") or "").strip(),
+                "route_transitions": _optional_int(payload.get("routeTransitions")),
+            },
+        )
+
+    def _live_action(
+        self,
+        payload: dict[str, Any],
+        action_type: str,
+        metadata: dict[str, Any],
+    ) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        submitted = ActionExecutor(
+            guard=guard,
+            session=SessionState(requested_cycles=1),
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        ).execute(ActionRequest(action_type, dry_run=False, metadata=metadata))
+        return (200 if submitted else 409), {
+            "ok": submitted,
+            "submitted": submitted,
+            "client_id": resolved_client_id,
+            "action": action_type,
+            "error": None if submitted else f"{action_type}_blocked",
         }
 
     def open_area(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

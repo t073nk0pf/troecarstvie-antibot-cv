@@ -387,7 +387,22 @@ class QuestRuntimeMixin:
         }
         objective = self._quest_director.active_objective if self._quest_director is not None else None
         if objective is not None and objective.quest_id == decision.quest_id:
-            self._quest_target_levels = (objective.monster.level,)
+            ordered_objectives = (objective,)
+            if self._quest_director is not None:
+                ordered_objectives += tuple(
+                    candidate
+                    for candidate in self._quest_director.supported_objectives
+                    if candidate.quest_id != objective.quest_id
+                )
+            opportunistic_names: list[str] = list(self._quest_target_names)
+            opportunistic_levels: list[int] = []
+            for candidate in ordered_objectives:
+                if candidate.monster.name not in opportunistic_names:
+                    opportunistic_names.append(candidate.monster.name)
+                if candidate.monster.level not in opportunistic_levels:
+                    opportunistic_levels.append(candidate.monster.level)
+            self._quest_target_names = tuple(opportunistic_names)
+            self._quest_target_levels = tuple(opportunistic_levels)
             self._quest_route_link_label = objective.navigator_label
         else:
             self._quest_target_levels = ()

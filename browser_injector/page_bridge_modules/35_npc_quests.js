@@ -282,7 +282,7 @@
         };
       })
       .filter(Boolean);
-    const acceptActions = actions
+    const doneActions = actions
       .map((candidate) => {
         const params = candidate.query && candidate.query.params ? candidate.query.params : null;
         const questId = params ? positiveIntegerString(params.quest_id) : null;
@@ -290,7 +290,7 @@
         if (!questId || npcAction !== "done" || !candidate.text) return null;
         return {
           questId,
-          action: "accept",
+          action: "done",
           pointId: positiveIntegerString(params.point_id),
           text: candidate.text,
           npcId: positiveIntegerString(params.f_id),
@@ -300,6 +300,9 @@
         };
       })
       .filter(Boolean);
+    const acceptActions = doneActions
+      .filter((candidate) => candidate.text === "Взять задание")
+      .map((candidate) => ({ ...candidate, action: "accept" }));
     const generatedAt = new Date().toISOString();
     const snapshotId = npcObservationId("npc-dialog");
     const result = {
@@ -320,6 +323,7 @@
       actions,
       questActions,
       dialogActions,
+      doneActions,
       acceptActions,
       truncated: elements.length >= 150,
     };
@@ -334,11 +338,13 @@
     const expectedTitle = safeString(payload.expectedTitle, 220);
     const action = safeString(payload.action, 24).toLowerCase();
     const expectedRef = payload.expectedRef == null ? null : positiveIntegerString(payload.expectedRef);
+    const expectedPointId = payload.expectedPointId == null ? null : positiveIntegerString(payload.expectedPointId);
     const expectedText = safeString(payload.expectedText, 1200);
     if (
-      !expectedSnapshotId || !npcId || !questId || !expectedTitle ||
-      !["open", "answer", "accept"].includes(action) ||
-      (["answer", "accept"].includes(action) && !expectedText) ||
+      !expectedSnapshotId || !npcId || !questId || (action !== "done" && !expectedTitle) ||
+      !["open", "answer", "accept", "done"].includes(action) ||
+      (["answer", "accept", "done"].includes(action) && !expectedText) ||
+      (action === "done" && !expectedPointId) ||
       (action === "answer" && !expectedRef)
     ) {
       return { ok: false, message: "npc_quest_action_invalid" };
@@ -376,6 +382,14 @@
           normalizeNpcName(candidate.text) === normalizeNpcName(expectedText) &&
           candidate.visible === true &&
           candidate.disabled === false
+        ) : action === "done" ? observed.doneActions.filter((candidate) =>
+          candidate.questId === questId &&
+          candidate.npcId === npcId &&
+          candidate.pointId === expectedPointId &&
+          candidate.action === action &&
+          candidate.text === expectedText &&
+          candidate.visible === true &&
+          candidate.disabled === false
         ) : observed.acceptActions.filter((candidate) =>
           candidate.questId === questId &&
           candidate.npcId === npcId &&
@@ -408,6 +422,13 @@
         return (
           safeString(query.params.action, 24).toLowerCase() === "done" &&
           normalizeNpcName(text) === normalizeNpcName(expectedText)
+        );
+      }
+      if (action === "done") {
+        return (
+          safeString(query.params.action, 24).toLowerCase() === "done" &&
+          positiveIntegerString(query.params.point_id) === expectedPointId &&
+          text === expectedText
         );
       }
       if (!/^далее$/i.test(text)) return false;
