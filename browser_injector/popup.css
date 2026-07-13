@@ -154,7 +154,7 @@ select {
 
 .actions {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -186,6 +186,10 @@ button:disabled {
 
 #refreshButton {
   background: #72685e;
+}
+
+#updateExtensionButton {
+  background: #365f78;
 }
 
 .status {

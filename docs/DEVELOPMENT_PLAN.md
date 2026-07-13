@@ -56,7 +56,7 @@ nine-phase recovery evidence chain, and a read-only offline validator
 identifies missing or out-of-order phases from a run log. Offline readiness is
 diagnostic only and does not satisfy the live exit gate.
 
-The local v29 bridge also includes a bounded quest observation slice: active
+The local v31 bridge also includes a bounded quest observation slice: active
 and available cards, route labels, and explicit objective progress are parsed,
 and a completed objective stops safely before turn-in. Quest acceptance and
 turn-in remain outside the current milestone.
@@ -106,6 +106,8 @@ Status: mostly complete.
 - explicit dry-run/live boundary;
 - guarded action sink and telemetry;
 - popup configuration and start/stop controls.
+- idle-only bridge self-update with one-shot reload and retry backoff
+  (implemented; first v31 lifecycle activation still needs live confirmation).
 
 Exit gate: focused automated tests pass and one selected Chrome tab can be
 controlled without affecting another tab.

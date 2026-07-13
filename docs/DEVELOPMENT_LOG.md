@@ -1,5 +1,26 @@
 # Development Log
 
+## 2026-07-13 - Extension Self-Update And Navigator Child Hardening
+
+- Added an idle-only extension update runtime with a one-shot persistent
+  marker, exact primary-tab selection, cache-bypassing tab refresh, a
+  five-minute version-pair retry backoff, and no new Chrome permissions.
+- The background worker checks the control server automatically and also wakes
+  the throttled update check from normal content-script traffic, so MV3 worker
+  suspension does not make the timer the only trigger.
+- Navigator child binding now accepts one unique new same-profile navigator
+  when Chrome omits `openerTabId`, while failing closed on ambiguity and
+  snapshotting pre-existing navigator tabs.
+- Target selection waits for the child input to settle and allows one bounded
+  retry only when the bridge reports one unique exact candidate with a late
+  section classification.
+- Bumped the aligned Python/content/background/page bridge version to
+  `2026-07-13-self-update-v31` and the extension manifest version to `0.3.0`.
+- The full 338-test suite, JavaScript syntax checks, Python compilation,
+  generated-bundle consistency, architecture limits, and `git diff --check`
+  pass. The loaded pre-v31 Chrome context still needs lifecycle activation
+  before the bounded level-6 death/revive/return live test can continue.
+
 ## 2026-07-13 - M1 Recovery Evidence And Obsolete Sprite Cleanup
 
 - Removed the obsolete `mob_sprite_01..03` assets, template configuration,

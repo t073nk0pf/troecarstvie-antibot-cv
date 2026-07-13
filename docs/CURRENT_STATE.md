@@ -24,7 +24,7 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-quest-sections-v29`
+- Chrome bridge version: `2026-07-13-self-update-v31`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -50,6 +50,11 @@ leveling product.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
+- The extension has an idle-only self-update lifecycle. It compares its own
+  bridge version with the control server, writes a one-shot update marker,
+  reloads the extension, and refreshes the primary game tab with cache bypass.
+  Navigator child tabs are excluded from primary-tab selection, and a failed
+  version pair uses a five-minute retry backoff.
 
 ## Confirmed Live Evidence
 
@@ -69,6 +74,14 @@ confirmed victory, one result exit, and one return to hunt. The summary was
 `completed_cycles=1`, `incomplete_cycles=0`, `errors=0`. Victory was confirmed
 by the finished battle plus a live nonzero player-health observation; unknown
 outcomes no longer count as completed cycles.
+
+The 2026-07-13 level-6 route acceptance attempts found the exact
+`Белая Рысь [6]` autocomplete candidate, but the loaded Chrome page
+context returned an empty result section and stopped fail-closed before route
+submission, movement, combat, or death. The source resolver was correct, which
+identified a stale extension/page context rather than a target-search failure.
+Bridge v31 adds automatic extension lifecycle handling so later bridge changes
+do not depend on a manual `chrome://extensions` reload.
 
 ## Current Blocker
 
@@ -93,12 +106,13 @@ location, persists the original destination, and reconstructs the remaining
 route after battle or death interruptions. Automated regressions cover all of
 these branches.
 
-The current blocker is live acceptance of the complete integrated sequence:
+The current blocker is applying bridge v31 to the already loaded pre-updater
+Chrome extension and then completing live acceptance of the integrated sequence:
 `death -> free revive -> close notice -> checkpoint route -> original route ->
 hunt`. One successful run must be followed by three consecutive natural death
 recoveries before M1 is considered complete.
 
-Bridge v29 also contains the first bounded quest-progress slice. It observes
+Bridge v31 also contains the first bounded quest-progress slice. It observes
 active/available quests and can identify a completed combat objective, but it
 does not accept or turn in quests. This work must not displace the M1 live gate.
 
@@ -128,10 +142,12 @@ allow battle/death recovery to finish, and then resume from the saved route.
 - Some UI and replay CV fallbacks still coexist with JS control. Mob sprite
   template targeting has been removed; keep any remaining fallback changes
   inside their owning runtime module with focused replay coverage.
-- A bridge code change requires reloading the unpacked extension and refreshing
-  the game page. The Python and extension bridge version must match.
-- Bridge v29 passes automated bridge and policy tests but still needs a fresh
-  live extension reload and bounded acceptance run.
+- The v31 updater handles later bridge changes automatically, but a Chrome
+  context older than v31 must load the updater once before it can self-update.
+  Python and extension bridge versions must still match before a run starts.
+- Bridge v31 passes the full 338-test suite, JavaScript syntax checks, Python
+  compilation, generated-bundle consistency, and whitespace checks, but still
+  needs a bounded live acceptance run.
 
 ## Architecture Map
 
@@ -155,6 +171,7 @@ allow battle/death recovery to finish, and then resume from the saved route.
   manually.
 - `browser_injector/content.js`: page bridge transport.
 - `browser_injector/background.js`: local network requests and tab identity.
+- `browser_injector/update_runtime.js`: idle-only extension self-update policy.
 - `browser_injector/popup.*`: user controls.
 
 ## Commands
@@ -197,7 +214,7 @@ passes.
 1. Read this file, then `docs/DEVELOPMENT_LOG.md`.
    Use `docs/DEVELOPMENT_PLAN.md` to confirm the current milestone and avoid
    expanding scope before its exit gate passes.
-2. Start the control server and confirm `version_ok: true`.
+2. Start the control server and confirm bridge v31 with `version_ok: true`.
 3. Start one bounded live run for the selected game tab.
 4. Trigger or observe one natural death while traveling/farming.
 5. Verify the full recovery sequence reaches the original destination and

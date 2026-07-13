@@ -339,6 +339,7 @@ function renderStatus(status, currentClient) {
   $("runBadge").classList.toggle("running", running);
   $("startButton").disabled = running || !hasCurrentClient;
   $("stopButton").disabled = !running || !hasCurrentClient;
+  $("updateExtensionButton").disabled = Boolean(status.any_running);
 
   const client = status.client || {};
   const clientText = !hasCurrentClient
@@ -395,6 +396,7 @@ async function refreshStatus() {
     $("runBadge").classList.remove("running");
     $("startButton").disabled = true;
     $("stopButton").disabled = true;
+    $("updateExtensionButton").disabled = true;
     setStatusText("serverStatus", "Сначала запусти control-server в терминале");
     setStatusText("clientStatus", "-");
     setStatusText("botState", "-");
@@ -422,6 +424,19 @@ async function stopBot() {
   }
   await api("/stop", { method: "POST", body: { clientId } });
   await refreshStatus();
+}
+
+async function updateExtension() {
+  const status = await api("/status");
+  const currentClient = await loadCurrentClient();
+  const currentVersion = String(
+    currentClient?.version || status.client?.client_version || "unknown-pre-updater"
+  ).trim();
+  await globalThis.AntibotCvUpdateRuntime.requestExtensionUpdate({
+    chromeApi: chrome,
+    status,
+    currentVersion,
+  });
 }
 
 function renderSkillScan(data) {
@@ -466,6 +481,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("startButton").addEventListener("click", () => startBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("stopButton").addEventListener("click", () => stopBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("refreshButton").addEventListener("click", refreshStatus);
+  $("updateExtensionButton").addEventListener("click", () => {
+    $("updateExtensionButton").disabled = true;
+    updateExtension().catch((error) => {
+      setStatusText("errorStatus", error.message);
+      refreshStatus();
+    });
+  });
   $("scanSkillsButton").addEventListener("click", () => scanSkills().catch((error) => setStatusText("errorStatus", error.message)));
   await refreshStatus();
   setInterval(refreshStatus, 1500);

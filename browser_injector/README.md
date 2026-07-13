@@ -11,7 +11,17 @@ Install once:
 4. Select this repository's `browser_injector/` folder.
 5. Open or refresh `https://3kingdoms.ru/main.php`.
 
-After changing files in this folder, click reload on the extension card at `chrome://extensions/`, then refresh the game tab.
+After the self-update runtime has been loaded once, later bridge updates are
+automatic. The background worker polls the local control server, waits until
+all automation runs are idle, compares bridge versions, reloads the unpacked
+extension, and refreshes the single primary game tab with cache bypass. Open
+`navigator.php` tabs are ignored when choosing that primary tab. A
+still-mismatched version pair is retried after a five-minute backoff instead of
+entering a reload loop.
+
+The popup also has an explicit `Обновить bridge` action for diagnostics. Builds
+older than `2026-07-13-self-update-v31` predate this lifecycle and require one
+ordinary extension reload before automatic updates can take over.
 
 ## Development
 
