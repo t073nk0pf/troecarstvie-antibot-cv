@@ -1061,7 +1061,10 @@ class QuestRuntimeMixin:
                 self._quest_catalog_page_requested = page
                 self._quest_refresh_requested_monotonic = time.monotonic()
                 return
-        if self._quest_director is not None and self._quest_director.catalog.complete:
+        if self._quest_director is not None and (
+            self._quest_director.catalog.complete
+            or self._quest_director.chain.lease is not None
+        ):
             decision = self._quest_director_decision()
             if decision is not None and decision.intent is QuestDirectorIntent.REFRESH_ACTIVE:
                 if self._quest_active_page_requested is None:
@@ -1083,6 +1086,14 @@ class QuestRuntimeMixin:
                     + max(1, int(self.config.leveling.quest_refresh_every_cycles))
                 )
                 self._finish_quest_refresh_to_hunt("quest_catalog_empty_profit_farm")
+                return
+            if (
+                decision is not None
+                and decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+                and self._quest_director.active_objective is None
+                and decision.quest is not None
+            ):
+                self._begin_quest_dialogue(decision.quest.id)
                 return
         if self.current_page_kind == "quests":
             if (
