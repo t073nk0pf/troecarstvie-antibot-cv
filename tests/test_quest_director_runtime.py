@@ -261,6 +261,20 @@ def test_confirmed_terminal_removal_releases_persisted_chain(tmp_path) -> None:
     assert runtime.completed_since_refresh == 1
 
 
+def test_explicit_pin_replaces_a_different_persisted_chain_as_deferred(tmp_path) -> None:
+    state_path = tmp_path / "quest-chain.json"
+    persisted = QuestDirectorRuntime(pinned_quest_id="246", chain_state_path=state_path)
+    persisted.begin_active_refresh()
+    persisted.ingest_active_page(active_page(0, 1, active_monster("246")))
+    assert persisted.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+
+    replacement = QuestDirectorRuntime(pinned_quest_id="31", chain_state_path=state_path)
+
+    assert replacement.chain.lease is None
+    assert replacement.preferred_quest_id == "31"
+    assert not state_path.exists()
+
+
 def test_execution_fails_closed_without_complete_active_catalog() -> None:
     runtime = QuestDirectorRuntime()
     runtime.begin_catalog_refresh()

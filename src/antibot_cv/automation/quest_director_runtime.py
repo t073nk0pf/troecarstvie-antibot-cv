@@ -67,7 +67,10 @@ class QuestDirectorRuntime:
             and preferred
             and self.chain.lease.quest_id != preferred
         ):
-            raise ValueError("persisted quest chain does not match pinned quest override")
+            # An explicit operator pin starts a new test/priority chain.  The
+            # old lease remains non-terminal and must be released as deferred,
+            # never treated as a completed quest.
+            self.chain.release_deferred(self.chain.lease.quest_id)
         self.active_objective_revision: int | None = None
         self.objective_refresh: ObjectiveRefreshComparison | None = None
         self.max_unchanged_victories = max_unchanged_victories
