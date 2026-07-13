@@ -618,7 +618,7 @@ class NavigationRuntimeMixin:
         return False
 
     def _target_click_point(self, target: LocatedTarget, attempt_index: int) -> Point:
-        if target.target_id == "green_sprite" or target.target_id in self.config.target.sprite_template_ids:
+        if target.target_id == "green_sprite":
             sprite_offsets = (
                 Point(0, 0),
                 Point(10, 0),

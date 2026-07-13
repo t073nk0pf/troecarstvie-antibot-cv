@@ -3,7 +3,6 @@ from __future__ import annotations
 import cv2
 
 from src.antibot_cv.automation.config import AutomationConfig
-from src.antibot_cv.detection.templates import TemplateRegistry
 from src.antibot_cv.entity_detection.green_labels import GreenLabelDetector
 from src.antibot_cv.entity_detection.target_locator import TargetClickEstimator, TargetLocator
 from src.antibot_cv.entity_detection.tracker import EntityTracker
@@ -147,43 +146,6 @@ def test_green_sprite_requires_red_companion(test_config: AutomationConfig) -> N
     targets = TargetLocator(config.target, GreenLabelDetector(config.target.green_label)).locate(frame)
 
     assert targets == []
-
-
-def test_mob_sprite_template_detected_from_database(test_config: AutomationConfig) -> None:
-    from src.antibot_cv.automation.config import to_plain_dict
-
-    template = cv2.imread("assets/templates/targets/mob_sprite_02.png", cv2.IMREAD_COLOR)
-    assert template is not None
-    config = AutomationConfig.from_dict(
-        {
-            **to_plain_dict(test_config),
-            "templates_path": "config/templates.example.json",
-            "target": {
-                **to_plain_dict(test_config.target),
-                "mode": "template_label",
-                "allowed_targets": ["mob_sprite_02"],
-                "preferred_target_order": ["mob_sprite_02"],
-                "sprite_template_ids": ["mob_sprite_02"],
-                "click_offset": {"dx": -35, "dy": -80},
-            },
-        }
-    )
-    frame = blank_frame(360, 260)
-    y, x = 90, 140
-    h, w = template.shape[:2]
-    frame[y : y + h, x : x + w] = template
-    locator = TargetLocator(
-        config.target,
-        GreenLabelDetector(config.target.green_label),
-        template_registry=TemplateRegistry.from_file(config.templates_path),
-    )
-
-    targets = locator.locate(frame)
-
-    assert targets
-    assert targets[0].target_id == "mob_sprite_02"
-    assert abs(targets[0].interaction_point.x - (x + w / 2)) <= 1
-    assert abs(targets[0].interaction_point.y - (y + h / 2)) <= 1
 
 
 def test_visible_label_near_map_edge_is_not_clamped_into_target(test_config: AutomationConfig) -> None:

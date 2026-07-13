@@ -50,7 +50,6 @@ class TargetConfig:
     click_retry_delay_ms: int = 250
     interaction_margin_px: int = 0
     per_target_click_offsets: dict[str, ClickOffset] = field(default_factory=dict)
-    sprite_template_ids: tuple[str, ...] = ()
     green_label: GreenLabelConfig = field(default_factory=GreenLabelConfig)
 
 
@@ -346,8 +345,6 @@ def _build_target_config(raw: dict[str, Any]) -> TargetConfig:
         data["allowed_names"] = tuple(str(value).strip() for value in data["allowed_names"] if str(value).strip())
     if "allowed_levels" in data:
         data["allowed_levels"] = tuple(int(value) for value in data["allowed_levels"])
-    if "sprite_template_ids" in data:
-        data["sprite_template_ids"] = tuple(data["sprite_template_ids"])
     if data.get("search_roi") is not None:
         data["search_roi"] = Rect(**data["search_roi"])
     if "click_offset" in data:

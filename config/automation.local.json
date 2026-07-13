@@ -161,9 +161,6 @@
   "target": {
     "allowed_targets": [
       "green_label",
-      "mob_sprite_01",
-      "mob_sprite_02",
-      "mob_sprite_03",
       "green_sprite"
     ],
     "allowed_levels": [],
@@ -223,9 +220,6 @@
     "per_target_click_offsets": {},
     "preferred_target_order": [
       "green_label",
-      "mob_sprite_01",
-      "mob_sprite_02",
-      "mob_sprite_03",
       "green_sprite"
     ],
     "search_roi": {
@@ -234,11 +228,6 @@
       "x": 120,
       "y": 150
     },
-    "sprite_template_ids": [
-      "mob_sprite_01",
-      "mob_sprite_02",
-      "mob_sprite_03"
-    ],
     "stable_frames": 1
   },
   "templates_path": "config/templates.example.json",

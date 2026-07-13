@@ -68,15 +68,12 @@ class TargetLocator:
         recognizer: TargetTextRecognizer | None = None,
         estimator: TargetClickEstimator | None = None,
         game_field_roi: Rect | None = None,
-        template_registry: TemplateRegistry | None = None,
     ) -> None:
         self.config = config
         self.label_detector = label_detector
         self.recognizer = recognizer
         self.estimator = estimator or TargetClickEstimator(config.click_offset, config.per_target_click_offsets)
         self.game_field_roi = game_field_roi
-        self.template_registry = template_registry
-        self._center_click_target_ids = {"green_sprite", *config.sprite_template_ids}
         self._priority = {target_id: rank for rank, target_id in enumerate(config.preferred_target_order)}
 
     def locate(self, frame: np.ndarray) -> list[LocatedTarget]:
@@ -93,10 +90,6 @@ class TargetLocator:
         for candidate in raw_candidates:
             candidate = _offset_candidate(candidate, offset_x, offset_y)
             self._append_located(frame, candidate, located)
-        if not located:
-            for candidate in self._sprite_template_candidates(detect_frame):
-                candidate = _offset_candidate(candidate, offset_x, offset_y)
-                self._append_located(frame, candidate, located)
         if not located and "green_sprite" in self.config.allowed_targets:
             for candidate in _detect_green_sprite_candidates(detect_frame):
                 candidate = _offset_candidate(candidate, offset_x, offset_y)
@@ -108,7 +101,7 @@ class TargetLocator:
         target_id = self._target_id(frame, candidate)
         if target_id is None:
             return
-        if target_id in self._center_click_target_ids:
+        if target_id == "green_sprite":
             raw_interaction_point = candidate.label_center
         else:
             raw_interaction_point = self.estimator.estimate(candidate, target_id)
@@ -118,7 +111,7 @@ class TargetLocator:
             self.config.interaction_margin_px,
         ):
             return
-        if target_id in self._center_click_target_ids:
+        if target_id == "green_sprite":
             interaction_point = self.game_field_roi.clamp(candidate.label_center) if self.game_field_roi is not None else candidate.label_center
         else:
             interaction_point = self.estimator.estimate(candidate, target_id, self.game_field_roi)
@@ -132,27 +125,6 @@ class TargetLocator:
                 green_pixel_ratio=candidate.green_pixel_ratio,
             )
         )
-
-    def _sprite_template_candidates(self, frame: np.ndarray) -> list[LabelCandidate]:
-        if self.template_registry is None:
-            return []
-        candidates: list[LabelCandidate] = []
-        for template_id in self.config.sprite_template_ids:
-            if template_id not in self.config.allowed_targets:
-                continue
-            for match in self.template_registry.match(frame, template_id):
-                candidates.append(
-                    LabelCandidate(
-                        bbox=match.bbox,
-                        label_center=match.center,
-                        confidence=match.confidence,
-                        green_pixel_ratio=0.0,
-                        target_id=template_id,
-                        label_color="sprite",
-                    )
-                )
-        candidates.sort(key=lambda item: (item.confidence, item.bbox.width * item.bbox.height), reverse=True)
-        return candidates
 
     def _target_id(self, frame: np.ndarray, candidate: LabelCandidate) -> str | None:
         if candidate.target_id is not None:

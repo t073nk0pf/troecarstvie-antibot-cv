@@ -116,7 +116,6 @@ class AutomationController(
             GreenLabelDetector(config.target.green_label),
             recognizer=None if config.target.mode == "any_allowed_green_label" else None,
             game_field_roi=config.target.search_roi or Rect(0, 0, self.mapper.roi.width, self.mapper.roi.height),
-            template_registry=self.registry,
         )
         self.tracker = EntityTracker()
         self.attack_detector = AttackButtonDetector(self.registry)
