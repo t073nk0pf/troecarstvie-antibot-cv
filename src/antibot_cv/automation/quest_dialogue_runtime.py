@@ -55,6 +55,7 @@ class PendingQuestDialogue:
     area_snapshot_id: str | None = None
     quest_opened: bool = False
     dialog_steps: int = 0
+    last_answer_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +268,11 @@ class QuestDialogueRuntime:
             expected_text = _bounded_text(answers[0].get("text"), max_length=1200)
             if not expected_ref.isdecimal() or int(expected_ref) <= 0 or not expected_text:
                 raise QuestDialogueError("dialogue_answer_invalid", "dialogue answer identity is invalid")
+            if expected_ref == pending.last_answer_ref:
+                raise QuestDialogueError(
+                    "dialogue_action_not_advanced",
+                    "dialogue still exposes the previously submitted answer",
+                )
             return self._remember(
                 QuestDialogueDecision(
                     QuestDialogueIntent.ANSWER_DIALOG,
@@ -307,7 +313,11 @@ class QuestDialogueRuntime:
         elif decision.intent is QuestDialogueIntent.OPEN_QUEST:
             updated = replace(pending, quest_opened=True)
         elif decision.intent is QuestDialogueIntent.ANSWER_DIALOG:
-            updated = replace(pending, dialog_steps=pending.dialog_steps + 1)
+            updated = replace(
+                pending,
+                dialog_steps=pending.dialog_steps + 1,
+                last_answer_ref=str(decision.action_metadata.get("expected_ref") or "") or None,
+            )
         elif decision.intent is QuestDialogueIntent.COMPLETE_STEP:
             updated = replace(
                 pending,

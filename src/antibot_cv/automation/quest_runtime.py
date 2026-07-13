@@ -820,6 +820,7 @@ class QuestRuntimeMixin:
             "dialogue_npc_snapshot_invalid",
             "dialogue_snapshot_invalid",
             "dialogue_action_missing",
+            "dialogue_action_not_advanced",
         }:
             return False
         started = self._quest_refresh_requested_monotonic or time.monotonic()

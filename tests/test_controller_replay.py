@@ -3867,6 +3867,7 @@ def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(
     assert controller._quest_dialogue_snapshot_pending("dialogue_npc_snapshot_invalid")
     assert controller._quest_dialogue_snapshot_pending("dialogue_snapshot_invalid")
     assert controller._quest_dialogue_snapshot_pending("dialogue_action_missing")
+    assert controller._quest_dialogue_snapshot_pending("dialogue_action_not_advanced")
     assert not controller._quest_dialogue_snapshot_pending("dialogue_npc_missing_or_ambiguous")
 
     controller._quest_refresh_requested_monotonic = time.monotonic() - 60

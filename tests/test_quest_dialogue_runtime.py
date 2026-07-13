@@ -187,7 +187,28 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
         )
     )
     assert answered.intent is QuestDialogueIntent.ANSWER_DIALOG
-    assert runtime.acknowledge(answered).dialog_steps == 1
+    after_answer = runtime.acknowledge(answered)
+    assert after_answer.dialog_steps == 1
+    assert after_answer.last_answer_ref == "401"
+
+    with pytest.raises(QuestDialogueError) as stale_answer:
+        runtime.decide_dialog(
+            dialog(
+                snapshotId="npc-dialog-stale-answer",
+                dialogActions=[
+                    {
+                        "questId": "246",
+                        "npcId": "9",
+                        "action": "answer",
+                        "visible": True,
+                        "disabled": False,
+                        "ref": "401",
+                        "text": "Вот подозрительное сено.",
+                    }
+                ],
+            )
+        )
+    assert stale_answer.value.unsafe_reason == "dialogue_action_not_advanced"
 
     completed = runtime.decide_dialog(
         dialog(
