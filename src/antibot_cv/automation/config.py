@@ -153,6 +153,9 @@ class LevelingConfig:
     quest_refresh_every_cycles: int = 5
     quest_refresh_timeout_ms: int = 10000
     auto_navigate_quest_targets: bool = False
+    autonomous_quest_director: bool = False
+    quest_refresh_every_completed: int = 5
+    quest_catalog_max_pages: int = 20
     navigator_timeout_ms: int = 10000
     navigator_max_transitions: int = 50
     route_settle_ms: int = 3000

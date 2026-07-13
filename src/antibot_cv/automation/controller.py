@@ -527,6 +527,8 @@ def _apply_runtime_overrides(config: AutomationConfig, overrides: dict[str, obje
         leveling["target_location_name"] = str(overrides.get("targetLocationName") or "").strip()
     if "autoNavigateQuestTargets" in overrides:
         leveling["auto_navigate_quest_targets"] = bool(overrides.get("autoNavigateQuestTargets"))
+    if "autonomousQuestDirector" in overrides:
+        leveling["autonomous_quest_director"] = bool(overrides.get("autonomousQuestDirector"))
 
     return AutomationConfig.from_dict(data)
 

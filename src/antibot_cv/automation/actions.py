@@ -471,6 +471,42 @@ class LiveMacActionSink:
             )
             return False
 
+        if request.action_type == "open_quest_catalog":
+            metadata = dict(request.metadata or {})
+            raw_page = metadata.get("page", 0)
+            page = int(raw_page) if isinstance(raw_page, int) and not isinstance(raw_page, bool) else -1
+            if page < 0 or page > 100:
+                _log_action(
+                    self.logger,
+                    "action_blocked",
+                    request,
+                    block_reason="quest_catalog_page_invalid",
+                )
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_quest_catalog",
+                {"page": page, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                timeout_s=5.5,
+            )
+            result_metadata = {
+                **metadata,
+                "page": page,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            if result.ok:
+                _log_action(self.logger, "open_quest_catalog_requested", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_quest_catalog_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
         if request.action_type == "open_quest_navigator":
             metadata = dict(request.metadata or {})
             result = self._execute_injector(

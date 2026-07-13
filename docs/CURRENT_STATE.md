@@ -24,8 +24,8 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-visibility-v36`
-- Chrome extension version: `0.3.5`
+- Chrome bridge version: `2026-07-13-quest-catalog-v38`
+- Chrome extension version: `0.3.7`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -50,6 +50,12 @@ leveling product.
 - Quest snapshots distinguish active and available quest cards, preserve the
   quest ID and route labels, and parse explicit objective progress such as
   `5/5`. Completed objectives stop safely before an unimplemented turn-in.
+- The global `user_quest.php?mode=avail` catalogue is parsed across bounded
+  pages with stable numeric IDs, descriptions, rewards, locations, and quest
+  givers. The autonomous director builds a deduplicated accept-all queue,
+  refreshes after five completed quests, and permits profit farming only after
+  a fresh empty active/available observation. NPC acceptance is still a safe
+  stop boundary and the autonomous mode remains disabled by default.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
@@ -102,8 +108,14 @@ recoveries required by the formal M1 exit gate.
 
 ## Current Blocker
 
+For autonomous questing, the next blocker is the exact NPC interaction module:
+open the intended giver, advance only the matching quest dialogue, accept it,
+and verify that the numeric quest ID appears in `mode=started`. The live global
+catalogue contains no direct accept control, so catalogue parsing cannot safely
+substitute for this postcondition.
+
 Route construction and full guarded multi-step movement are confirmed live, and
-the route loop is now integrated into the main controller recovery state.
+the route loop is integrated into the main controller recovery state.
 
 After the compass builds a route, the main `area.php` view displays the next
 marked transition and a 3-5 second transition timer. The bridge currently
@@ -123,7 +135,7 @@ location, persists the original destination, and reconstructs the remaining
 route after battle or death interruptions. Automated regressions cover all of
 these branches.
 
-Bridge v36 is active in the loaded Chrome context and the integrated sequence
+Bridge v38 is active in the loaded Chrome context. The integrated v36 sequence
 `death -> free revive -> close notice -> checkpoint route -> original route ->
 hunt` has passed once without manual game input. The remaining formal M1 gate
 is two more consecutive natural recoveries, bringing the current streak from
@@ -131,9 +143,8 @@ is two more consecutive natural recoveries, bringing the current streak from
 `max_deaths_recovered` stop, rather than relying on an external polling stop.
 This validation should not be replaced by repeated startup-only runs.
 
-Bridge v36 also contains the first bounded quest-progress slice. It observes
-active/available quests and can identify a completed combat objective, but it
-does not accept or turn in quests. This work must not displace the M1 live gate.
+Bridge v38 adds the bounded global catalogue slice described above. It does not
+yet accept or turn in quests. This work must not displace the M1 live gate.
 
 Compass targets are runtime inputs. Recovery is not tied to a specific monster
 name: the bridge enters the supplied target, selects the exact matching result,
@@ -235,7 +246,7 @@ the current verified streak is `1/3`.
 1. Read this file, then `docs/DEVELOPMENT_LOG.md`.
    Use `docs/DEVELOPMENT_PLAN.md` to confirm the current milestone and avoid
    expanding scope before its exit gate passes.
-2. Start the control server and confirm bridge v36 with `version_ok: true`.
+2. Start the control server and confirm bridge v38 with `version_ok: true`.
 3. Start one bounded live run for the selected game tab.
 4. Trigger or observe one natural death while traveling/farming.
 5. Verify the full recovery sequence reaches the original destination and

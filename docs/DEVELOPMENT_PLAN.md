@@ -167,14 +167,15 @@ hard-coded fixed skill set and never uses a non-allowlisted item.
 
 ### Stage 4 - Quest Line Module
 
-Status: partial observation/runtime slice exists; not the current blocker.
+Status: catalogue discovery and scheduling slice implemented; NPC
+accept/turn-in executor is next.
 
 This module accelerates leveling but must use the stable travel, combat,
 inventory, and death-recovery modules instead of duplicating them.
 
 Responsibilities:
 
-- load the list of available and active quests;
+- load all pages of available quests and the active list; implemented;
 - parse eligibility, objective type, target, count, location, and reward;
 - choose quests appropriate for the current level and configured policy;
 - accept a quest through an exact page action;
@@ -182,6 +183,12 @@ Responsibilities:
 - track progress and turn completed quests in;
 - skip blocked, unsafe, unaffordable, or explicitly denied quests;
 - re-plan when a quest target or location is unavailable.
+
+Current guarded boundary: discovery produces an ordered intake queue and then
+stops at `quest_accept_executor_pending`. It must remain fail-closed until the
+NPC module verifies exact giver, exact dialogue/quest identity, and appearance
+in the active list. The fallback farm intent is allowed only after a fresh
+empty catalogue and active list.
 
 Exit gate: complete a configured level-range quest chain from a clean level 1
 post-tutorial character without manual navigation.

@@ -1,5 +1,28 @@
 # Development Log
 
+## 2026-07-13 - Global Quest Catalogue And Autonomous Director Slice
+
+- Inspected the authenticated global catalogue at
+  `user_quest.php?mode=avail`: 43 visible quests across three pages in the
+  current live session. The page exposes location navigation and giver facts,
+  but no direct quest-accept action.
+- Added stable numeric quest IDs from `quest_folding.toggle(ID)`/`#quest_ID`,
+  descriptions, rewards, giver links, route facts, objective kinds, and
+  canonical pagination to the page snapshot.
+- Added guarded `open_quest_catalog(page)` navigation with a bounded page and
+  exact `mode=avail`/page postcondition.
+- Added a validated multi-page accumulator and autonomous director policy:
+  initial discovery, accept-all queue with deduplication, refresh after five
+  completed quests, active-quest execution handoff, and profit-farm fallback
+  only after a fresh empty catalogue.
+- Integrated the catalogue refresh loop behind disabled-by-default
+  `autonomous_quest_director`. A non-empty queue currently stops safely at
+  `quest_accept_executor_pending`; the next slice is exact NPC dialogue and
+  active-list verification.
+- Aligned the bridge at `2026-07-13-quest-catalog-v38` and the extension at
+  `0.3.7`, allowing the existing idle update lifecycle to deploy the bridge.
+
+
 ## 2026-07-13 - Bridge v36 And First Complete M1 Natural Recovery
 
 - Made the page bridge load explicitly as UTF-8 on the game's legacy-encoded

@@ -21,6 +21,12 @@ browser bundle reproducibility contract.
 - `screen_runtime.py`: screen synchronization and generic page recovery.
 - `leveling_runtime.py`: leveling observations, quest intent, death recovery,
   and checkpoint decisions.
+- `quest_runtime.py`: quest snapshot handoff and guarded catalogue refresh
+  orchestration.
+- `quest_catalog.py`: fail-closed paginated catalogue validation and
+  aggregation.
+- `quest_director_policy.py` / `quest_director_runtime.py`: action-free quest
+  scheduling policy and its observed state.
 - `navigation_runtime.py`: hunt target selection, compass child-window flow,
   route execution, direction and scrollbar search.
 - `combat_runtime.py`: battle synchronization, combat policy execution, skills,

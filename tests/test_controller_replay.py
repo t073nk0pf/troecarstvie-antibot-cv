@@ -1706,6 +1706,7 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
             "goalLevel": "6",
             "maxDeathsPerSession": "2",
             "targetLocationName": "Длань Рода",
+            "autonomousQuestDirector": True,
         },
     )
 
@@ -1724,6 +1725,7 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
     assert config.leveling.target_level == 6
     assert config.leveling.max_deaths_per_session == 2
     assert config.leveling.target_location_name == "Длань Рода"
+    assert config.leveling.autonomous_quest_director is True
 
 
 def test_live_leveling_goal_stops_at_confirmed_character_level(test_config: AutomationConfig) -> None:
@@ -3031,7 +3033,7 @@ def test_leveling_revive_restores_active_quest_route_checkpoint(test_config: Aut
     assert controller._handle_leveling_death({"dead": False, "freeReviveAvailable": False}) is True
     _complete_post_revive_resource_gate(controller)
 
-    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING, controller.last_error_reason
     assert [request.action_type for request in sink.requests] == ["revive_free", "open_quests"]
     assert sink.requests[-1].metadata["checkpoint_quest"] == "quest-91"
     assert sink.requests[-1].metadata["checkpoint_location"] == "Дикий предел"
@@ -3079,6 +3081,176 @@ def test_leveling_periodically_refreshes_quest_targets(test_config: AutomationCo
     assert controller._quest_route_locations == ("Дикий предел",)
     assert controller._quest_target_routes == {"Волколаков-живодеров": ("Дикий предел",)}
     assert [request.action_type for request in sink.requests] == ["open_quests", "open_hunt"]
+
+
+def test_autonomous_quest_director_collects_every_catalog_page_before_intake(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["max_cycles"] = 10
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+        "quest_catalog_max_pages": 3,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "area"
+    controller._current_state_snapshot_id = "before-catalog"
+
+    assert controller._maybe_start_quest_refresh()
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING, controller.last_error_reason
+    assert [(request.action_type, request.metadata["page"]) for request in sink.requests] == [
+        ("open_quest_catalog", 0)
+    ]
+
+    def catalog_item(quest_id: str, page: int) -> dict[str, object]:
+        return {
+            "id": quest_id,
+            "title": f"Quest {quest_id}",
+            "status": "available",
+            "description": "Work",
+            "reward": "XP",
+            "locationText": "In Wilds",
+            "giverNames": ["Frank"],
+            "navigation": [{"text": "Wilds"}],
+            "catalogPage": page,
+            "cardIndex": 0,
+        }
+
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "snapshotId": "before-catalog",
+            "items": [],
+            "truncated": False,
+        }
+    )
+    assert controller._quest_director.catalog.collected_pages == ()
+    assert controller._quest_catalog_page_requested == 0
+
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 2,
+            "hasNextPage": True,
+            "snapshotId": "catalog-page-0",
+            "items": [catalog_item("1", 0)],
+            "truncated": False,
+        }
+    )
+    controller._handle_quest_refresh()
+    assert [(request.action_type, request.metadata["page"]) for request in sink.requests] == [
+        ("open_quest_catalog", 0),
+        ("open_quest_catalog", 1),
+    ]
+
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 1,
+            "pageCount": 2,
+            "hasNextPage": False,
+            "snapshotId": "catalog-page-1",
+            "items": [catalog_item("2", 1)],
+            "truncated": False,
+        }
+    )
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert [request.action_type for request in sink.requests] == [
+        "open_quest_catalog",
+        "open_quest_catalog",
+        "open_quests",
+    ]
+    stale_active_id = controller._quest_active_request_snapshot_id
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "snapshotId": stale_active_id,
+            "items": [],
+            "truncated": False,
+        }
+    )
+    assert controller._quest_director.active_snapshot_fresh is False
+    controller._observe_autonomous_quest_snapshot(
+        {"loadStatus": "loaded", "mode": "started", "snapshotId": "active-1", "items": [], "truncated": False}
+    )
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "quest_accept_executor_pending"
+    assert [quest.id for quest in controller._quest_director.intake_queue] == ["1", "2"]
+
+
+def test_autonomous_quest_director_enters_profit_farm_only_after_fresh_empty_catalog(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["max_cycles"] = 10
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "area"
+    controller._maybe_start_quest_refresh()
+    controller.current_page_kind = "quests"
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "snapshotId": "empty-catalog",
+            "items": [],
+            "truncated": False,
+        }
+    )
+
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    controller._observe_autonomous_quest_snapshot(
+        {"loadStatus": "loaded", "mode": "started", "snapshotId": "empty-active", "items": [], "truncated": False}
+    )
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH, controller.last_error_reason
+    assert [request.action_type for request in sink.requests] == [
+        "open_quest_catalog",
+        "open_quests",
+        "open_hunt",
+    ]
+    assert controller._quest_director_decision().intent.value == "PROFIT_FARM"
+
+    controller.session.completed_cycles = 5
+    assert controller._maybe_start_quest_refresh()
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert [request.action_type for request in sink.requests][-1] == "open_quest_catalog"
 
 
 def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(

@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_INJECTOR_HOST = "127.0.0.1"
 DEFAULT_INJECTOR_PORT = 17654
-CURRENT_BRIDGE_VERSION = "2026-07-13-visibility-v36"
+CURRENT_BRIDGE_VERSION = "2026-07-13-quest-catalog-v38"
 
 
 def _optional_int(value: object) -> int | None:

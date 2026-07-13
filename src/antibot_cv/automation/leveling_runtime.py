@@ -171,7 +171,10 @@ class LevelingRuntimeMixin:
         ):
             quest_decision = self._evaluate_quest_policy(snapshot, quest_section, quest_data)
             if (
-                self.config.leveling.auto_navigate_quest_targets
+                (
+                    self.config.leveling.auto_navigate_quest_targets
+                    or self.config.leveling.autonomous_quest_director
+                )
                 and quest_decision.intent is QuestIntent.STOP_UNSAFE
             ):
                 return self._stop_leveling_unsafe(f"quest_policy:{quest_decision.reason}")
@@ -218,6 +221,7 @@ class LevelingRuntimeMixin:
         if (
             not config.enabled
             or config.auto_navigate_quest_targets
+            or config.autonomous_quest_director
             or not target
             or self.state_machine.state not in {GameState.LOCATION_SEARCH, GameState.VIEWPORT_SCAN}
             or _same_location_name(self.current_location_name, target)
@@ -645,7 +649,10 @@ class LevelingRuntimeMixin:
                 reason="post_revive_route_resume",
             )
         if (
-            self.config.leveling.auto_navigate_quest_targets
+            (
+                self.config.leveling.auto_navigate_quest_targets
+                or self.config.leveling.autonomous_quest_director
+            )
             and self._death_checkpoint is not None
             and self._death_checkpoint.quest
         ):

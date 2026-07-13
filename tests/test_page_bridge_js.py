@@ -521,7 +521,7 @@ mp.parentElement = control;
 const mainDocument = {
   title: "Квесты",
   scripts: [],
-  body: { innerText: control.innerText, textContent: control.textContent },
+  body: { innerText: `Взятые Повторяющиеся Доступные Завершенные ${control.innerText}`, textContent: `Взятые Повторяющиеся Доступные Завершенные ${control.textContent}` },
   documentElement: { innerHTML: control.innerText },
   querySelector(selector) {
     if (selector.includes("control-lvl__hp")) return hp;
@@ -643,7 +643,7 @@ const cancel = {
 };
 const document = {
   title: "Квесты",
-  body: { innerText: container.innerText, textContent: container.textContent },
+  body: { innerText: `Взятые Повторяющиеся Доступные Завершенные ${container.innerText}`, textContent: `Взятые Повторяющиеся Доступные Завершенные ${container.textContent}` },
   querySelector() { return null; },
   querySelectorAll(selector) {
     if (selector.includes("action=cancel")) return [cancel];
@@ -713,13 +713,14 @@ const card = {
   querySelector(selector) { return selector === ".npc-point__title" ? title : null; },
   querySelectorAll(selector) {
     if (selector === "a") return [route, giver];
+    if (selector === "a[href]") return [route, giver];
     if (selector.includes("info/library")) return [giver];
     return [];
   },
 };
 const pageLink = { getAttribute(name) { return name === "href" ? "user_quest.php?mode=avail&page=2" : null; } };
 const document = {
-  title: "Квесты", body: { innerText: cardText, textContent: cardText },
+  title: "Квесты", body: { innerText: `Взятые Повторяющиеся Доступные Завершенные ${cardText}`, textContent: `Взятые Повторяющиеся Доступные Завершенные ${cardText}` },
   querySelectorAll(selector) {
     if (selector.includes("action=cancel")) return [];
     if (selector === ".npc-point") return [card];
@@ -744,11 +745,188 @@ const result = JSON.parse(messages[0].message).sections.quests.data;
 assert.strictEqual(result.mode, "avail");
 assert.strictEqual(result.availableCount, 1);
 assert.strictEqual(result.pageCount, 3);
+assert.strictEqual(result.currentPage, 0);
+assert.strictEqual(result.hasNextPage, true);
+assert.strictEqual(result.nextPageHref, null);
+assert.deepStrictEqual(result.catalogPages.map((entry) => entry.page), [0, 2]);
+assert.strictEqual(result.catalogPages[0].current, true);
+assert.strictEqual(result.catalogPages[1].href, "https://3kingdoms.ru/user_quest.php?mode=avail&page=2");
 assert.strictEqual(result.items[0].status, "available");
 assert.strictEqual(result.items[0].title, "Заблудшие враги");
 assert.strictEqual(result.items[0].navigation[0].text, "Лес призраков");
+assert.strictEqual(result.items[0].navigation[0].href, null);
 assert.deepStrictEqual(result.items[0].giverNames, ["Хранитель леса Франк"]);
+assert.deepStrictEqual(result.items[0].giverLinks, [{
+  name: "Хранитель леса Франк",
+  href: "https://3kingdoms.ru/info/library/index.php?obj=cat&id=46&page=5",
+}]);
+assert.strictEqual(result.items[0].catalogPage, 0);
+assert.strictEqual(result.items[0].cardIndex, 0);
 assert.strictEqual(result.items[0].reward, "Опыт: 6000.");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_available_quest_snapshot_reads_live_card_id_description_and_next_page() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const title = { innerText: "Письмо дозорному", textContent: "Письмо дозорному" };
+const description = { innerText: "Поговорить с Дозорным и передать письмо.", textContent: "Поговорить с Дозорным и передать письмо." };
+const folding = {
+  getAttribute(name) { return name === "onclick" ? "quest_folding.toggle(314);" : null; },
+};
+const detail = { id: "quest_314" };
+const card = {
+  innerText: "Письмо дозорному Текущая цель: Поговорить с Дозорным Награда: 900 опыта Местоположение: Южная застава",
+  textContent: "Письмо дозорному Текущая цель: Поговорить с Дозорным Награда: 900 опыта Местоположение: Южная застава",
+  querySelector(selector) {
+    if (selector === ".npc-point__title") return title;
+    if (selector === ".npc-quest-description") return description;
+    if (selector === "[id^='quest_']") return detail;
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector.includes("quest_folding.toggle")) return [folding];
+    return [];
+  },
+};
+const nextPage = { getAttribute(name) { return name === "href" ? "/user_quest.php?mode=avail&page=2" : null; } };
+const document = {
+  title: "Квесты", body: { innerText: `Взятые Повторяющиеся Доступные Завершенные ${card.innerText}`, textContent: `Взятые Повторяющиеся Доступные Завершенные ${card.textContent}` },
+  querySelectorAll(selector) {
+    if (selector.includes("action=cancel")) return [];
+    if (selector === ".npc-point") return [card];
+    if (selector.includes("user_quest.php") && selector.includes("page=")) return [nextPage];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/user_quest.php?mode=avail&page=1" },
+  frames: [], document,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({ source: root, data: {
+  source: `antibot-cv-content:${version}`, token: "available-quest-actions",
+  command: { type: "state_snapshot", payload: { include: ["quests"] } },
+} });
+const result = JSON.parse(messages[0].message).sections.quests.data;
+assert.strictEqual(result.currentPage, 1);
+assert.strictEqual(result.nextPageHref, "https://3kingdoms.ru/user_quest.php?mode=avail&page=2");
+assert.deepStrictEqual(result.catalogPages.map((entry) => entry.page), [1, 2]);
+assert.strictEqual(result.items[0].id, "314");
+assert.strictEqual(result.items[0].idSource, "numeric_dom");
+assert.strictEqual(result.items[0].description, "Поговорить с Дозорным и передать письмо.");
+assert.strictEqual(result.items[0].objectiveKind, "dialogue");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_exact_quest_catalog_page_and_rejects_out_of_range_page() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const document = {
+  title: "Квесты", body: { innerText: "Взятые Повторяющиеся Доступные Завершенные", textContent: "Взятые Повторяющиеся Доступные Завершенные" },
+  querySelectorAll() { return []; },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/user_quest.php?mode=started" },
+  frames: [], document,
+  setTimeout(callback) { callback(); },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({ source: root, data: {
+  source: `antibot-cv-content:${version}`, token: "catalog-open",
+  command: { type: "open_quest_catalog", payload: { page: 2, verifyTimeoutMs: 250 } },
+} });
+setImmediate(() => {
+  const opened = JSON.parse(messages[0].message);
+  assert.strictEqual(opened.ok, true);
+  assert.strictEqual(opened.message, "quest_catalog_opened_confirmed");
+  assert.strictEqual(opened.page, 2);
+  assert.strictEqual(opened.after.mode, "avail");
+  assert.strictEqual(opened.after.page, 2);
+  listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`, token: "catalog-invalid",
+    command: { type: "open_quest_catalog", payload: { page: 101 } },
+  } });
+  setImmediate(() => {
+    const rejected = JSON.parse(messages[1].message);
+    assert.strictEqual(rejected.ok, false);
+    assert.strictEqual(rejected.message, "quest_catalog_page_invalid");
+    for (const invalidPage of ["2", null, true]) {
+      listeners.message({ source: root, data: {
+        source: `antibot-cv-content:${version}`, token: `catalog-invalid-${String(invalidPage)}`,
+        command: { type: "open_quest_catalog", payload: { page: invalidPage } },
+      } });
+    }
+    setImmediate(() => {
+      for (const message of messages.slice(2)) {
+        const invalid = JSON.parse(message.message);
+        assert.strictEqual(invalid.ok, false);
+        assert.strictEqual(invalid.message, "quest_catalog_page_invalid");
+      }
+    });
+  });
+});
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_does_not_treat_quest_url_with_loading_dom_as_loaded_catalog() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const document = {
+  title: "Квесты",
+  readyState: "complete",
+  body: { innerText: "Загрузка...", textContent: "Загрузка..." },
+  querySelectorAll() { return []; },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/user_quest.php?mode=avail&page=0" },
+  frames: [], document,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({ source: root, data: {
+  source: `antibot-cv-content:${version}`, token: "loading-catalog",
+  command: { type: "state_snapshot", payload: { include: ["quests"] } },
+} });
+const section = JSON.parse(messages[0].message).sections.quests;
+assert.strictEqual(section.status, "not_loaded");
+assert.strictEqual(section.data.loadStatus, "not_loaded");
+assert.deepStrictEqual(section.data.items, []);
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
 

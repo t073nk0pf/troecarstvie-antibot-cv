@@ -42,9 +42,31 @@
     return safeString(value.slice(contentStart, contentEnd), 2000);
   };
 
+  const safeQuestHref = (value, baseHref = "") => {
+    const raw = safeString(value, 500);
+    if (!raw || raw === "#" || /^(?:javascript|data):/i.test(raw)) return null;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    const base = safeString(baseHref, 500);
+    const originMatch = base.match(/^(https?:\/\/[^/]+)/i);
+    if (raw.startsWith("/")) return originMatch ? `${originMatch[1]}${raw}` : raw;
+    if (raw.startsWith("?")) return base ? `${base.split(/[?#]/)[0]}${raw}` : raw;
+    const directoryMatch = base.match(/^(https?:\/\/[^?#]*\/)[^/?#]*(?:[?#].*)?$/i);
+    return directoryMatch ? `${directoryMatch[1]}${raw}` : raw;
+  };
+
+  const questCatalogPageFromHref = (href) => {
+    const value = safeString(href, 500);
+    if (!/\/user_quest\.php(?:\?|$)/i.test(value) || !/[?&]mode=avail(?:&|$)/i.test(value)) return null;
+    const pageMatch = value.match(/[?&]page=(\d+)/i);
+    const page = pageMatch ? parseInt(pageMatch[1], 10) : 0;
+    return Number.isFinite(page) && page >= 0 ? page : null;
+  };
+
   const questSnapshot = (metadata = {}) => {
     const context = mainContentContext();
-    const loaded = context.pageKind === "quests" || /Текущая цель:|Взятые\s+Повторяющиеся\s+Доступные/i.test(context.text);
+    const questShellLoaded = /Взятые[\s\S]*Повторяющиеся[\s\S]*Доступные[\s\S]*Завершенные/i.test(context.text);
+    const documentReady = !context.doc || !context.doc.readyState || context.doc.readyState === "complete";
+    const loaded = context.pageKind === "quests" && questShellLoaded && documentReady;
     if (!loaded || !context.doc) {
       return {
         status: "not_loaded",
@@ -64,13 +86,29 @@
     const seen = new Set();
     const modeMatch = context.href.match(/[?&]mode=([^&#]+)/i);
     const mode = safeString(modeMatch && modeMatch[1], 24).toLowerCase() || "started";
-    const appendQuest = (container, status, questId = "") => {
+    const appendQuest = (container, status, questId = "", catalogPage = 0, cardIndex = 0) => {
       if (!container) return;
       const titleElement = container.querySelector ? container.querySelector(".npc-point__title") : null;
       const rawText = safeString(container.innerText || container.textContent, 5000);
       const title = safeString(titleElement && (titleElement.innerText || titleElement.textContent), 220) ||
         safeString(rawText.split(status === "active" ? "Отказаться" : "Награда:")[0], 220);
-      const stableId = questId || (title ? `available:${title.toLowerCase()}` : "");
+      let observedQuestId = safeString(questId, 40);
+      if (!observedQuestId && container.querySelector) {
+        const detailElement = container.querySelector("[id^='quest_']");
+        const detailMatch = safeString(detailElement && detailElement.id, 80).match(/^quest_(\d+)$/i);
+        if (detailMatch) observedQuestId = detailMatch[1];
+      }
+      if (!observedQuestId && container.querySelectorAll) {
+        const foldingControls = Array.from(container.querySelectorAll("button[onclick*='quest_folding.toggle'],[onclick*='quest_folding.toggle']")).slice(0, 10);
+        for (const control of foldingControls) {
+          const match = safeString(attr(control, "onclick"), 240).match(/quest_folding\.toggle\(\s*(\d+)\s*\)/i);
+          if (match) {
+            observedQuestId = match[1];
+            break;
+          }
+        }
+      }
+      const stableId = observedQuestId || (title ? `available:${title.toLowerCase()}` : "");
       const key = stableId || `${status}:${items.length}`;
       if (seen.has(key)) return;
       seen.add(key);
@@ -78,16 +116,23 @@
       const navigation = routeElements.map((element) => ({
         text: questNavigatorLabel(element),
         title: safeString(attr(element, "title"), 180),
+        href: safeQuestHref(attr(element, "href"), context.href),
         onclick: safeString(attr(element, "onclick"), 300),
       }));
       const routeLabels = new Set(navigation.map((entry) => safeString(entry.text, 180).toLowerCase()).filter(Boolean));
-      const giverNames = container.querySelectorAll
+      const giverLinks = container.querySelectorAll
         ? Array.from(container.querySelectorAll("a[href*='/info/library/'],a[href*='info/library/']"))
-            .map((element) => safeString(element.innerText || element.textContent, 180))
-            .filter((label) => label && !routeLabels.has(label.toLowerCase()))
-            .filter((label, index, all) => all.indexOf(label) === index)
+            .map((element) => ({
+              name: safeString(element.innerText || element.textContent, 180),
+              href: safeQuestHref(attr(element, "href"), context.href),
+            }))
+            .filter((entry) => entry.name && !routeLabels.has(entry.name.toLowerCase()))
+            .filter((entry, index, all) => all.findIndex((candidate) => candidate.name === entry.name && candidate.href === entry.href) === index)
             .slice(0, 10)
         : [];
+      const giverNames = giverLinks.map((entry) => entry.name);
+      const descriptionElement = container.querySelector ? container.querySelector(".npc-quest-description") : null;
+      const catalogDescription = safeString(descriptionElement && (descriptionElement.innerText || descriptionElement.textContent), 2000);
       const objectiveMarker = "Текущая цель:";
       const rewardMarker = "Награда:";
       const locationMarker = "Местоположение:";
@@ -103,21 +148,32 @@
       const locationText = locationIndex >= 0
         ? safeString(rawText.slice(locationIndex + locationMarker.length), 600) || null
         : null;
-      const objectiveKind = /(?:уби(?:ть|йте)|уничтож|побед|одол|сраз|атак)/i.test(objective || "")
-        ? "combat"
-        : "unknown";
+      const objectiveEvidence = objective || catalogDescription;
+      const objectiveKind = /(?:собра(?:ть|йте)|добы(?:ть|удьте)|принес(?:ти|ите)|получи(?:ть|те)|найти)/i.test(objectiveEvidence || "")
+        ? "collect"
+        : /(?:поговори(?:ть|те)|обрати(?:ть|тесь)|расспроси(?:ть|те))/i.test(objectiveEvidence || "")
+          ? "dialogue"
+          : /(?:посети(?:ть|те)|прибы(?:ть|удьте)|отправ(?:иться|ьтесь))/i.test(objectiveEvidence || "")
+            ? "travel"
+            : /(?:уби(?:ть|йте)|уничтож|побед|одол|сраз|атак)/i.test(objectiveEvidence || "")
+              ? "combat"
+              : "unknown";
       items.push({
         id: stableId || null,
+        idSource: observedQuestId ? "numeric_dom" : title ? "title_fallback" : null,
         title: title || null,
         status,
         sourceText: safeString(rawText, 800) || null,
         objectiveKind,
         objective,
         progress: questObjectiveProgress(objective || ""),
-        description: status === "available" ? safeString(rawText.split("Награда:")[0], 1600) || null : null,
+        description: status === "available" ? catalogDescription || safeString(rawText.split("Награда:")[0], 1600) || null : null,
+        catalogPage: status === "available" ? catalogPage : null,
+        cardIndex: status === "available" ? cardIndex : null,
         reward: safeString(reward, 600) || null,
         locationText: safeString(locationText, 600) || null,
         giverNames,
+        giverLinks,
         navigation,
       });
     };
@@ -139,21 +195,36 @@
       }
       if (mode === "avail") {
         const cards = Array.from(context.doc.querySelectorAll(".npc-point")).slice(0, 100);
-        for (const card of cards) appendQuest(card, "available");
+        const pageMatch = context.href.match(/[?&]page=(\d+)/i);
+        const catalogPage = pageMatch ? parseInt(pageMatch[1], 10) : 0;
+        cards.forEach((card, cardIndex) => appendQuest(card, "available", "", catalogPage, cardIndex));
       }
     } catch (_) {}
-    const pageNumbers = [];
-    try {
-      for (const link of Array.from(context.doc.querySelectorAll("a[href*='user_quest.php'][href*='page=']")).slice(0, 100)) {
-        const href = safeString(attr(link, "href"), 240);
-        const match = href.match(/[?&]page=(\d+)/i);
-        const page = match ? parseInt(match[1], 10) : NaN;
-        if (Number.isFinite(page) && !pageNumbers.includes(page)) pageNumbers.push(page);
+    const catalogPages = [];
+    const appendCatalogPage = (page, href, current = false) => {
+      if (!Number.isFinite(page) || page < 0) return;
+      const normalizedHref = safeQuestHref(href, context.href);
+      const existing = catalogPages.find((entry) => entry.page === page);
+      if (existing) {
+        if (!existing.href && normalizedHref) existing.href = normalizedHref;
+        if (current) existing.current = true;
+        return;
       }
-    } catch (_) {}
+      catalogPages.push({ page, href: normalizedHref, current: Boolean(current) });
+    };
     const currentPageMatch = context.href.match(/[?&]page=(\d+)/i);
     const currentPage = currentPageMatch ? parseInt(currentPageMatch[1], 10) : 0;
-    const pageCount = pageNumbers.length ? Math.max(...pageNumbers) + 1 : 1;
+    if (mode === "avail") appendCatalogPage(currentPage, context.href, true);
+    try {
+      for (const link of Array.from(context.doc.querySelectorAll("a[href*='user_quest.php'][href*='page=']")).slice(0, 100)) {
+        const href = safeQuestHref(attr(link, "href"), context.href);
+        const page = questCatalogPageFromHref(href);
+        if (page != null) appendCatalogPage(page, href, page === currentPage);
+      }
+    } catch (_) {}
+    catalogPages.sort((left, right) => left.page - right.page);
+    const pageCount = catalogPages.length ? Math.max(...catalogPages.map((entry) => entry.page)) + 1 : 1;
+    const nextPage = catalogPages.find((entry) => entry.page === currentPage + 1) || null;
     return {
       status: "available",
       reason: null,
@@ -168,6 +239,8 @@
         currentPage,
         pageCount,
         hasNextPage: currentPage + 1 < pageCount,
+        nextPageHref: nextPage ? nextPage.href : null,
+        catalogPages,
         currentLocation: null,
         activeCount: items.filter((item) => item.status === "active").length,
         availableCount: items.filter((item) => item.status === "available").length,
@@ -499,6 +572,12 @@
         openQuests(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))
           .catch((error) => send(data.token, false, `open_quests_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "open_quest_catalog") {
+        openQuestCatalog(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_quest_catalog_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "layout") {

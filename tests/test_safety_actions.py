@@ -820,6 +820,38 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
     ]
 
 
+def test_live_open_quest_catalog_forwards_only_bounded_integer_page(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float, str | None]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s, client_id))
+            return InjectorResult(True, '{"message":"quest_catalog_opened_confirmed"}', client_id)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(ActionRequest("open_quest_catalog", metadata={"page": 2}, dry_run=False))
+    assert not sink.execute(ActionRequest("open_quest_catalog", metadata={"page": "2"}, dry_run=False))
+    assert not sink.execute(ActionRequest("open_quest_catalog", metadata={"page": 101}, dry_run=False))
+    assert calls == [
+        (
+            "open_quest_catalog",
+            {"page": 2, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+            5.5,
+            "parent-client",
+        )
+    ]
+
+
 def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> None:
     calls: list[tuple[str, str | None, dict[str, object], float]] = []
     sleeps: list[float] = []
