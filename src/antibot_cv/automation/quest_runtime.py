@@ -49,6 +49,7 @@ class QuestRuntimeMixin:
         self._quest_origin_location_name: str | None = None
         self._quest_target_names: tuple[str, ...] = ()
         self._quest_target_levels: tuple[int, ...] = ()
+        self._quest_target_specs: tuple[tuple[str, int], ...] = ()
         self._quest_route_locations: tuple[str, ...] = ()
         self._quest_target_routes: dict[str, tuple[str, ...]] = {}
         self._quest_route_link_label: str | None = None
@@ -384,6 +385,7 @@ class QuestRuntimeMixin:
             self._active_quest_id = decision.quest_id
             self._quest_target_names = ()
             self._quest_target_levels = ()
+            self._quest_target_specs = ()
             self._quest_route_locations = decision.locations
             self._quest_target_routes = {}
             self._quest_route_link_label = None
@@ -392,6 +394,7 @@ class QuestRuntimeMixin:
             self._active_quest_id = None
             self._quest_target_names = ()
             self._quest_target_levels = ()
+            self._quest_target_specs = ()
             self._quest_route_locations = ()
             self._quest_target_routes = {}
             self._quest_route_link_label = None
@@ -414,16 +417,22 @@ class QuestRuntimeMixin:
                 )
             opportunistic_names: list[str] = list(self._quest_target_names)
             opportunistic_levels: list[int] = []
+            opportunistic_specs: list[tuple[str, int]] = []
             for candidate in ordered_objectives:
                 if candidate.monster.name not in opportunistic_names:
                     opportunistic_names.append(candidate.monster.name)
                 if candidate.monster.level not in opportunistic_levels:
                     opportunistic_levels.append(candidate.monster.level)
+                spec = (candidate.monster.name, candidate.monster.level)
+                if spec not in opportunistic_specs:
+                    opportunistic_specs.append(spec)
             self._quest_target_names = tuple(opportunistic_names)
             self._quest_target_levels = tuple(opportunistic_levels)
+            self._quest_target_specs = tuple(opportunistic_specs)
             self._quest_route_link_label = objective.navigator_label
         else:
             self._quest_target_levels = ()
+            self._quest_target_specs = ()
             self._quest_route_link_label = None
 
     @staticmethod

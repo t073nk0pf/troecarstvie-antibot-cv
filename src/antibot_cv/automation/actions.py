@@ -107,6 +107,9 @@ class LiveMacActionSink:
             allowed_bot_ids = metadata.get("allowed_bot_ids")
             if isinstance(allowed_bot_ids, list):
                 payload["allowedBotIds"] = allowed_bot_ids
+            target_specs = metadata.get("target_specs")
+            if isinstance(target_specs, list):
+                payload["targetSpecs"] = target_specs
             payload["verifyTimeoutMs"] = 3500
             payload["commandTimeoutMs"] = 6500
             result = self._execute_injector(injector, "attack_visible_bot", payload, timeout_s=7.0)

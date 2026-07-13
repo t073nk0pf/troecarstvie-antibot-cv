@@ -186,6 +186,21 @@
     return normalizeBotIdList(raw);
   };
 
+  const targetSpecsFromPayload = (payload) => {
+    const raw = payload && Array.isArray(payload.targetSpecs) ? payload.targetSpecs : [];
+    const result = [];
+    for (const item of raw.slice(0, 100)) {
+      if (!item || typeof item !== "object") continue;
+      const name = safeString(item.name, 120);
+      const level = Number(item.level);
+      if (!name || !Number.isInteger(level) || level <= 0) continue;
+      if (!result.some((candidate) => candidate.name === name && candidate.level === level)) {
+        result.push({ name, level });
+      }
+    }
+    return result;
+  };
+
   const parseLevelFromName = (value) => {
     const text = safeString(value, 180);
     const match = text.match(/\[(\d{1,3})\](?!.*\[\d{1,3}\])/);
@@ -346,6 +361,7 @@
       payload && (payload.allowedLevels || payload.allowed_levels || payload.levels || payload.targetLevels)
     );
     const allowedBotIds = botIdFilterFromPayload(payload);
+    const targetSpecs = targetSpecsFromPayload(payload);
     const viewBounds = hunt.view.viewBounds || {};
     const bounds = {
       x: toNumber(viewBounds.x, 0),
@@ -373,10 +389,22 @@
       .filter((bot) => !allowedBotIds.length || allowedBotIds.includes(bot.botId))
       .filter(
         (bot) =>
+          !targetSpecs.length ||
+          targetSpecs.some(
+            (spec) =>
+              Number(bot.level) === spec.level &&
+              (huntNameMatches(bot.name, spec.name) || huntNameMatches(bot.shortName, spec.name))
+          )
+      )
+      .filter(
+        (bot) =>
+          targetSpecs.length ||
           !allowedNames.length ||
           allowedNames.some((name) => huntNameMatches(bot.name, name) || huntNameMatches(bot.shortName, name))
       )
-      .filter((bot) => !allowedLevels.length || allowedLevels.includes(Number(bot.level)))
+      .filter(
+        (bot) => targetSpecs.length || !allowedLevels.length || allowedLevels.includes(Number(bot.level))
+      )
       .map((bot) => {
         const visible =
           bot.x >= bounds.x - margin &&
@@ -385,7 +413,13 @@
           bot.y <= bounds.y + bounds.h + margin;
         return {
           ...bot,
-          targetPriority: allowedNames.length
+          targetPriority: targetSpecs.length
+            ? targetSpecs.findIndex(
+                (spec) =>
+                  Number(bot.level) === spec.level &&
+                  (huntNameMatches(bot.name, spec.name) || huntNameMatches(bot.shortName, spec.name))
+              )
+            : allowedNames.length
             ? allowedNames.findIndex((name) => huntNameMatches(bot.name, name) || huntNameMatches(bot.shortName, name))
             : 0,
           visible,
@@ -411,6 +445,7 @@
       hasHunt: true,
       viewBounds: bounds,
       allowedBotIds,
+      targetSpecs,
       allowedLevels,
       layer,
       targets,
@@ -568,7 +603,8 @@
       payload && (payload.allowedLevels || payload.allowed_levels || payload.levels || payload.targetLevels)
     );
     const requestedBotIds = botIdFilterFromPayload(payload);
-    if (!requestedNames.length && !requestedLevels.length && !requestedBotIds.length) {
+    const requestedTargetSpecs = targetSpecsFromPayload(payload);
+    if (!requestedNames.length && !requestedLevels.length && !requestedBotIds.length && !requestedTargetSpecs.length) {
       return { ok: false, message: "target_filter_required" };
     }
     const visible = visibleHuntTargets(payload || {});
@@ -580,6 +616,7 @@
       hasHunt: visible.hasHunt,
       viewBounds: visible.viewBounds,
       allowedBotIds: visible.allowedBotIds,
+      targetSpecs: visible.targetSpecs,
       allowedLevels: visible.allowedLevels,
       targetCount: visible.targets.length,
       targets: visible.targets.slice(0, 5),

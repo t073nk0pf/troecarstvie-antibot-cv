@@ -524,6 +524,17 @@ class NavigationRuntimeMixin:
             metadata["allowed_levels"] = list(allowed_levels)
         if allowed_names:
             metadata["names"] = list(allowed_names)
+        target_specs = [
+            {"name": name, "level": level}
+            for name, level in getattr(self, "_quest_target_specs", ())
+            if isinstance(name, str)
+            and name.strip()
+            and isinstance(level, int)
+            and not isinstance(level, bool)
+            and level > 0
+        ]
+        if target_specs:
+            metadata["target_specs"] = target_specs
         request = ActionRequest(
             "attack_visible_target",
             cycle_id=self.session.cycle_id,
@@ -539,6 +550,7 @@ class NavigationRuntimeMixin:
             frame_hash=self._last_frame_hash,
             allowed_levels=list(allowed_levels),
             allowed_names=list(allowed_names),
+            target_specs=target_specs,
         )
         if not self.action_executor.execute(request):
             return False

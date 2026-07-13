@@ -1952,8 +1952,10 @@ const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
 const messages = [];
 const listeners = {};
 const bots = [
-  { id: 610, name: "Попутный волк [5]", shortName: "Попутный волк [5]", lvl: 5, x: 100, y: 100, fightId: 0, agrforbid: false, isBot: true },
+  { id: 610, name: "Попутный волк [4]", shortName: "Попутный волк [4]", lvl: 4, x: 100, y: 100, fightId: 0, agrforbid: false, isBot: true },
   { id: 611, name: "Основной бес [5]", shortName: "Основной бес [5]", lvl: 5, x: 120, y: 120, fightId: 0, agrforbid: false, isBot: true },
+  { id: 612, name: "Основной бес [4]", shortName: "Основной бес [4]", lvl: 4, x: 90, y: 90, fightId: 0, agrforbid: false, isBot: true },
+  { id: 613, name: "Попутный волк [5]", shortName: "Попутный волк [5]", lvl: 5, x: 80, y: 80, fightId: 0, agrforbid: false, isBot: true },
 ];
 const main = { location: { href: "https://3kingdoms.ru/hunt.php" } };
 const mainFrame = { frames: [main] };
@@ -2006,10 +2008,17 @@ async function command(type, payload = {}) {
 
 (async () => {
   const prioritized = await command("visible_hunt_targets", {
-    names: ["Основной бес", "Попутный волк"],
+    targetSpecs: [
+      {name: "Основной бес", level: 5},
+      {name: "Попутный волк", level: 4},
+    ],
   });
   assert.deepStrictEqual(prioritized.message.targets.map((target) => target.botId), [611, 610]);
   assert.deepStrictEqual(prioritized.message.targets.map((target) => target.targetPriority), [0, 1]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(prioritized.message.targetSpecs)), [
+    {name: "Основной бес", level: 5},
+    {name: "Попутный волк", level: 4},
+  ]);
 
   const visible = await command("visible_hunt_targets", { allowedBotIds: [611] });
   assert.strictEqual(visible.ok, true);

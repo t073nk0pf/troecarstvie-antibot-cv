@@ -516,6 +516,10 @@ class ResourceRuntimeMixin:
             ),
             "quest_policy_intent": None if self._quest_policy_intent is None else self._quest_policy_intent.value,
             "quest_target_names": list(self._quest_target_names),
+            "quest_target_specs": [
+                {"name": name, "level": level}
+                for name, level in self._quest_target_specs
+            ],
             "quest_route_locations": list(self._quest_route_locations),
             "death_checkpoint": None
             if self._death_checkpoint is None

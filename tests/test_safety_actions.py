@@ -120,6 +120,7 @@ def test_live_attack_visible_target_passes_allowed_levels(monkeypatch) -> None:
                 "confirmed": 1,
                 "margin": 35,
                 "allowedLevels": [3],
+                "targetSpecs": [{"name": "Волк", "level": 3}],
                 "verifyTimeoutMs": 3500,
                 "commandTimeoutMs": 6500,
             }
@@ -135,7 +136,18 @@ def test_live_attack_visible_target_passes_allowed_levels(monkeypatch) -> None:
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
     sink = LiveMacActionSink(logger)
 
-    ok = sink.execute(ActionRequest("attack_visible_target", metadata={"confirmed": 1, "margin": 35, "allowed_levels": [3]}, dry_run=False))
+    ok = sink.execute(
+        ActionRequest(
+            "attack_visible_target",
+            metadata={
+                "confirmed": 1,
+                "margin": 35,
+                "allowed_levels": [3],
+                "target_specs": [{"name": "Волк", "level": 3}],
+            },
+            dry_run=False,
+        )
+    )
 
     assert ok
     assert logger.events[-1]["event_type"] == "attack_visible_target_requested"
