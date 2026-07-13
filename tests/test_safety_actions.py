@@ -818,3 +818,83 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             3.0,
         ),
     ]
+
+
+def test_live_navigator_retries_one_late_autocomplete_result(monkeypatch) -> None:
+    calls = []
+    results = iter(
+        [
+            InjectorResult(
+                False,
+                '{"ok":false,"message":"navigator_target_missing_in_section"}',
+                "child-client",
+            ),
+            InjectorResult(
+                True,
+                '{"ok":true,"message":"navigator_target_selected","selected":true}',
+                "child-client",
+            ),
+        ]
+    )
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
+            return next(results)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "navigator_select_target",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "target_kind": "monster",
+                "navigator_client_id": "child-client",
+                "search_delay_ms": 3000,
+                "route_delay_ms": 500,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert [event["event_type"] for event in logger.events] == [
+        "navigator_target_selection_retry",
+        "navigator_target_selected",
+    ]
+
+
+def test_live_navigator_does_not_retry_ambiguous_target(monkeypatch) -> None:
+    calls = []
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
+            return InjectorResult(
+                False,
+                '{"ok":false,"message":"navigator_target_ambiguous"}',
+                client_id,
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert not sink.execute(
+        ActionRequest(
+            "navigator_select_target",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "target_kind": "monster",
+                "navigator_client_id": "child-client",
+            },
+            dry_run=False,
+        )
+    )
+
+    assert len(calls) == 1
+    assert [event["event_type"] for event in logger.events] == ["action_blocked"]
