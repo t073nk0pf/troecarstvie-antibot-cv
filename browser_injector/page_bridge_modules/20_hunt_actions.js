@@ -847,3 +847,60 @@
       verifyTimeoutMs,
     };
   };
+
+  const openActiveQuestPage = async (payload = {}) => {
+    const rawPage = payload && payload.page;
+    if (typeof rawPage !== "number" || !Number.isInteger(rawPage) || rawPage < 0 || rawPage > 100) {
+      return { ok: false, message: "quest_active_page_invalid", page: rawPage == null ? null : safeString(rawPage, 40) };
+    }
+    const page = rawPage;
+    const before = mainContentContext();
+    const beforeMode = safeString((before.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
+    const beforePageMatch = before.href.match(/[?&]page=(\d+)/i);
+    const beforePage = beforePageMatch ? parseInt(beforePageMatch[1], 10) : 0;
+    if (before.pageKind === "quests" && beforeMode === "started" && beforePage === page) {
+      return {
+        ok: true,
+        message: "quest_active_already_open",
+        page,
+        before: { pageKind: before.pageKind, href: before.href },
+        after: { pageKind: before.pageKind, href: before.href, mode: beforeMode, page: beforePage },
+      };
+    }
+    const destination = `/user_quest.php?mode=started&page=${page}`;
+    let method = null;
+    try {
+      const mainWin = findMainContentWindow(window.top || window);
+      if (mainWin && mainWin.location) {
+        mainWin.location.href = destination;
+        method = "main_frame_direct";
+      }
+    } catch (_) {}
+    if (!method) return { ok: false, message: "quest_active_main_content_missing", page };
+    const verifyTimeoutMs = Math.max(250, Math.min(5000, Number(payload && payload.verifyTimeoutMs) || 2000));
+    const deadline = Date.now() + verifyTimeoutMs;
+    let after = mainContentContext();
+    let afterMode = safeString((after.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
+    let afterPageMatch = after.href.match(/[?&]page=(\d+)/i);
+    let afterPage = afterPageMatch ? parseInt(afterPageMatch[1], 10) : 0;
+    let shellLoaded = /Взятые[\s\S]*Повторяющиеся[\s\S]*Доступные[\s\S]*Завершенные/i.test(safeString(after.text, 20000));
+    while ((after.pageKind !== "quests" || afterMode !== "started" || afterPage !== page || !shellLoaded) && Date.now() < deadline) {
+      await delayMs(100);
+      after = mainContentContext();
+      afterMode = safeString((after.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
+      afterPageMatch = after.href.match(/[?&]page=(\d+)/i);
+      afterPage = afterPageMatch ? parseInt(afterPageMatch[1], 10) : 0;
+      shellLoaded = /Взятые[\s\S]*Повторяющиеся[\s\S]*Доступные[\s\S]*Завершенные/i.test(safeString(after.text, 20000));
+    }
+    const confirmed = after.pageKind === "quests" && afterMode === "started" && afterPage === page && shellLoaded;
+    return {
+      ok: confirmed,
+      message: confirmed ? "quest_active_opened_confirmed" : "quest_active_open_unconfirmed",
+      page,
+      destination,
+      method,
+      before: { pageKind: before.pageKind, href: before.href },
+      after: { pageKind: after.pageKind, href: after.href, mode: afterMode, page: afterPage },
+      verifyTimeoutMs,
+    };
+  };

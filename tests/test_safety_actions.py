@@ -852,6 +852,167 @@ def test_live_open_quest_catalog_forwards_only_bounded_integer_page(monkeypatch)
     ]
 
 
+def test_live_open_active_quest_page_forwards_only_bounded_integer_page(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float, str | None]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s, client_id))
+            return InjectorResult(True, '{"message":"quest_active_opened_confirmed"}', client_id)
+
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False), browser_client_id="parent-client")
+
+    assert sink.execute(ActionRequest("open_active_quest_page", metadata={"page": 1}, dry_run=False))
+    assert not sink.execute(ActionRequest("open_active_quest_page", metadata={"page": "1"}, dry_run=False))
+    assert not sink.execute(ActionRequest("open_active_quest_page", metadata={"page": 101}, dry_run=False))
+    assert calls == [(
+        "open_active_quest_page",
+        {"page": 1, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+        5.5,
+        "parent-client",
+    )]
+
+
+def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float, str | None]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s, client_id))
+            return InjectorResult(True, '{"message":"npc_opened_confirmed"}', client_id)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+    valid = {
+        "expected_snapshot_id": "area-npcs-mrj-1",
+        "expected_location_id": "125",
+        "npc_id": "6",
+        "expected_name": "Моряк Кентур",
+    }
+
+    assert sink.execute(ActionRequest("open_exact_npc", metadata=valid, dry_run=False))
+    assert not sink.execute(ActionRequest("open_exact_npc", metadata={**valid, "npc_id": "6x"}, dry_run=False))
+    assert not sink.execute(
+        ActionRequest("open_exact_npc", metadata={**valid, "expected_snapshot_id": "wrong"}, dry_run=False)
+    )
+    assert calls == [
+        (
+            "open_exact_npc",
+            {
+                "expectedSnapshotId": "area-npcs-mrj-1",
+                "expectedLocationId": "125",
+                "npcId": "6",
+                "expectedName": "Моряк Кентур",
+                "expectedDialogName": "Моряк Кентур",
+                "verifyTimeoutMs": 2500,
+                "commandTimeoutMs": 5500,
+            },
+            6.0,
+            "parent-client",
+        )
+    ]
+
+
+def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float, str | None]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s, client_id))
+            return InjectorResult(True, '{"message":"npc_quest_action_submitted"}', client_id)
+
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False), browser_client_id="parent-client")
+    valid = {
+        "expected_snapshot_id": "npc-dialog-mrj-1",
+        "npc_id": "13",
+        "quest_id": "246",
+        "expected_title": "Хворь скакунов",
+        "action": "open",
+    }
+
+    assert sink.execute(ActionRequest("npc_quest_action", metadata=valid, dry_run=False))
+    assert not sink.execute(ActionRequest("npc_quest_action", metadata={**valid, "quest_id": "246x"}, dry_run=False))
+    assert not sink.execute(ActionRequest("npc_quest_action", metadata={**valid, "action": "accept"}, dry_run=False))
+    answer = {
+        **valid,
+        "action": "answer",
+        "expected_ref": "3441",
+        "expected_text": "Поклон тебе, почтенный воевода!",
+    }
+    assert sink.execute(ActionRequest("npc_quest_action", metadata=answer, dry_run=False))
+    assert not sink.execute(ActionRequest("npc_quest_action", metadata={**answer, "expected_ref": "bad"}, dry_run=False))
+    accept = {**valid, "action": "accept", "expected_text": "Взять задание"}
+    assert sink.execute(ActionRequest("npc_quest_action", metadata=accept, dry_run=False))
+    assert calls == [
+        (
+            "npc_quest_action",
+            {
+                "expectedSnapshotId": "npc-dialog-mrj-1",
+                "npcId": "13",
+                "questId": "246",
+                "expectedTitle": "Хворь скакунов",
+                "action": "open",
+                "expectedRef": None,
+                "expectedText": None,
+            },
+            3.0,
+            "parent-client",
+        ),
+        (
+            "npc_quest_action",
+            {
+                "expectedSnapshotId": "npc-dialog-mrj-1",
+                "npcId": "13",
+                "questId": "246",
+                "expectedTitle": "Хворь скакунов",
+                "action": "answer",
+                "expectedRef": "3441",
+                "expectedText": "Поклон тебе, почтенный воевода!",
+            },
+            3.0,
+            "parent-client",
+        ),
+        (
+            "npc_quest_action",
+            {
+                "expectedSnapshotId": "npc-dialog-mrj-1",
+                "npcId": "13",
+                "questId": "246",
+                "expectedTitle": "Хворь скакунов",
+                "action": "accept",
+                "expectedRef": None,
+                "expectedText": "Взять задание",
+            },
+            3.0,
+            "parent-client",
+        ),
+    ]
+
+
 def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> None:
     calls: list[tuple[str, str | None, dict[str, object], float]] = []
     sleeps: list[float] = []
@@ -1033,6 +1194,43 @@ def test_live_navigator_go_confirms_parent_route_after_child_ack_timeout(monkeyp
     ]
     assert logger.events[-1]["event_type"] == "navigator_go_requested"
     assert logger.events[-1]["route_confirmation"] == "parent_route_snapshot_after_ack_timeout"
+
+
+def test_live_navigator_go_waits_for_delayed_parent_route_after_popup_closes(monkeypatch) -> None:
+    snapshots = iter(
+        [
+            '{"ok":false,"message":"location_route_page_missing","pageKind":"quests"}',
+            '{"ok":false,"message":"location_route_page_missing","pageKind":"quests"}',
+            '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+            '"currentLocationId":"102","targetLocationId":"130",'
+            '"foundPath":["101","110","130"],'
+            '"nextTransition":{"locId":"101"}}',
+        ]
+    )
+    sleeps: list[float] = []
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            if command == "navigator_go":
+                return InjectorResult(False, "injector_ack_timeout", "child-client")
+            if command == "location_route_snapshot":
+                message = next(snapshots)
+                return InjectorResult('"ok":true' in message, message, "parent-client")
+            raise AssertionError(command)
+
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    monkeypatch.setattr("src.antibot_cv.automation.actions.time.sleep", lambda seconds: sleeps.append(seconds))
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False), browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "navigator_go",
+            metadata={"target": "Лес призраков", "navigator_client_id": "child-client", "route_transitions": 3},
+            dry_run=False,
+        )
+    )
+    assert sleeps == [0.2]
+    assert sink.logger.events[-1]["route_confirmation"] == "parent_route_snapshot_after_ack_timeout"
 
 
 def test_live_navigator_go_rejects_unchanged_parent_route_after_ack_timeout(monkeypatch) -> None:

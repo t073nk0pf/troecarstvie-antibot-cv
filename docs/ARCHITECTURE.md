@@ -25,6 +25,11 @@ browser bundle reproducibility contract.
   orchestration.
 - `quest_catalog.py`: fail-closed paginated catalogue validation and
   aggregation.
+- `quest_active_catalog.py`: fail-closed paginated active-quest validation and
+  aggregation.
+- `quest_intake_runtime.py`: exact giver/dialogue/accept orchestration and
+  active-list postcondition.
+- `quest_giver.py`: conservative catalogue-giver to area-NPC matching.
 - `quest_director_policy.py` / `quest_director_runtime.py`: action-free quest
   scheduling policy and its observed state.
 - `navigation_runtime.py`: hunt target selection, compass child-window flow,
@@ -33,6 +38,7 @@ browser bundle reproducibility contract.
   battle items, victory exit, and return to hunt.
 - `resource_runtime.py`: health/prowess observations, resting, refresh, and
   between-battle recovery.
+- `resource_action_helpers.py`: isolated page-bridge resource polling helpers.
 - `controller_cli.py`: CLI commands and argument parsing only.
 - `runtime_helpers.py`: pure normalization and CV helper functions.
 - `runtime_constants.py`: shared runtime constants without behavior.
@@ -56,6 +62,8 @@ Editable page-bridge sources are ordered modules under
   opening actions.
 - `30_navigation_death.js`: page classification, compass routes, player state,
   death detection, and resurrection.
+- `35_npc_quests.js`: area NPC discovery and snapshot-bound quest dialogue
+  actions.
 - `40_state_layout_dispatch.js`: aggregate state, optional layout controls, and
   command dispatch.
 

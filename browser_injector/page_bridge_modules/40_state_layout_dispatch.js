@@ -54,12 +54,63 @@
     return directoryMatch ? `${directoryMatch[1]}${raw}` : raw;
   };
 
-  const questCatalogPageFromHref = (href) => {
+  const questPageFromHref = (href, expectedMode) => {
     const value = safeString(href, 500);
-    if (!/\/user_quest\.php(?:\?|$)/i.test(value) || !/[?&]mode=avail(?:&|$)/i.test(value)) return null;
+    const mode = safeString(expectedMode, 24).toLowerCase();
+    if (
+      !["avail", "started"].includes(mode) ||
+      !/\/user_quest\.php(?:\?|$)/i.test(value) ||
+      !new RegExp(`[?&]mode=${mode}(?:&|$)`, "i").test(value)
+    ) return null;
     const pageMatch = value.match(/[?&]page=(\d+)/i);
     const page = pageMatch ? parseInt(pageMatch[1], 10) : 0;
     return Number.isFinite(page) && page >= 0 ? page : null;
+  };
+
+  const questNavigatorTargetFromOnclick = (value) => {
+    const onclick = safeString(value, 500);
+    const match = onclick.match(/navigator\.php\?name=([^'"&]+)/i);
+    if (!match) return null;
+    const encoded = match[1].replace(/\+/g, " ");
+    try {
+      const bytes = [];
+      for (let index = 0; index < encoded.length; index += 1) {
+        if (encoded[index] === "%" && /^[0-9a-f]{2}$/i.test(encoded.slice(index + 1, index + 3))) {
+          bytes.push(parseInt(encoded.slice(index + 1, index + 3), 16));
+          index += 2;
+        } else {
+          const code = encoded.charCodeAt(index);
+          if (code > 255) return null;
+          bytes.push(code);
+        }
+      }
+      const Decoder = typeof TextDecoder === "function"
+        ? TextDecoder
+        : window && typeof window.TextDecoder === "function"
+          ? window.TextDecoder
+          : null;
+      if (!Decoder) return null;
+      return safeString(new Decoder("windows-1251").decode(new Uint8Array(bytes)), 180) || null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const questRussianStem = (value) => {
+    let token = safeString(value, 80).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
+    if (token.length < 4) return token;
+    token = token.replace(/(?:иями|ями|ами|ого|его|ому|ему|иях|ах|ях|ам|ям|ов|ев|ой|ый|ий|ая|яя|ую|юю|ом|ем|ым|им|а|я|у|ю|ы|и|е|о)$/u, "");
+    return token.length >= 3 ? token.replace(/[ьй]$/u, "") : safeString(value, 80).toLocaleLowerCase("ru-RU");
+  };
+
+  const questNameMatchesPhrase = (name, phrase) => {
+    const tokens = (value) => safeString(value, 300)
+      .toLocaleLowerCase("ru-RU")
+      .replace(/ё/g, "е")
+      .match(/[а-яa-z0-9]+/giu) || [];
+    const nameStems = tokens(name).map(questRussianStem).filter(Boolean);
+    const phraseStems = new Set(tokens(phrase).map(questRussianStem).filter(Boolean));
+    return nameStems.length > 0 && nameStems.every((stem) => phraseStems.has(stem));
   };
 
   const questSnapshot = (metadata = {}) => {
@@ -113,14 +164,18 @@
       if (seen.has(key)) return;
       seen.add(key);
       const routeElements = container.querySelectorAll ? questNavigatorLinks(container).slice(0, 30) : [];
-      const navigation = routeElements.map((element) => ({
-        text: questNavigatorLabel(element),
-        title: safeString(attr(element, "title"), 180),
-        href: safeQuestHref(attr(element, "href"), context.href),
-        onclick: safeString(attr(element, "onclick"), 300),
-      }));
+      const navigation = routeElements.map((element) => {
+        const onclick = safeString(attr(element, "onclick"), 300);
+        return {
+          text: questNavigatorLabel(element),
+          target: questNavigatorTargetFromOnclick(onclick),
+          title: safeString(attr(element, "title"), 180),
+          href: safeQuestHref(attr(element, "href"), context.href),
+          onclick,
+        };
+      });
       const routeLabels = new Set(navigation.map((entry) => safeString(entry.text, 180).toLowerCase()).filter(Boolean));
-      const giverLinks = container.querySelectorAll
+      const allGiverLinks = container.querySelectorAll
         ? Array.from(container.querySelectorAll("a[href*='/info/library/'],a[href*='info/library/']"))
             .map((element) => ({
               name: safeString(element.innerText || element.textContent, 180),
@@ -130,7 +185,6 @@
             .filter((entry, index, all) => all.findIndex((candidate) => candidate.name === entry.name && candidate.href === entry.href) === index)
             .slice(0, 10)
         : [];
-      const giverNames = giverLinks.map((entry) => entry.name);
       const descriptionElement = container.querySelector ? container.querySelector(".npc-quest-description") : null;
       const catalogDescription = safeString(descriptionElement && (descriptionElement.innerText || descriptionElement.textContent), 2000);
       const objectiveMarker = "Текущая цель:";
@@ -148,6 +202,12 @@
       const locationText = locationIndex >= 0
         ? safeString(rawText.slice(locationIndex + locationMarker.length), 600) || null
         : null;
+      const giverPhraseMatch = safeString(locationText, 600).match(/(?:^|[\s,])у\s+(.+?)(?:[.,;]|$)/iu);
+      const giverPhrase = safeString(giverPhraseMatch && giverPhraseMatch[1], 300);
+      const giverLinks = giverPhrase
+        ? allGiverLinks.filter((entry) => questNameMatchesPhrase(entry.name, giverPhrase))
+        : [];
+      const giverNames = giverLinks.map((entry) => entry.name);
       const objectiveEvidence = objective || catalogDescription;
       const objectiveKind = /(?:собра(?:ть|йте)|добы(?:ть|удьте)|принес(?:ти|ите)|получи(?:ть|те)|найти)/i.test(objectiveEvidence || "")
         ? "collect"
@@ -214,11 +274,11 @@
     };
     const currentPageMatch = context.href.match(/[?&]page=(\d+)/i);
     const currentPage = currentPageMatch ? parseInt(currentPageMatch[1], 10) : 0;
-    if (mode === "avail") appendCatalogPage(currentPage, context.href, true);
+    appendCatalogPage(currentPage, context.href, true);
     try {
       for (const link of Array.from(context.doc.querySelectorAll("a[href*='user_quest.php'][href*='page=']")).slice(0, 100)) {
         const href = safeQuestHref(attr(link, "href"), context.href);
-        const page = questCatalogPageFromHref(href);
+        const page = questPageFromHref(href, mode);
         if (page != null) appendCatalogPage(page, href, page === currentPage);
       }
     } catch (_) {}
@@ -578,6 +638,33 @@
         openQuestCatalog(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))
           .catch((error) => send(data.token, false, `open_quest_catalog_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "open_active_quest_page") {
+        openActiveQuestPage(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_active_quest_page_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "area_npc_snapshot") {
+        const result = areaNpcSnapshot(data.command.payload && data.command.payload.expectedName);
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "npc_dialog_snapshot") {
+        const result = npcDialogSnapshot(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "open_exact_npc") {
+        openExactNpc(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `open_exact_npc_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "npc_quest_action") {
+        const result = submitNpcQuestAction(data.command.payload || {});
+        send(data.token, Boolean(result.ok), result);
         return;
       }
       if (data.command.type === "layout") {

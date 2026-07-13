@@ -41,6 +41,17 @@ def test_control_api_live_requires_explicit_true() -> None:
     assert live_options.live is True
 
 
+def test_control_api_forwards_autonomous_quest_director_override() -> None:
+    api = AutomationControlApi(BrowserInjectorServer(port=0))
+
+    options = api._options_from_payload(  # noqa: SLF001
+        {"autonomousQuestDirector": True},
+        browser_client_id="client-a",
+    )
+
+    assert options.runtime_overrides["autonomousQuestDirector"] is True
+
+
 def test_control_api_rejects_string_live_flag() -> None:
     api = AutomationControlApi(BrowserInjectorServer(port=0))
 

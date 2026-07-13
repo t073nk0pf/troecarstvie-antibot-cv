@@ -528,7 +528,10 @@ def _apply_runtime_overrides(config: AutomationConfig, overrides: dict[str, obje
     if "autoNavigateQuestTargets" in overrides:
         leveling["auto_navigate_quest_targets"] = bool(overrides.get("autoNavigateQuestTargets"))
     if "autonomousQuestDirector" in overrides:
-        leveling["autonomous_quest_director"] = bool(overrides.get("autonomousQuestDirector"))
+        autonomous_quest_director = bool(overrides.get("autonomousQuestDirector"))
+        leveling["autonomous_quest_director"] = autonomous_quest_director
+        if autonomous_quest_director:
+            leveling["enabled"] = True
 
     return AutomationConfig.from_dict(data)
 

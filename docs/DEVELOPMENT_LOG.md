@@ -1,5 +1,26 @@
 # Development Log
 
+## 2026-07-13 - Exact NPC Quest Intake And Live Acceptance
+
+- Added a dedicated NPC quest bridge module with fail-closed area-NPC and
+  dialogue snapshots. Every mutation is bound to fresh location, NPC, quest,
+  action, and snapshot evidence and performs at most one click.
+- Added full pagination for `mode=started`, a fail-closed active-catalogue
+  accumulator, conservative Russian giver-name resolution, and an autonomous
+  intake runtime that acknowledges acceptance only after the numeric quest ID
+  appears in a fresh complete active catalogue.
+- Fixed quest-route handoff through the compass and explicit area reopening so
+  the director can travel from catalogue pages to the intended giver.
+- Live bridge v46 parsed 42 available and 23 active quests, selected quest 187
+  `Заблудшие враги`, travelled to `Лес призраков`, clicked the
+  exact `Взять задание` button, and confirmed active count 24 plus
+  `quest_accept_confirmed` without manual game input.
+- Aligned the generated bridge, content script, background worker, and Python
+  broker at `2026-07-13-npc-proxy-v46`; extension version is `0.3.15`.
+- Validation: full `424 passed` regression suite, JavaScript syntax, Python
+  compilation, deterministic six-module bridge build, authored-source line
+  limits, and `git diff --check` passed.
+
 ## 2026-07-13 - Global Quest Catalogue And Autonomous Director Slice
 
 - Inspected the authenticated global catalogue at

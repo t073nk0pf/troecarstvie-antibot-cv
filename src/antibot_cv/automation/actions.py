@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from src.antibot_cv.automation.browser_injector import global_browser_injector
+from src.antibot_cv.automation.resource_action_helpers import (
+    refresh_resource_source_after_use,
+    resource_percent_from_open_result,
+    wait_resource_percent_after_use,
+)
 from src.antibot_cv.automation.safety import SafetyGuard
 from src.antibot_cv.automation.session import SessionState
 from src.antibot_cv.viewport.coordinates import Point
@@ -507,6 +512,165 @@ class LiveMacActionSink:
             )
             return False
 
+        if request.action_type == "open_active_quest_page":
+            metadata = dict(request.metadata or {})
+            raw_page = metadata.get("page", 0)
+            page = int(raw_page) if isinstance(raw_page, int) and not isinstance(raw_page, bool) else -1
+            if page < 0 or page > 100:
+                _log_action(
+                    self.logger,
+                    "action_blocked",
+                    request,
+                    block_reason="quest_active_page_invalid",
+                )
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_active_quest_page",
+                {"page": page, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
+                timeout_s=5.5,
+            )
+            result_metadata = {
+                **metadata,
+                "page": page,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            if result.ok:
+                _log_action(self.logger, "open_active_quest_page_requested", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_active_quest_page_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "open_exact_npc":
+            metadata = dict(request.metadata or {})
+            expected_snapshot_id = str(metadata.get("expected_snapshot_id") or "").strip()
+            expected_location_id = str(metadata.get("expected_location_id") or "").strip()
+            npc_id = str(metadata.get("npc_id") or "").strip()
+            expected_name = str(metadata.get("expected_name") or "").strip()
+            expected_dialog_name = str(metadata.get("expected_dialog_name") or expected_name).strip()
+            valid = (
+                expected_snapshot_id.startswith("area-npcs-")
+                and 0 < len(expected_snapshot_id) <= 120
+                and 0 < len(expected_location_id) <= 80
+                and npc_id.isdecimal()
+                and int(npc_id) > 0
+                and 0 < len(expected_name) <= 180
+                and 0 < len(expected_dialog_name) <= 180
+            )
+            if not valid:
+                _log_action(self.logger, "action_blocked", request, block_reason="npc_identity_invalid")
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_exact_npc",
+                {
+                    "expectedSnapshotId": expected_snapshot_id,
+                    "expectedLocationId": expected_location_id,
+                    "npcId": npc_id,
+                    "expectedName": expected_name,
+                    "expectedDialogName": expected_dialog_name,
+                    "verifyTimeoutMs": 2500,
+                    "commandTimeoutMs": 5500,
+                },
+                timeout_s=6.0,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and parsed and parsed.get("message") == "npc_opened_confirmed":
+                _log_action(self.logger, "exact_npc_opened", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_exact_npc_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "npc_quest_action":
+            metadata = dict(request.metadata or {})
+            expected_snapshot_id = str(metadata.get("expected_snapshot_id") or "").strip()
+            npc_id = str(metadata.get("npc_id") or "").strip()
+            quest_id = str(metadata.get("quest_id") or "").strip()
+            expected_title = str(metadata.get("expected_title") or "").strip()
+            action = str(metadata.get("action") or "").strip().lower()
+            expected_ref = str(metadata.get("expected_ref") or "").strip()
+            expected_text = str(metadata.get("expected_text") or "").strip()
+            valid = (
+                expected_snapshot_id.startswith("npc-dialog-")
+                and 0 < len(expected_snapshot_id) <= 120
+                and npc_id.isdecimal()
+                and int(npc_id) > 0
+                and quest_id.isdecimal()
+                and int(quest_id) > 0
+                and 0 < len(expected_title) <= 220
+                and action in {"open", "answer", "accept"}
+                and (
+                    action == "open"
+                    or (
+                        0 < len(expected_text) <= 1200
+                        and (
+                            action == "accept"
+                            or (expected_ref.isdecimal() and int(expected_ref) > 0)
+                        )
+                    )
+                )
+            )
+            if not valid:
+                _log_action(self.logger, "action_blocked", request, block_reason="npc_quest_action_invalid")
+                return False
+            result = self._execute_injector(
+                global_browser_injector(),
+                "npc_quest_action",
+                {
+                    "expectedSnapshotId": expected_snapshot_id,
+                    "npcId": npc_id,
+                    "questId": quest_id,
+                    "expectedTitle": expected_title,
+                    "action": action,
+                    "expectedRef": expected_ref if action == "answer" else None,
+                    "expectedText": expected_text if action in {"answer", "accept"} else None,
+                },
+                timeout_s=3.0,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            try:
+                parsed = json.loads(result.message)
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and isinstance(parsed, dict) and parsed.get("message") == "npc_quest_action_submitted":
+                _log_action(self.logger, "npc_quest_action_submitted", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_npc_quest_action_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
         if request.action_type == "open_quest_navigator":
             metadata = dict(request.metadata or {})
             result = self._execute_injector(
@@ -728,26 +892,32 @@ class LiveMacActionSink:
                 and result.message == "injector_ack_timeout"
                 and self.browser_client_id
             ):
-                confirmation = self._execute_injector(
-                    injector,
-                    "location_route_snapshot",
-                    {},
-                    timeout_s=2.5,
-                    client_id_override=self.browser_client_id,
-                )
-                try:
-                    confirmation_candidate = json.loads(confirmation.message)
-                    confirmation_parsed = (
-                        confirmation_candidate if isinstance(confirmation_candidate, dict) else None
+                confirmation = None
+                confirmation_parsed = None
+                route_confirmation_reason = "parent_route_after_unconfirmed"
+                for attempt in range(20):
+                    confirmation = self._execute_injector(
+                        injector,
+                        "location_route_snapshot",
+                        {},
+                        timeout_s=2.5,
+                        client_id_override=self.browser_client_id,
                     )
-                except json.JSONDecodeError:
-                    confirmation_parsed = None
-                route_confirmation_reason = _route_confirmation_reason(
-                    parent_route_before,
-                    confirmation_parsed if confirmation.ok else None,
-                    expected_transitions,
-                )
-                if route_confirmation_reason == "confirmed_changed_connected_route":
+                    confirmation_parsed = _parse_injector_dict(confirmation.message) if confirmation.ok else None
+                    route_confirmation_reason = _route_confirmation_reason(
+                        parent_route_before,
+                        confirmation_parsed,
+                        expected_transitions,
+                    )
+                    if route_confirmation_reason != "parent_route_after_unconfirmed":
+                        break
+                    if attempt < 19:
+                        time.sleep(0.2)
+                assert confirmation is not None
+                if route_confirmation_reason in {
+                    "confirmed_changed_connected_route",
+                    "confirmed_connected_route_after_unconfirmed_before",
+                }:
                     confirmed_metadata = {
                         **result_metadata,
                         "route_confirmation": "parent_route_snapshot_after_ack_timeout",
@@ -921,7 +1091,7 @@ class LiveMacActionSink:
                                 attempts.append(attempt)
                                 kind_reason = str(parsed.get("message") or "open_failed")
                                 break
-                            percent_before = _resource_percent_from_open_result(parsed, percent_key)
+                            percent_before = resource_percent_from_open_result(parsed, percent_key)
                             if percent_before is not None:
                                 attempt["percent_before"] = percent_before
                             if restore_percent > 0:
@@ -930,7 +1100,7 @@ class LiveMacActionSink:
                                 attempt["confirm_skipped"] = "not_required"
                                 if between_items_delay_s:
                                     time.sleep(between_items_delay_s)
-                                refresh_result = _refresh_resource_source_after_use(
+                                refresh_result = refresh_resource_source_after_use(
                                     injector,
                                     client_id=self.browser_client_id,
                                 )
@@ -939,7 +1109,7 @@ class LiveMacActionSink:
                                     attempt["resource_refresh_message"] = _compact_injector_message(
                                         refresh_result.message
                                     )
-                                percent_after = _wait_resource_percent_after_use(
+                                percent_after = wait_resource_percent_after_use(
                                     injector,
                                     percent_key,
                                     percent_before,
@@ -979,7 +1149,7 @@ class LiveMacActionSink:
                     if confirm_result.ok:
                         if between_items_delay_s:
                             time.sleep(between_items_delay_s)
-                        refresh_result = _refresh_resource_source_after_use(
+                        refresh_result = refresh_resource_source_after_use(
                             injector,
                             client_id=self.browser_client_id,
                         )
@@ -988,7 +1158,7 @@ class LiveMacActionSink:
                             attempt["resource_refresh_message"] = _compact_injector_message(
                                 refresh_result.message
                             )
-                        percent_after = _wait_resource_percent_after_use(
+                        percent_after = wait_resource_percent_after_use(
                             injector,
                             percent_key,
                             attempt.get("percent_before"),
@@ -1209,10 +1379,7 @@ def _route_confirmation_reason(
         or expected_transitions <= 0
     ):
         return "expected_transition_count_invalid"
-    before_fingerprint = _route_snapshot_fingerprint(before)
     after_fingerprint = _route_snapshot_fingerprint(after)
-    if before_fingerprint is None:
-        return "parent_route_before_unconfirmed"
     if after_fingerprint is None:
         return "parent_route_after_unconfirmed"
     current_location_id, target_location_id, found_path, next_location_id = after_fingerprint
@@ -1226,6 +1393,9 @@ def _route_confirmation_reason(
         return "parent_route_destination_disconnected"
     if next_location_id != found_path[0]:
         return "parent_route_next_transition_disconnected"
+    before_fingerprint = _route_snapshot_fingerprint(before)
+    if before_fingerprint is None:
+        return "confirmed_connected_route_after_unconfirmed_before"
     if after_fingerprint == before_fingerprint:
         return "parent_route_unchanged_after_go"
     return "confirmed_changed_connected_route"
@@ -1275,91 +1445,6 @@ def _copy_request(request: ActionRequest, *, metadata: dict[str, object]) -> Act
         scan_direction=request.scan_direction,
         metadata=metadata,
     )
-
-
-def _resource_percent_from_open_result(parsed: dict[str, object], percent_key: str) -> float | None:
-    resources = parsed.get("resources")
-    if not isinstance(resources, dict):
-        return None
-    value = resources.get(percent_key)
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _resource_percent_from_snapshot(
-    injector: object,
-    percent_key: str,
-    *,
-    client_id: str | None = None,
-) -> float | None:
-    try:
-        kwargs: dict[str, object] = {"timeout_s": 2.5}
-        if client_id:
-            kwargs["client_id"] = client_id
-        result = injector.execute("resource_snapshot", **kwargs)  # type: ignore[attr-defined]
-    except Exception:
-        return None
-    if not getattr(result, "ok", False):
-        return None
-    try:
-        parsed = json.loads(str(getattr(result, "message", "")))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    value = parsed.get(percent_key)
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _wait_resource_percent_after_use(
-    injector: object,
-    percent_key: str,
-    previous_percent: object | None,
-    *,
-    client_id: str | None = None,
-    timeout_s: float = 3.0,
-    interval_s: float = 0.5,
-) -> float | None:
-    deadline = time.monotonic() + max(0.0, timeout_s)
-    try:
-        previous = None if previous_percent is None else float(previous_percent)
-    except (TypeError, ValueError):
-        previous = None
-    last_seen: float | None = None
-    while True:
-        current = _resource_percent_from_snapshot(injector, percent_key, client_id=client_id)
-        if current is not None:
-            last_seen = current
-            if previous is not None and current > previous:
-                return current
-            if previous is None:
-                return current
-        if time.monotonic() >= deadline:
-            return last_seen
-        time.sleep(max(0.05, interval_s))
-
-
-def _refresh_resource_source_after_use(
-    injector: object,
-    *,
-    client_id: str | None = None,
-) -> object | None:
-    try:
-        kwargs: dict[str, object] = {"timeout_s": 2.5}
-        if client_id:
-            kwargs["client_id"] = client_id
-        return injector.execute("resource_refresh", **kwargs)  # type: ignore[attr-defined]
-    except Exception:
-        return None
 
 
 def _log_action(logger: object | None, event_type: str, request: ActionRequest, **extra: object) -> None:

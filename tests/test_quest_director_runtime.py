@@ -33,6 +33,18 @@ def catalog_page(page: int, count: int, *items: dict[str, object]) -> dict[str, 
     }
 
 
+def active_page(page: int, count: int, *items: dict[str, object]) -> dict[str, object]:
+    return {
+        "loadStatus": "loaded",
+        "mode": "started",
+        "currentPage": page,
+        "pageCount": count,
+        "hasNextPage": page + 1 < count,
+        "items": list(items),
+        "truncated": False,
+    }
+
+
 def test_catalog_refresh_builds_intake_queue_across_every_page() -> None:
     runtime = QuestDirectorRuntime()
     assert runtime.decision().intent is QuestDirectorIntent.REFRESH_AVAILABLE
@@ -58,12 +70,46 @@ def test_accept_ack_requires_queue_head_and_active_observation_controls_executio
     assert runtime.decision().intent is QuestDirectorIntent.ACCEPT_QUEST
 
     with pytest.raises(RuntimeError, match="queue head"):
-        runtime.acknowledge_accept("2")
-    runtime.acknowledge_accept("1")
-    runtime.acknowledge_accept("2")
+        runtime.begin_accept("2")
+    runtime.begin_accept("1")
+    runtime.invalidate_active_snapshot()
+    assert runtime.decision().intent is QuestDirectorIntent.WAIT
+    assert [quest.id for quest in runtime.intake_queue] == ["1", "2"]
+    with pytest.raises(RuntimeError, match="fresh active"):
+        runtime.acknowledge_accept("1")
     runtime.observe_active([{"id": "1", "title": "Quest 1", "status": "active"}])
+    runtime.acknowledge_accept("1")
 
-    assert runtime.decision().intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    next_decision = runtime.decision()
+    assert next_decision.intent is QuestDirectorIntent.ACCEPT_QUEST
+    assert next_decision.quest is not None and next_decision.quest.id == "2"
+
+
+def test_paginated_active_refresh_is_not_fresh_until_terminal_page() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_active_refresh()
+
+    assert runtime.ingest_active_page(active_page(0, 2, {"id": "1", "title": "Quest 1", "status": "active"})) == 1
+    assert runtime.active_snapshot_fresh is False
+    assert runtime.ingest_active_page(active_page(1, 2, {"id": "2", "title": "Quest 2", "status": "active"})) is None
+    assert runtime.active_snapshot_fresh is True
+    assert [quest.id for quest in runtime.active_quests] == ["1", "2"]
+
+
+def test_accept_ack_rejects_missing_or_wrong_active_quest_without_losing_queue() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1, available("1", 0)))
+    runtime.observe_active([])
+    runtime.decision()
+    runtime.begin_accept("1")
+    runtime.invalidate_active_snapshot()
+    runtime.observe_active([])
+
+    with pytest.raises(RuntimeError, match="missing from active"):
+        runtime.acknowledge_accept("1")
+    assert [quest.id for quest in runtime.intake_queue] == ["1"]
+    assert runtime.pending_accept is not None
 
 
 def test_farming_requires_fresh_empty_catalogue_and_refreshes_after_five_completions() -> None:

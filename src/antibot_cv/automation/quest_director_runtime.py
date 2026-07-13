@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from src.antibot_cv.automation.quest_active_catalog import ActiveQuestCatalogAccumulator
 from src.antibot_cv.automation.quest_catalog import QuestCatalogAccumulator
 from src.antibot_cv.automation.quest_director_policy import (
     QuestDirectorDecision,
     QuestDirectorPolicy,
     QuestDirectorState,
     QuestRef,
+    QuestDirectorIntent,
 )
 
 
@@ -17,6 +19,7 @@ class QuestDirectorRuntime:
     def __init__(self, *, refresh_every_completed: int = 5, catalog_max_pages: int = 20) -> None:
         self.policy = QuestDirectorPolicy(refresh_every_completed=refresh_every_completed)
         self.catalog = QuestCatalogAccumulator(max_pages=catalog_max_pages)
+        self.active_catalog = ActiveQuestCatalogAccumulator(max_pages=catalog_max_pages)
         self.discovery_initialized = False
         self.available_snapshot_fresh = False
         self.active_snapshot_fresh = False
@@ -25,8 +28,16 @@ class QuestDirectorRuntime:
         self.active_quests: tuple[QuestRef, ...] = ()
         self.available_quests: tuple[QuestRef, ...] = ()
         self.intake_queue: tuple[QuestRef, ...] = ()
+        self.pending_accept: QuestRef | None = None
 
     def decision(self) -> QuestDirectorDecision:
+        if self.pending_accept is not None:
+            return QuestDirectorDecision(
+                QuestDirectorIntent.WAIT,
+                "quest_accept_in_progress",
+                quest=self.pending_accept,
+                intake_queue=self.intake_queue,
+            )
         result = self.policy.decide(self.snapshot())
         self.intake_queue = result.intake_queue
         return result
@@ -44,6 +55,8 @@ class QuestDirectorRuntime:
         )
 
     def begin_catalog_refresh(self) -> None:
+        if self.pending_accept is not None:
+            raise RuntimeError("cannot refresh catalogue during quest acceptance")
         self.catalog.reset()
         self.available_snapshot_fresh = False
         self.active_snapshot_fresh = False
@@ -88,11 +101,45 @@ class QuestDirectorRuntime:
         self.active_quests = tuple(refs)
         self.active_snapshot_fresh = True
 
-    def acknowledge_accept(self, quest_id: str) -> None:
+    def begin_active_refresh(self) -> None:
+        self.active_catalog.reset()
+        self.active_snapshot_fresh = False
+
+    def ingest_active_page(self, data: object) -> int | None:
+        result = self.active_catalog.ingest(data)
+        if result is None:
+            return self.active_catalog.next_page
+        self.active_quests = tuple(QuestRef(entry.id, entry.title) for entry in result)
+        self.active_snapshot_fresh = True
+        return None
+
+    def begin_accept(self, quest_id: str) -> QuestRef:
+        if self.pending_accept is not None:
+            raise RuntimeError("quest acceptance is already in progress")
+        if not self.available_snapshot_fresh or not self.active_snapshot_fresh:
+            raise RuntimeError("quest acceptance requires fresh snapshots")
         if not self.intake_queue or self.intake_queue[0].id != quest_id:
             raise RuntimeError("accepted quest does not match intake queue head")
+        self.pending_accept = self.intake_queue[0]
+        return self.pending_accept
+
+    def invalidate_active_snapshot(self) -> None:
+        self.active_snapshot_fresh = False
+
+    def acknowledge_accept(self, quest_id: str) -> None:
+        pending = self.pending_accept
+        if pending is None or pending.id != quest_id:
+            raise RuntimeError("accepted quest does not match pending acceptance")
+        if not self.intake_queue or self.intake_queue[0].id != quest_id:
+            raise RuntimeError("accepted quest does not match intake queue head")
+        if not self.active_snapshot_fresh:
+            raise RuntimeError("accepted quest requires fresh active snapshot")
+        confirmed = next((quest for quest in self.active_quests if quest.id == quest_id), None)
+        if confirmed is None or _normalized_title(confirmed.title) != _normalized_title(pending.title):
+            raise RuntimeError("accepted quest is missing from active snapshot")
         self.intake_queue = self.intake_queue[1:]
         self.available_quests = tuple(quest for quest in self.available_quests if quest.id != quest_id)
+        self.pending_accept = None
 
     def mark_quest_completed(self, quest_id: str) -> None:
         if not any(quest.id == quest_id for quest in self.active_quests):
@@ -102,3 +149,7 @@ class QuestDirectorRuntime:
 
     def expire_available_snapshot(self) -> None:
         self.available_snapshot_fresh = False
+
+
+def _normalized_title(value: str) -> str:
+    return " ".join(str(value or "").casefold().split())

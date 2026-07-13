@@ -1,4 +1,4 @@
-  const BRIDGE_VERSION = "2026-07-13-quest-catalog-v38";
+  const BRIDGE_VERSION = "2026-07-13-npc-proxy-v46";
   const CONTENT_SOURCE = `antibot-cv-content:${BRIDGE_VERSION}`;
   const INJECTOR_SOURCE = `antibot-cv-injector:${BRIDGE_VERSION}`;
 

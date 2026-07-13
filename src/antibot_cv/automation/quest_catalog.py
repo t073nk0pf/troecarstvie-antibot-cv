@@ -160,7 +160,7 @@ def _parse_entry(raw: object, page: int) -> QuestCatalogEntry:
 
 def _quest_location(raw: dict[str, object], navigation: tuple[dict[str, object], ...]) -> str | None:
     for entry in navigation:
-        label = _optional_string(entry.get("text") or entry.get("title"))
+        label = _optional_string(entry.get("target") or entry.get("text") or entry.get("title"))
         if label:
             return label
     return _optional_string(raw.get("locationText"))

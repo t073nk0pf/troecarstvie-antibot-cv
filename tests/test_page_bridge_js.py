@@ -641,12 +641,16 @@ const cancel = {
   getAttribute(name) { return name === "href" ? "user_quest.php?action=cancel&ref=91" : null; },
   closest(selector) { return selector === "table" ? container : null; },
 };
+const activePageLink = {
+  getAttribute(name) { return name === "href" ? "user_quest.php?mode=started&page=1" : null; },
+};
 const document = {
   title: "Квесты",
   body: { innerText: `Взятые Повторяющиеся Доступные Завершенные ${container.innerText}`, textContent: `Взятые Повторяющиеся Доступные Завершенные ${container.textContent}` },
   querySelector() { return null; },
   querySelectorAll(selector) {
     if (selector.includes("action=cancel")) return [cancel];
+    if (selector.includes("user_quest.php") && selector.includes("page=")) return [activePageLink];
     if (selector === "*") return [];
     return [];
   },
@@ -672,6 +676,8 @@ const section = result.sections.quests;
 assert.strictEqual(section.data.loadStatus, "loaded");
 assert.strictEqual(section.data.snapshotId, result.snapshotId);
 assert.strictEqual(section.data.activeCount, 1);
+assert.strictEqual(section.data.pageCount, 2);
+assert.strictEqual(section.data.hasNextPage, true);
 assert.strictEqual(section.data.items[0].id, "91");
 assert.strictEqual(section.data.items[0].status, "active");
 assert.strictEqual(section.data.items[0].objectiveKind, "combat");
@@ -868,11 +874,21 @@ setImmediate(() => {
   assert.strictEqual(opened.after.mode, "avail");
   assert.strictEqual(opened.after.page, 2);
   listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`, token: "active-open",
+    command: { type: "open_active_quest_page", payload: { page: 1, verifyTimeoutMs: 250 } },
+  } });
+  setImmediate(() => {
+  const active = JSON.parse(messages[1].message);
+  assert.strictEqual(active.ok, true);
+  assert.strictEqual(active.message, "quest_active_opened_confirmed");
+  assert.strictEqual(active.after.mode, "started");
+  assert.strictEqual(active.after.page, 1);
+  listeners.message({ source: root, data: {
     source: `antibot-cv-content:${version}`, token: "catalog-invalid",
     command: { type: "open_quest_catalog", payload: { page: 101 } },
   } });
   setImmediate(() => {
-    const rejected = JSON.parse(messages[1].message);
+    const rejected = JSON.parse(messages[2].message);
     assert.strictEqual(rejected.ok, false);
     assert.strictEqual(rejected.message, "quest_catalog_page_invalid");
     for (const invalidPage of ["2", null, true]) {
@@ -882,14 +898,236 @@ setImmediate(() => {
       } });
     }
     setImmediate(() => {
-      for (const message of messages.slice(2)) {
+      for (const message of messages.slice(3)) {
         const invalid = JSON.parse(message.message);
         assert.strictEqual(invalid.ok, false);
         assert.strictEqual(invalid.message, "quest_catalog_page_invalid");
       }
     });
   });
+  });
 });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_only_snapshot_bound_exact_npc() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let clicks = 0;
+let questClicks = 0;
+let answerClicks = 0;
+let acceptClicks = 0;
+const shell = {};
+const npcElement = {
+  tagName: "SPAN",
+  innerText: "Моряк Кентур",
+  textContent: "Моряк Кентур",
+  offsetWidth: 40,
+  offsetHeight: 20,
+  getClientRects() { return [{ width: 40, height: 20 }]; },
+  getAttribute(name) {
+    if (name === "title") return "Моряк Кентур";
+    if (name === "data-id") return "6";
+    if (name === "data-index") return "0";
+    return null;
+  },
+  click() {
+    clicks += 1;
+    root.location.href = "https://3kingdoms.ru/npc.php?action=enter&ref=540&secret-token";
+    root.document = npcDocument;
+  },
+};
+const areaDocument = {
+  title: "Порт",
+  readyState: "complete",
+  body: { innerText: "Порт безбрежного моря\nЦарство: Свет", textContent: "Порт безбрежного моря Царство: Свет" },
+  querySelector(selector) {
+    if (selector === ".b-control-area__list,.b-control-area") return shell;
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector === ".b-control-area__list-item.npc") return [npcElement];
+    return [];
+  },
+};
+const header = { innerText: "Моряк Кентур", textContent: "Моряк Кентур" };
+const questContainer = { innerText: "Письмо моряку Далее", textContent: "Письмо моряку Далее" };
+const questAction = {
+  tagName: "A", innerText: "Далее", textContent: "Далее", disabled: false,
+  getAttribute(name) {
+    if (name === "href") return "npc.php?f_id=6&npc_id=75&global_npc=0&quest_id=314&secret";
+    return null;
+  },
+  getClientRects() { return [{ width: 20, height: 10 }]; },
+  closest() { return questContainer; },
+  click() {
+    questClicks += 1;
+    root.location.href = "https://3kingdoms.ru/npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400";
+    root.document = detailDocument;
+  },
+};
+const detailTitle = { innerText: "Письмо моряку", textContent: "Письмо моряку" };
+const answerAction = {
+  tagName: "TABLE",
+  innerText: "Я доставлю письмо.",
+  textContent: "Я доставлю письмо.",
+  disabled: false,
+  getAttribute(name) {
+    if (name === "onclick") return "location.href='npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401&secret'";
+    return null;
+  },
+  getClientRects() { return [{ width: 100, height: 30 }]; },
+  closest() { return this; },
+  click() {
+    answerClicks += 1;
+    root.location.href = "https://3kingdoms.ru/npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401";
+    root.document = terminalDocument;
+  },
+};
+const acceptImage = {
+  getAttribute(name) { return name === "alt" ? "Взять задание" : null; },
+};
+const acceptForm = {
+  action: "npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=done&secret",
+  getAttribute(name) { return name === "action" ? this.action : null; },
+};
+const acceptButton = {
+  tagName: "BUTTON", innerText: "", textContent: "", disabled: false, form: acceptForm,
+  getAttribute() { return null; },
+  getClientRects() { return [{ width: 100, height: 30 }]; },
+  querySelector(selector) { return selector === "img[alt]" ? acceptImage : null; },
+  closest() { return acceptForm; },
+  click() { acceptClicks += 1; },
+};
+const terminalDocument = {
+  title: "Письмо моряку",
+  readyState: "complete",
+  body: { innerText: "Письмо моряку Моряк Кентур Ваша цель: доставить письмо", textContent: "" },
+  querySelectorAll(selector) {
+    if (selector === "h2") return [header, detailTitle];
+    if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [acceptButton];
+    return [];
+  },
+};
+const detailDocument = {
+  title: "Письмо моряку",
+  readyState: "complete",
+  body: { innerText: "Письмо моряку Моряк Кентур Я доставлю письмо.", textContent: "" },
+  querySelectorAll(selector) {
+    if (selector === "h2") return [header, detailTitle];
+    if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [answerAction];
+    return [];
+  },
+};
+const npcDocument = {
+  title: "Моряк Кентур",
+  readyState: "complete",
+  body: { innerText: "Моряк Кентур", textContent: "Моряк Кентур" },
+  querySelectorAll(selector) {
+    if (selector === "h2") return [header];
+    if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [questAction];
+    return [];
+  },
+};
+const root = {
+  name: "top",
+  location: { href: "https://3kingdoms.ru/area.php?location_id=125" },
+  frames: [],
+  document: areaDocument,
+  area: { model: { area: { title: "Порт безбрежного моря" } }, controller: { compass: { data: { location: 125 } } } },
+  setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout });
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`, token: `${type}-token`, command: { type, payload },
+  } });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+;(async () => {
+  const observed = await command("area_npc_snapshot", { expectedName: "Моряк Кентур" });
+  assert.strictEqual(observed.ok, true);
+  assert.strictEqual(observed.message.location.id, "125");
+  assert.strictEqual(observed.message.items[0].actionable, true);
+
+  const stale = await command("open_exact_npc", {
+    expectedSnapshotId: "wrong", expectedLocationId: "125", npcId: "6", expectedName: "Моряк Кентур",
+  });
+  assert.strictEqual(stale.ok, false);
+  assert.strictEqual(stale.message.message, "area_npc_snapshot_stale");
+  assert.strictEqual(clicks, 0);
+
+  const opened = await command("open_exact_npc", {
+    expectedSnapshotId: observed.message.snapshotId,
+    expectedLocationId: "125",
+    npcId: "6",
+    expectedName: "Моряк Кентур",
+    expectedDialogName: "Моряка Кентура",
+    verifyTimeoutMs: 250,
+  });
+  assert.strictEqual(opened.ok, true);
+  assert.strictEqual(opened.message.message, "npc_opened_confirmed");
+  assert.strictEqual(clicks, 1);
+  assert.strictEqual(opened.message.observed.identityMatches, true);
+  assert.strictEqual(opened.message.observed.questActions[0].questId, "314");
+
+  const submitted = await command("npc_quest_action", {
+    expectedSnapshotId: opened.message.observed.snapshotId,
+    npcId: "6",
+    questId: "314",
+    expectedTitle: "Письмо моряку",
+    action: "open",
+  });
+  assert.strictEqual(submitted.ok, true);
+  assert.strictEqual(submitted.message.message, "npc_quest_action_submitted");
+  assert.strictEqual(questClicks, 1);
+
+  const detail = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  assert.strictEqual(detail.ok, true);
+  assert.strictEqual(detail.message.dialogActions.length, 1);
+  assert.strictEqual(detail.message.dialogActions[0].ref, "401");
+  const answered = await command("npc_quest_action", {
+    expectedSnapshotId: detail.message.snapshotId,
+    npcId: "6",
+    questId: "314",
+    expectedTitle: "Письмо моряку",
+    action: "answer",
+    expectedRef: "401",
+    expectedText: "Я доставлю письмо.",
+  });
+  assert.strictEqual(answered.ok, true);
+  assert.strictEqual(answerClicks, 1);
+  const terminal = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  assert.strictEqual(terminal.message.acceptActions.length, 1);
+  assert.strictEqual(terminal.message.acceptActions[0].text, "Взять задание");
+  const accepted = await command("npc_quest_action", {
+    expectedSnapshotId: terminal.message.snapshotId,
+    npcId: "6",
+    questId: "314",
+    expectedTitle: "Письмо моряку",
+    action: "accept",
+    expectedText: "Взять задание",
+  });
+  assert.strictEqual(accepted.ok, true);
+  assert.strictEqual(acceptClicks, 1);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
 
@@ -1059,6 +1297,7 @@ const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
 const messages = [];
 const listeners = {};
 let goClicks = 0;
+const timers = [];
 
 function input(attributes, value, visible = true) {
   return {
@@ -1085,6 +1324,7 @@ const root = {
     querySelectorAll(selector) { return selector === "input,button" ? [compass, go] : []; },
   },
   getComputedStyle() { return { display: "block", visibility: "visible" }; },
+  setTimeout(callback, delay) { timers.push({ callback, delay }); },
   addEventListener(type, callback) { listeners[type] = callback; },
   removeEventListener() {},
   postMessage(message) { messages.push(message); },
@@ -1092,7 +1332,7 @@ const root = {
 root.top = root;
 root.window = root;
 
-vm.runInNewContext(source, { window: root, console });
+vm.runInNewContext(source, { window: root, console, setTimeout: root.setTimeout });
 
 function command(type, payload = {}) {
   messages.length = 0;
@@ -1125,6 +1365,10 @@ assert.strictEqual(goClicks, 0);
 const submitted = command("navigator_go", { expectedTarget: "Дикий предел" });
 assert.strictEqual(submitted.ok, true);
 assert.strictEqual(submitted.message.submitted, true);
+assert.strictEqual(submitted.message.message, "navigator_go_scheduled");
+assert.strictEqual(goClicks, 0);
+assert.strictEqual(timers.length, 1);
+timers[0].callback();
 assert.strictEqual(goClicks, 1);
 """
     result = subprocess.run(

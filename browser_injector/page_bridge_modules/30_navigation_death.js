@@ -2,6 +2,7 @@
     const value = safeString(href, 240).toLowerCase();
     if (/\/fight\.php(?:\?|$)/.test(value)) return "battle";
     if (/\/hunt\.php(?:\?|$)/.test(value)) return "hunt";
+    if (/\/npc\.php(?:\?|$)/.test(value)) return "npc";
     if (/user_quest\.php/.test(value)) return "quests";
     if (/user\.php/.test(value) && /(?:backpack|inventory)/.test(value)) return "inventory";
     if (/(?:market|shop|trade|auction|merchant)/.test(value)) return "shop";
@@ -126,8 +127,13 @@
     if (!button || typeof button.click !== "function") {
       return { ok: false, message: "navigator_go_not_clickable", before };
     }
-    button.click();
-    return { ok: true, message: "navigator_go_submitted", submitted: true, before };
+    const clickDelayMs = Math.max(25, Math.min(250, Number(payload && payload.clickDelayMs) || 75));
+    setTimeout(() => {
+      try {
+        button.click();
+      } catch (_) {}
+    }, clickDelayMs);
+    return { ok: true, message: "navigator_go_scheduled", submitted: true, clickDelayMs, before };
   };
 
   const navigatorSectionHeader = (element) => {

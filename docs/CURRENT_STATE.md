@@ -24,8 +24,8 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-quest-catalog-v38`
-- Chrome extension version: `0.3.7`
+- Chrome bridge version: `2026-07-13-npc-proxy-v46`
+- Chrome extension version: `0.3.15`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -54,8 +54,12 @@ leveling product.
   pages with stable numeric IDs, descriptions, rewards, locations, and quest
   givers. The autonomous director builds a deduplicated accept-all queue,
   refreshes after five completed quests, and permits profit farming only after
-  a fresh empty active/available observation. NPC acceptance is still a safe
-  stop boundary and the autonomous mode remains disabled by default.
+  a fresh empty active/available observation.
+- Exact NPC quest intake is implemented as a snapshot-bound action chain:
+  resolve one area NPC, open the matching quest, click the exact
+  `Взять задание` control, and re-read every active-quest page before
+  acknowledging success. Ambiguous names, IDs, controls, or stale snapshots
+  fail closed. Autonomous mode remains disabled by default.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
@@ -106,13 +110,21 @@ All nine required phases were recorded in order under recovery ID
 paid action was recorded. This is the first of the three consecutive natural
 recoveries required by the formal M1 exit gate.
 
+The 2026-07-13 quest-intake live run on bridge v46 parsed 42 available quests
+and 23 active quests across three pages each. It selected quest `187`
+`Заблудшие враги`, travelled to `Лес призраков`, resolved
+`Хранителя леса Франка` to the unique clickable `Дом Франка`,
+opened the exact quest, clicked `Взять задание`, and confirmed quest
+`187` in a fresh complete active catalogue. The active count increased from 23
+to 24 and telemetry recorded `quest_accept_confirmed`.
+
 ## Current Blocker
 
-For autonomous questing, the next blocker is the exact NPC interaction module:
-open the intended giver, advance only the matching quest dialogue, accept it,
-and verify that the numeric quest ID appears in `mode=started`. The live global
-catalogue contains no direct accept control, so catalogue parsing cannot safely
-substitute for this postcondition.
+For autonomous questing, the next blocker is objective decomposition and
+execution: convert active quest text into bounded travel, interaction, combat,
+collection, and return-to-giver tasks, then verify progress and turn-in. Exact
+NPC quest acceptance and full active-list verification are now implemented and
+confirmed live.
 
 Route construction and full guarded multi-step movement are confirmed live, and
 the route loop is integrated into the main controller recovery state.
@@ -135,7 +147,8 @@ location, persists the original destination, and reconstructs the remaining
 route after battle or death interruptions. Automated regressions cover all of
 these branches.
 
-Bridge v38 is active in the loaded Chrome context. The integrated v36 sequence
+Bridge v46 was active for the quest-intake acceptance run. The integrated v36
+sequence
 `death -> free revive -> close notice -> checkpoint route -> original route ->
 hunt` has passed once without manual game input. The remaining formal M1 gate
 is two more consecutive natural recoveries, bringing the current streak from
@@ -143,8 +156,9 @@ is two more consecutive natural recoveries, bringing the current streak from
 `max_deaths_recovered` stop, rather than relying on an external polling stop.
 This validation should not be replaced by repeated startup-only runs.
 
-Bridge v38 adds the bounded global catalogue slice described above. It does not
-yet accept or turn in quests. This work must not displace the M1 live gate.
+Bridge v46 adds the bounded global catalogue and exact NPC acceptance slices
+described above. It does not yet execute arbitrary quest objectives or turn in
+completed quests. This work must not displace the M1 live gate.
 
 Compass targets are runtime inputs. Recovery is not tied to a specific monster
 name: the bridge enters the supplied target, selects the exact matching result,
@@ -190,6 +204,14 @@ allow battle/death recovery to finish, and then resume from the saved route.
 - `src/antibot_cv/automation/navigation_runtime.py`: hunt and route execution.
 - `src/antibot_cv/automation/combat_runtime.py`: combat and battle outcomes.
 - `src/antibot_cv/automation/resource_runtime.py`: resource gates and resting.
+- `src/antibot_cv/automation/resource_action_helpers.py`: page-bridge resource
+  action polling helpers.
+- `src/antibot_cv/automation/quest_active_catalog.py`: fail-closed active-list
+  pagination.
+- `src/antibot_cv/automation/quest_intake_runtime.py`: exact NPC acceptance
+  state machine.
+- `src/antibot_cv/automation/quest_giver.py`: conservative catalogue-giver to
+  area-NPC resolution.
 - `src/antibot_cv/automation/recovery_items_runtime.py`: between-battle items.
 - `src/antibot_cv/automation/desktop_runtime.py`: bounded desktop fallback.
 - `src/antibot_cv/automation/state_machine.py`: allowed state transitions.

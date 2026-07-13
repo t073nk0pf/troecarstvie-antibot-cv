@@ -11,6 +11,7 @@ MODULES = (
     "10_hunt_inventory.js",
     "20_hunt_actions.js",
     "30_navigation_death.js",
+    "35_npc_quests.js",
     "40_state_layout_dispatch.js",
 )
 

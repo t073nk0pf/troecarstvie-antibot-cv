@@ -57,10 +57,22 @@ class AutomationControlApi:
             return self.battle_skills(_query_client_id(query))
         if path == "/api/state-snapshot" and method == "GET":
             return self.state_snapshot(_query_client_id(query), _query_include(query))
+        if path == "/api/area-npcs" and method == "GET":
+            return self.area_npcs(_query_client_id(query), _query_text(query, "expectedName"))
+        if path == "/api/npc-dialog" and method == "GET":
+            return self.npc_dialog(_query_client_id(query), _query_text(query, "expectedName"))
         if path == "/api/location-route" and method == "GET":
             return self.location_route(_query_client_id(query))
         if path == "/api/location-route-step" and method == "POST":
             return self.location_route_step(payload or {})
+        if path == "/api/open-exact-npc" and method == "POST":
+            return self.open_exact_npc(payload or {})
+        if path == "/api/npc-quest-action" and method == "POST":
+            return self.npc_quest_action(payload or {})
+        if path == "/api/open-active-quest-page" and method == "POST":
+            return self.open_active_quest_page(payload or {})
+        if path == "/api/open-area" and method == "POST":
+            return self.open_area(payload or {})
         if path == "/api/start" and method == "POST":
             return self.start(payload or {})
         if path == "/api/stop" and method == "POST":
@@ -190,6 +202,43 @@ class AutomationControlApi:
         }
         return (200 if payload["ok"] else 502), payload
 
+    def area_npcs(self, client_id: str | None = None, expected_name: str | None = None) -> tuple[int, dict[str, Any]]:
+        return self._structured_snapshot(
+            "area_npc_snapshot",
+            client_id=client_id,
+            payload={"expectedName": str(expected_name or "")[:180]},
+        )
+
+    def npc_dialog(self, client_id: str | None = None, expected_name: str | None = None) -> tuple[int, dict[str, Any]]:
+        return self._structured_snapshot(
+            "npc_dialog_snapshot",
+            client_id=client_id,
+            payload={"expectedName": str(expected_name or "")[:180]},
+        )
+
+    def _structured_snapshot(
+        self,
+        command: str,
+        *,
+        client_id: str | None,
+        payload: dict[str, object],
+    ) -> tuple[int, dict[str, Any]]:
+        resolved_client_id, error = self._resolve_client_id(client_id)
+        if error is not None:
+            return 409, error
+        result = self.injector.execute(command, payload, timeout_s=3.0, client_id=resolved_client_id)
+        try:
+            snapshot = json.loads(result.message)
+        except json.JSONDecodeError:
+            snapshot = None
+        response: dict[str, Any] = {
+            "ok": bool(result.ok and isinstance(snapshot, dict)),
+            "client_id": result.client_id or resolved_client_id,
+            "message": command if isinstance(snapshot, dict) else result.message,
+            "snapshot": snapshot if isinstance(snapshot, dict) else None,
+        }
+        return (200 if response["ok"] else 502), response
+
     def location_route_step(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if not self.allow_live:
             return 403, {
@@ -289,6 +338,136 @@ class AutomationControlApi:
             "before": _compact_route_snapshot(before_snapshot),
             "after": _compact_route_snapshot(after_snapshot) if isinstance(after_snapshot, dict) else None,
             "after_error": None if isinstance(after_snapshot, dict) else after_payload,
+        }
+
+    def open_exact_npc(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        session = SessionState(requested_cycles=1)
+        executor = ActionExecutor(
+            guard=guard,
+            session=session,
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        )
+        metadata = {
+            "expected_snapshot_id": payload.get("expectedSnapshotId"),
+            "expected_location_id": payload.get("expectedLocationId"),
+            "npc_id": payload.get("npcId"),
+            "expected_name": payload.get("expectedName"),
+            "expected_dialog_name": payload.get("expectedDialogName"),
+        }
+        submitted = executor.execute(ActionRequest("open_exact_npc", dry_run=False, metadata=metadata))
+        if not submitted:
+            return 409, {
+                "ok": False,
+                "error": "open_exact_npc_blocked",
+                "client_id": resolved_client_id,
+            }
+        dialog_status, dialog = self.npc_dialog(
+            resolved_client_id,
+            str(payload.get("expectedDialogName") or payload.get("expectedName") or ""),
+        )
+        return (200 if dialog_status == 200 else 502), {
+            "ok": dialog_status == 200,
+            "submitted": True,
+            "client_id": resolved_client_id,
+            "dialog": dialog.get("snapshot"),
+        }
+
+    def npc_quest_action(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        session = SessionState(requested_cycles=1)
+        executor = ActionExecutor(
+            guard=guard,
+            session=session,
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        )
+        submitted = executor.execute(
+            ActionRequest(
+                "npc_quest_action",
+                dry_run=False,
+                metadata={
+                    "expected_snapshot_id": payload.get("expectedSnapshotId"),
+                    "npc_id": payload.get("npcId"),
+                    "quest_id": payload.get("questId"),
+                    "expected_title": payload.get("expectedTitle"),
+                    "action": payload.get("action"),
+                    "expected_ref": payload.get("expectedRef"),
+                    "expected_text": payload.get("expectedText"),
+                },
+            )
+        )
+        return (200 if submitted else 409), {
+            "ok": submitted,
+            "submitted": submitted,
+            "client_id": resolved_client_id,
+            "error": None if submitted else "npc_quest_action_blocked",
+        }
+
+    def open_active_quest_page(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        executor = ActionExecutor(
+            guard=guard,
+            session=SessionState(requested_cycles=1),
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        )
+        submitted = executor.execute(
+            ActionRequest(
+                "open_active_quest_page",
+                dry_run=False,
+                metadata={"page": payload.get("page")},
+            )
+        )
+        return (200 if submitted else 409), {
+            "ok": submitted,
+            "submitted": submitted,
+            "client_id": resolved_client_id,
+            "error": None if submitted else "open_active_quest_page_blocked",
+        }
+
+    def open_area(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        submitted = ActionExecutor(
+            guard=guard,
+            session=SessionState(requested_cycles=1),
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        ).execute(ActionRequest("open_area", dry_run=False, metadata={"reason": "control_api"}))
+        return (200 if submitted else 409), {
+            "ok": submitted,
+            "submitted": submitted,
+            "client_id": resolved_client_id,
+            "error": None if submitted else "open_area_blocked",
         }
 
     def start(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -501,6 +680,7 @@ class AutomationControlApi:
             "maxDeathsPerSession": payload.get("maxDeathsPerSession"),
             "targetLocationName": payload.get("targetLocationName"),
             "autoNavigateQuestTargets": payload.get("autoNavigateQuestTargets"),
+            "autonomousQuestDirector": payload.get("autonomousQuestDirector"),
             "confirmDelayMs": payload.get("confirmDelayMs"),
             "betweenItemsDelayMs": payload.get("betweenItemsDelayMs"),
         }
@@ -525,6 +705,11 @@ class AutomationControlApi:
 
 def _query_client_id(query: dict[str, list[str]]) -> str | None:
     value = query.get("clientId", [None])[0] or query.get("client_id", [None])[0]
+    return str(value).strip() if value else None
+
+
+def _query_text(query: dict[str, list[str]], key: str) -> str | None:
+    value = query.get(key, [None])[0]
     return str(value).strip() if value else None
 
 

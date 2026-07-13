@@ -34,7 +34,7 @@ The project completed an architecture modularization gate before continuing
 
 The former 5867-line Python controller is now a bounded orchestrator plus
 screen, leveling/death, navigation, combat, resource, and CLI modules. The
-former 4642-line editable page bridge is now generated from five bounded source
+former 4642-line editable page bridge is now generated from six bounded source
 modules. Architecture tests prevent authored runtime files from growing beyond
 1500 lines.
 
@@ -44,7 +44,7 @@ inventory item actions, free resurrection, and compass route construction.
 
 The modularization gate is enforced by automated architecture tests. Authored
 runtime files remain below 1500 lines, while the Chrome bundle is reproducibly
-generated from five ordered domain modules.
+generated from six ordered domain modules.
 
 The main controller now executes every confirmed marked route transition,
 preserves the destination across PvP or death, and waits for proven arrival
@@ -57,10 +57,11 @@ nine-phase recovery evidence chain, and a read-only offline validator
 identifies missing or out-of-order phases from a run log. Offline readiness is
 diagnostic only and does not satisfy the live exit gate.
 
-The local v36 bridge also includes a bounded quest observation slice: active
-and available cards, route labels, and explicit objective progress are parsed,
-and a completed objective stops safely before turn-in. Quest acceptance and
-turn-in remain outside the current milestone.
+The local v46 bridge includes bounded quest observation and exact NPC intake:
+active and available cards are parsed across all pages; the bot can travel to a
+unique giver, open the exact quest, click `Взять задание`, and acknowledge
+success only after the quest ID appears in a fresh active catalogue. Objective
+execution and turn-in remain outside the completed slice.
 
 ## Main Current Milestone
 
@@ -167,8 +168,9 @@ hard-coded fixed skill set and never uses a non-allowlisted item.
 
 ### Stage 4 - Quest Line Module
 
-Status: catalogue discovery and scheduling slice implemented; NPC
-accept/turn-in executor is next.
+Status: catalogue discovery, scheduling, travel-to-giver, and exact NPC
+acceptance are implemented and live-confirmed. Objective execution and turn-in
+are next.
 
 This module accelerates leveling but must use the stable travel, combat,
 inventory, and death-recovery modules instead of duplicating them.
@@ -178,17 +180,17 @@ Responsibilities:
 - load all pages of available quests and the active list; implemented;
 - parse eligibility, objective type, target, count, location, and reward;
 - choose quests appropriate for the current level and configured policy;
-- accept a quest through an exact page action;
+- accept a quest through an exact page action; implemented and live-confirmed;
 - convert objectives into route/combat/inventory tasks;
 - track progress and turn completed quests in;
 - skip blocked, unsafe, unaffordable, or explicitly denied quests;
 - re-plan when a quest target or location is unavailable.
 
-Current guarded boundary: discovery produces an ordered intake queue and then
-stops at `quest_accept_executor_pending`. It must remain fail-closed until the
-NPC module verifies exact giver, exact dialogue/quest identity, and appearance
-in the active list. The fallback farm intent is allowed only after a fresh
-empty catalogue and active list.
+Current guarded boundary: discovery produces an ordered intake queue, resolves
+one unique giver, performs one snapshot-bound dialogue action at a time, and
+confirms acceptance from the complete active list. Unknown or unsupported
+objective steps stop before mutation. The fallback farm intent is allowed only
+after a fresh empty catalogue and active list.
 
 Exit gate: complete a configured level-range quest chain from a clean level 1
 post-tutorial character without manual navigation.

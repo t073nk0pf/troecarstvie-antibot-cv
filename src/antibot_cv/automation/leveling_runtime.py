@@ -208,6 +208,8 @@ class LevelingRuntimeMixin:
             )
             self._record_leveling_wait(reason)
             return False
+        if self.config.leveling.autonomous_quest_director and self._maybe_start_quest_refresh():
+            return True
         if self._maybe_start_configured_location_route():
             return True
         decision = self._record_leveling_decision(player, death_data, sections)

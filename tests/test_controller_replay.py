@@ -1728,6 +1728,21 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
     assert config.leveling.autonomous_quest_director is True
 
 
+def test_autonomous_quest_director_override_enables_leveling_runtime(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {**data["leveling"], "enabled": False, "autonomous_quest_director": False}
+    disabled = AutomationConfig.from_dict(data)
+
+    config = _apply_runtime_overrides(disabled, {"autonomousQuestDirector": True})
+
+    assert config.leveling.enabled is True
+    assert config.leveling.autonomous_quest_director is True
+
+
 def test_live_leveling_goal_stops_at_confirmed_character_level(test_config: AutomationConfig) -> None:
     from src.antibot_cv.automation.config import to_plain_dict
 
@@ -3175,13 +3190,16 @@ def test_autonomous_quest_director_collects_every_catalog_page_before_intake(
     assert [request.action_type for request in sink.requests] == [
         "open_quest_catalog",
         "open_quest_catalog",
-        "open_quests",
+        "open_active_quest_page",
     ]
     stale_active_id = controller._quest_active_request_snapshot_id
     controller._observe_autonomous_quest_snapshot(
         {
             "loadStatus": "loaded",
             "mode": "started",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
             "snapshotId": stale_active_id,
             "items": [],
             "truncated": False,
@@ -3189,13 +3207,25 @@ def test_autonomous_quest_director_collects_every_catalog_page_before_intake(
     )
     assert controller._quest_director.active_snapshot_fresh is False
     controller._observe_autonomous_quest_snapshot(
-        {"loadStatus": "loaded", "mode": "started", "snapshotId": "active-1", "items": [], "truncated": False}
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "snapshotId": "active-1",
+            "items": [],
+            "truncated": False,
+        }
     )
     controller._handle_quest_refresh()
 
-    assert controller.state_machine.state is GameState.STOPPED
-    assert controller.last_error_reason == "quest_accept_executor_pending"
+    assert controller.state_machine.state is GameState.NAVIGATOR_PENDING
+    assert controller.last_error_reason is None
     assert [quest.id for quest in controller._quest_director.intake_queue] == ["1", "2"]
+    assert controller._quest_director.pending_accept is not None
+    assert controller._quest_director.pending_accept.id == "1"
+    assert sink.requests[-1].action_type == "open_location_navigator"
 
 
 def test_autonomous_quest_director_enters_profit_farm_only_after_fresh_empty_catalog(
@@ -3235,14 +3265,23 @@ def test_autonomous_quest_director_enters_profit_farm_only_after_fresh_empty_cat
 
     assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
     controller._observe_autonomous_quest_snapshot(
-        {"loadStatus": "loaded", "mode": "started", "snapshotId": "empty-active", "items": [], "truncated": False}
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "snapshotId": "empty-active",
+            "items": [],
+            "truncated": False,
+        }
     )
     controller._handle_quest_refresh()
 
     assert controller.state_machine.state is GameState.LOCATION_SEARCH, controller.last_error_reason
     assert [request.action_type for request in sink.requests] == [
         "open_quest_catalog",
-        "open_quests",
+        "open_active_quest_page",
         "open_hunt",
     ]
     assert controller._quest_director_decision().intent.value == "PROFIT_FARM"

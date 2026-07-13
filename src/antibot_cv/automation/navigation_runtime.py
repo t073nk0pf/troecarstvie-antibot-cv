@@ -160,7 +160,26 @@ class NavigationRuntimeMixin:
             navigator_client_id=self._navigator_client_id,
         )
         if route_decision.action is RouteAction.ARRIVED:
-            self._finish_route_arrival("navigator_target_current_location")
+            if self._route_recovery_kind != "quest_accept":
+                self._finish_route_arrival("navigator_target_current_location")
+                return
+            request = ActionRequest(
+                "open_area",
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                dry_run=self.config.dry_run,
+                metadata={"reason": "navigator_current_location_verify"},
+            )
+            if not self.action_executor.execute(request):
+                self._stop_leveling_unsafe("navigator_current_location_area_open_failed")
+                return
+            self._route_go_submitted_monotonic = time.monotonic()
+            self._route_destination_name = self._navigator_target_name
+            self._route_destination_id = None
+            self._route_expected_transitions = 0
+            self._route_step_submitted_from_id = None
+            self._route_step_submitted_monotonic = None
+            self._safe_transition(GameState.ROUTE_RECOVERY, reason="navigator_current_location_verify")
             return
         if route_decision.action is RouteAction.REFRESH:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
@@ -184,6 +203,19 @@ class NavigationRuntimeMixin:
         if not self.action_executor.execute(request):
             self._stop_leveling_unsafe("navigator_go_failed_or_ambiguous")
             return
+        if self._route_recovery_kind == "quest_accept":
+            if not self.config.dry_run:
+                time.sleep(0.35)
+            open_area = ActionRequest(
+                "open_area",
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                dry_run=self.config.dry_run,
+                metadata={"reason": "navigator_route_post_submit"},
+            )
+            if not self.action_executor.execute(open_area):
+                self._stop_leveling_unsafe("navigator_route_area_open_failed")
+                return
         now = time.monotonic()
         self._route_go_submitted_monotonic = now
         self._route_destination_name = self._navigator_target_name
@@ -385,6 +417,8 @@ class NavigationRuntimeMixin:
         recovery_kind = self._route_recovery_kind
         arrival_target = self._route_destination_name or self._navigator_target_name
         resume_target = self._route_resume_target_name
+        if recovery_kind == "quest_accept":
+            return self._on_quest_accept_route_arrived(reason)
         if recovery_kind == "post_revive_location":
             self._log_recovery_phase(
                 "checkpoint_arrived",
