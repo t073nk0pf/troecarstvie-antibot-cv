@@ -45,11 +45,12 @@ def test_control_api_forwards_autonomous_quest_director_override() -> None:
     api = AutomationControlApi(BrowserInjectorServer(port=0))
 
     options = api._options_from_payload(  # noqa: SLF001
-        {"autonomousQuestDirector": True},
+        {"autonomousQuestDirector": True, "pinnedQuestId": "246"},
         browser_client_id="client-a",
     )
 
     assert options.runtime_overrides["autonomousQuestDirector"] is True
+    assert options.runtime_overrides["pinnedQuestId"] == "246"
 
 
 def test_control_api_rejects_string_live_flag() -> None:

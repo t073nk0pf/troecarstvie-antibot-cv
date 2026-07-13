@@ -205,6 +205,45 @@ def test_execution_selects_supported_monster_from_complete_catalog_not_first_ref
     assert runtime.active_objective_revision == 1
 
 
+def test_preferred_chain_refreshes_active_first_and_preempts_intake(tmp_path) -> None:
+    state_path = tmp_path / "quest-chain.json"
+    runtime = QuestDirectorRuntime(
+        pinned_quest_id="246",
+        chain_state_path=state_path,
+    )
+    assert runtime.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(
+        active_page(
+            0,
+            1,
+            {
+                "id": "246",
+                "title": "Хворь скакунов",
+                "status": "active",
+                "objective": "Отправляйтесь к алхимику Филониду в Туманные луга.",
+                "navigation": [{"text": "Туманные луга", "target": "Туманные луга"}],
+                "progress": None,
+            },
+        )
+    )
+    runtime.discovery_initialized = True
+    runtime.available_snapshot_fresh = True
+    runtime.available_quests = (QuestRef("91", "Side quest"),)
+
+    decision = runtime.decision(current_level_cap=5)
+
+    assert decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert decision.quest is not None and decision.quest.id == "246"
+    assert decision.reason == "pinned_chain_requires_non_monster_executor"
+    assert state_path.exists()
+
+    restored = QuestDirectorRuntime(chain_state_path=state_path)
+    assert restored.chain.lease is not None
+    assert restored.chain.lease.quest_id == "246"
+    assert restored.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
+
+
 def test_execution_fails_closed_without_complete_active_catalog() -> None:
     runtime = QuestDirectorRuntime()
     runtime.begin_catalog_refresh()

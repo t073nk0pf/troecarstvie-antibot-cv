@@ -818,6 +818,7 @@ class AutomationControlApi:
             "targetLocationName": payload.get("targetLocationName"),
             "autoNavigateQuestTargets": payload.get("autoNavigateQuestTargets"),
             "autonomousQuestDirector": payload.get("autonomousQuestDirector"),
+            "pinnedQuestId": payload.get("pinnedQuestId"),
             "confirmDelayMs": payload.get("confirmDelayMs"),
             "betweenItemsDelayMs": payload.get("betweenItemsDelayMs"),
         }

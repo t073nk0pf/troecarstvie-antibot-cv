@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import re
 import time
 
 from src.antibot_cv.automation.actions import ActionRequest
@@ -60,6 +62,11 @@ class QuestRuntimeMixin:
             QuestDirectorRuntime(
                 refresh_every_completed=max(1, int(self.config.leveling.quest_refresh_every_completed)),
                 catalog_max_pages=max(1, int(self.config.leveling.quest_catalog_max_pages)),
+                pinned_quest_id=self.config.leveling.pinned_quest_id,
+                chain_state_path=_quest_chain_state_path(
+                    self.config.runs_dir,
+                    self.config.leveling.required_character_name,
+                ),
             )
             if self.config.leveling.autonomous_quest_director
             else None
@@ -982,3 +989,11 @@ class QuestRuntimeMixin:
             self._log_recovery_phase("hunt_opened", reason=reason)
             self._complete_death_recovery_evidence(reason)
         return True
+
+
+def _quest_chain_state_path(runs_dir: str, character_name: str) -> Path | None:
+    raw_identity = str(character_name or "").strip()
+    if not raw_identity:
+        return None
+    identity = re.sub(r"[^a-zA-Z0-9а-яА-ЯёЁ_-]+", "_", raw_identity)
+    return Path(runs_dir) / "quest_chains" / f"{identity}.json"

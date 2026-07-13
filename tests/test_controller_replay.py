@@ -1708,6 +1708,7 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
             "maxDeathsPerSession": "2",
             "targetLocationName": "Длань Рода",
             "autonomousQuestDirector": True,
+            "pinnedQuestId": "246",
         },
     )
 
@@ -1727,6 +1728,7 @@ def test_runtime_overrides_apply_combat_popup_settings(test_config: AutomationCo
     assert config.leveling.max_deaths_per_session == 2
     assert config.leveling.target_location_name == "Длань Рода"
     assert config.leveling.autonomous_quest_director is True
+    assert config.leveling.pinned_quest_id == "246"
 
 
 def test_autonomous_quest_director_override_enables_leveling_runtime(

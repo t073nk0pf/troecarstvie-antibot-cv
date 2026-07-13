@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.antibot_cv.automation.quest_active_catalog import ActiveQuestCatalogAccumulator
 from src.antibot_cv.automation.quest_catalog import QuestCatalogAccumulator
 from src.antibot_cv.automation.quest_director_policy import (
@@ -35,6 +37,8 @@ class QuestDirectorRuntime:
         refresh_every_completed: int = 5,
         catalog_max_pages: int = 20,
         max_unchanged_victories: int = 10,
+        pinned_quest_id: str = "",
+        chain_state_path: str | Path | None = None,
     ) -> None:
         if max_unchanged_victories <= 0:
             raise ValueError("max unchanged victories must be positive")
@@ -52,7 +56,17 @@ class QuestDirectorRuntime:
         self.pending_accept: QuestRef | None = None
         self.active_objective: QuestObjective | None = None
         self.supported_objectives: tuple[QuestObjective, ...] = ()
-        self.chain = QuestChainRuntime()
+        preferred = str(pinned_quest_id or "").strip()
+        if preferred and (not preferred.isdecimal() or int(preferred) <= 0):
+            raise ValueError("pinned quest id must be a positive decimal identity")
+        self.preferred_quest_id = preferred
+        self.chain = QuestChainRuntime(state_path=chain_state_path)
+        if (
+            self.chain.lease is not None
+            and preferred
+            and self.chain.lease.quest_id != preferred
+        ):
+            raise ValueError("persisted quest chain does not match pinned quest override")
         self.active_objective_revision: int | None = None
         self.objective_refresh: ObjectiveRefreshComparison | None = None
         self.max_unchanged_victories = max_unchanged_victories
@@ -70,8 +84,51 @@ class QuestDirectorRuntime:
                 quest=self.pending_accept,
                 intake_queue=self.intake_queue,
             )
+        if (
+            (self.chain.lease is not None or self.preferred_quest_id)
+            and not self.active_snapshot_fresh
+        ):
+            return QuestDirectorDecision(
+                QuestDirectorIntent.REFRESH_ACTIVE,
+                "pinned_chain_active_refresh_required",
+                intake_queue=self.intake_queue,
+            )
+        if self.active_snapshot_fresh and self.chain.lease is not None and not any(
+            quest.id == self.chain.lease.quest_id for quest in self.active_quests
+        ):
+            return QuestDirectorDecision(
+                QuestDirectorIntent.STOP_UNSAFE,
+                "pinned_quest_missing_without_terminal_evidence",
+                intake_queue=self.intake_queue,
+            )
+        if self.active_snapshot_fresh and self.preferred_quest_id and not any(
+            quest.id == self.preferred_quest_id for quest in self.active_quests
+        ):
+            return QuestDirectorDecision(
+                QuestDirectorIntent.STOP_UNSAFE,
+                "preferred_pinned_quest_missing",
+                intake_queue=self.intake_queue,
+            )
         result = self.policy.decide(self.snapshot())
         self.intake_queue = result.intake_queue
+        lease = self.chain.lease
+        if (
+            lease is not None
+            and self.active_snapshot_fresh
+            and any(quest.id == lease.quest_id for quest in self.active_quests)
+            and result.intent in {
+                QuestDirectorIntent.ACCEPT_QUEST,
+                QuestDirectorIntent.EXECUTE_ACTIVE,
+                QuestDirectorIntent.PROFIT_FARM,
+                QuestDirectorIntent.REFRESH_AVAILABLE,
+            }
+        ):
+            result = QuestDirectorDecision(
+                QuestDirectorIntent.EXECUTE_ACTIVE,
+                "pinned_chain_preempts_intake",
+                quest=next(quest for quest in self.active_quests if quest.id == lease.quest_id),
+                intake_queue=self.intake_queue,
+            )
         if result.intent is QuestDirectorIntent.EXECUTE_ACTIVE:
             if current_level_cap is None:
                 return QuestDirectorDecision(
@@ -107,6 +164,20 @@ class QuestDirectorRuntime:
             self.supported_objectives = collection.objectives
             lease = self.chain.lease
             if lease is not None:
+                chain_refresh = self.chain.reconcile(
+                    self.active_catalog.result,
+                    current_level_cap=current_level_cap,
+                )
+                if chain_refresh.state in {
+                    ChainRefreshState.LOOP_UNSAFE,
+                    ChainRefreshState.REMOVED_UNVERIFIED,
+                    ChainRefreshState.REGRESSED_UNSAFE,
+                }:
+                    return QuestDirectorDecision(
+                        QuestDirectorIntent.STOP_UNSAFE,
+                        f"quest_chain_refresh:{chain_refresh.reason}",
+                        intake_queue=self.intake_queue,
+                    )
                 self.active_objective = next(
                     (objective for objective in collection.objectives if objective.quest_id == lease.quest_id),
                     None,
@@ -219,6 +290,20 @@ class QuestDirectorRuntime:
             return self.active_catalog.next_page
         self.active_quests = tuple(QuestRef(entry.id, entry.title) for entry in result)
         self.active_snapshot_fresh = True
+        if self.chain.lease is None and self.preferred_quest_id:
+            preferred = next(
+                (entry for entry in result if entry.id == self.preferred_quest_id),
+                None,
+            )
+            if preferred is None:
+                self.objective_refresh = ObjectiveRefreshComparison(
+                    ObjectiveRefreshState.REGRESSED_UNSAFE,
+                    None,
+                    "preferred_pinned_quest_missing",
+                )
+            else:
+                self.chain.pin_entry(preferred, revision=self.active_catalog.revision)
+                self.preferred_quest_id = ""
         if self.active_objective is not None:
             previous = self.active_objective
             comparison = compare_refreshed_objective(
@@ -254,10 +339,10 @@ class QuestDirectorRuntime:
             elif comparison.state is ObjectiveRefreshState.STEP_CHANGED:
                 self.active_objective = None
                 self.active_objective_revision = self.active_catalog.revision
-        if self.chain.lease is not None:
+        if self.chain.lease is not None and self._current_level_cap is not None:
             chain_refresh = self.chain.reconcile(
                 result,
-                current_level_cap=self._current_level_cap or 0,
+                current_level_cap=self._current_level_cap,
             )
             if chain_refresh.state in {
                 ChainRefreshState.LOOP_UNSAFE,

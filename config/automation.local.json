@@ -135,6 +135,8 @@
     "quest_refresh_every_cycles": 5,
     "quest_refresh_timeout_ms": 10000,
     "auto_navigate_quest_targets": false,
+    "autonomous_quest_director": false,
+    "pinned_quest_id": "",
     "navigator_timeout_ms": 10000,
     "navigator_max_transitions": 50,
     "route_settle_ms": 3000,

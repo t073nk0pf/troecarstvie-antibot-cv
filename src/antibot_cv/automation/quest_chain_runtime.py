@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+import json
+from pathlib import Path
 from typing import Mapping, Sequence
 
+from src.antibot_cv.automation.checkpoint import write_json_checkpoint
 from src.antibot_cv.automation.quest_active_catalog import ActiveQuestEntry
 from src.antibot_cv.automation.quest_objective_runtime import (
     ObjectiveSelectionStatus,
@@ -43,8 +46,17 @@ class ChainRefreshResult:
 class QuestChainRuntime:
     """Keep one quest chain pinned until explicit terminal evidence releases it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, state_path: str | Path | None = None) -> None:
         self.lease: QuestChainLease | None = None
+        self.state_path = Path(state_path) if state_path is not None else None
+        if self.state_path is not None and self.state_path.exists():
+            try:
+                payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("invalid persisted quest chain state") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("invalid persisted quest chain state")
+            self.restore(payload)
 
     def pin(self, objective: QuestObjective, *, revision: int) -> QuestChainLease:
         if self.lease is not None and self.lease.quest_id != objective.quest_id:
@@ -57,6 +69,28 @@ class QuestChainRuntime:
                 objective.fingerprint,
                 (objective.fingerprint,),
             )
+            self._persist()
+        return self.lease
+
+    def pin_entry(self, entry: ActiveQuestEntry, *, revision: int) -> QuestChainLease:
+        """Pin an active chain even when its current step needs another executor."""
+
+        if not isinstance(entry, ActiveQuestEntry):
+            raise ValueError("pinned quest entry is invalid")
+        if self.lease is not None and self.lease.quest_id != entry.id:
+            raise RuntimeError("another quest chain is already pinned")
+        if self.lease is None:
+            fingerprint, reason = quest_step_fingerprint(entry)
+            if fingerprint is None:
+                raise ValueError(reason)
+            self.lease = QuestChainLease(
+                entry.id,
+                entry.title,
+                revision,
+                fingerprint,
+                (fingerprint,),
+            )
+            self._persist()
         return self.lease
 
     def checkpoint(self) -> dict[str, object] | None:
@@ -168,6 +202,7 @@ class QuestChainRuntime:
             completed_steps=lease.completed_steps + 1,
         )
         self.lease = advanced
+        self._persist()
         state = ChainRefreshState.ADVANCED if objective else ChainRefreshState.EXECUTOR_REQUIRED
         return ChainRefreshResult(state, advanced, objective, "pinned_quest_step_advanced")
 
@@ -175,3 +210,10 @@ class QuestChainRuntime:
         if self.lease is None or self.lease.quest_id != quest_id:
             raise RuntimeError("completed quest does not match pinned chain")
         self.lease = None
+        if self.state_path is not None:
+            self.state_path.unlink(missing_ok=True)
+
+    def _persist(self) -> None:
+        payload = self.checkpoint()
+        if self.state_path is not None and payload is not None:
+            write_json_checkpoint(self.state_path, payload)
