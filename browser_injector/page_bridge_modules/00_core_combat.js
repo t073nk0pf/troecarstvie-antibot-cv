@@ -1,4 +1,4 @@
-  const BRIDGE_VERSION = "2026-07-13-quest-sections-v29";
+  const BRIDGE_VERSION = "2026-07-13-navigator-sections-v30";
   const CONTENT_SOURCE = `antibot-cv-content:${BRIDGE_VERSION}`;
   const INJECTOR_SOURCE = `antibot-cv-injector:${BRIDGE_VERSION}`;
 

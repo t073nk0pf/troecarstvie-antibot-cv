@@ -1,5 +1,5 @@
 const ENDPOINT = "http://127.0.0.1:17654";
-const BRIDGE_VERSION = "2026-07-13-quest-sections-v29";
+const BRIDGE_VERSION = "2026-07-13-navigator-sections-v30";
 const PROFILE_ID_KEY = "antibotCvProfileId";
 let profileIdPromise = null;
 const tabSessionNonceById = new Map();

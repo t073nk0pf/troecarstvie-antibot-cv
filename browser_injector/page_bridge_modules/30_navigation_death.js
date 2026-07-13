@@ -129,6 +129,11 @@
   const navigatorCandidateSection = (element) => {
     let node = element && element.parentElement;
     for (let depth = 0; node && depth < 8; depth += 1) {
+      const nodeLabel = safeString(node && (node.innerText || node.textContent), 500)
+        .trim()
+        .toLowerCase();
+      const nodeMatch = nodeLabel.match(/^(локации|ресурсы|монстры|персонажи|инстансы)(?:\s|$)/);
+      if (nodeMatch) return nodeMatch[1];
       const children = Array.from(node.children || []).slice(0, 8);
       for (const child of children) {
         const label = safeString(child && (child.innerText || child.textContent), 240)
@@ -188,21 +193,35 @@
     if (!setNavigatorInputValue(context, input, target)) {
       return { ok: false, message: "navigator_target_input_failed", target };
     }
-    const searchTimeoutMs = Math.max(250, Math.min(3000, Number(payload && payload.searchDelayMs) || 1500));
+    const searchTimeoutMs = Math.max(250, Math.min(8000, Number(payload && payload.searchDelayMs) || 1500));
     const searchDeadline = Date.now() + searchTimeoutMs;
+    let scanContext = context;
+    let contextChanges = 0;
+    let exactCandidates = [];
     let allCandidates = [];
     let visibleCandidates = [];
     do {
       await delayMs(100);
-      allCandidates = Array.from(
-        context.doc.querySelectorAll("div,li,a,button,[role='option']")
-      ).filter((element) => {
-        const label = safeString(element && (element.innerText || element.textContent), 180);
-        if (!exactLabelMatches(label, target)) return false;
+      const currentContext = mainContentContext();
+      if (currentContext.doc && /\/navigator\.php(?:\?|$)/i.test(currentContext.href)) {
+        if (currentContext.doc !== scanContext.doc || currentContext.win !== scanContext.win) {
+          contextChanges += 1;
+        }
+        scanContext = currentContext;
+      }
+      exactCandidates = Array.from(
+        scanContext.doc.querySelectorAll("div,li,a,button,[role='option']")
+      ).filter((element) =>
+        exactLabelMatches(
+          safeString(element && (element.innerText || element.textContent), 180),
+          target
+        )
+      );
+      allCandidates = exactCandidates.filter((element) => {
         const section = navigatorCandidateSection(element);
         return Boolean(section) && (!expectedSection || section === expectedSection);
       });
-      visibleCandidates = allCandidates.filter((element) => elementIsVisible(context.win, element));
+      visibleCandidates = allCandidates.filter((element) => elementIsVisible(scanContext.win, element));
     } while (!allCandidates.length && Date.now() < searchDeadline);
     const candidates = visibleCandidates.length === 1 ? visibleCandidates : allCandidates;
     if (candidates.length !== 1) {
@@ -212,9 +231,12 @@
         target,
         kind,
         expectedSection,
+        exactCandidateCount: exactCandidates.length,
+        exactCandidateSections: exactCandidates.map((element) => navigatorCandidateSection(element)),
         candidateSections: allCandidates.map((element) => navigatorCandidateSection(element)),
         visibleCandidateCount: visibleCandidates.length,
         candidateCount: allCandidates.length,
+        contextChanges,
       };
     }
     const candidate = candidates[0];

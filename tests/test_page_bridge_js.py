@@ -922,7 +922,12 @@ const listeners = {};
 let bodyText = "";
 let candidateClicks = 0;
 const heading = { innerText: "Монстры", textContent: "Монстры", parentElement: null, children: [] };
-const section = { innerText: "", textContent: "", parentElement: null, children: [heading] };
+const section = {
+  innerText: "Монстры\nБродячий муравей [4]",
+  textContent: "Монстры Бродячий муравей [4]",
+  parentElement: null,
+  children: [],
+};
 heading.parentElement = section;
 const compass = {
   value: "", innerText: "", textContent: "", offsetWidth: 450, offsetHeight: 24,
