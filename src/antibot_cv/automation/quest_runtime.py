@@ -815,6 +815,13 @@ class QuestRuntimeMixin:
             return self._stop_leveling_unsafe("quest_dialogue_route_arrival_mismatch")
         return self._open_area_for_quest_dialogue(reason)
 
+    def _quest_dialogue_snapshot_pending(self, unsafe_reason: str) -> bool:
+        if unsafe_reason not in {"dialogue_npc_snapshot_invalid", "dialogue_snapshot_invalid"}:
+            return False
+        started = self._quest_refresh_requested_monotonic or time.monotonic()
+        timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
+        return (time.monotonic() - started) * 1000 < timeout_ms
+
     def _handle_pending_quest_dialogue(self) -> bool:
         pending = self._quest_dialogue.pending
         if pending is None:
@@ -879,6 +886,8 @@ class QuestRuntimeMixin:
                 decision = self._quest_dialogue.decide_area_npc(snapshot)
             except (json.JSONDecodeError, QuestDialogueError, RuntimeError, ValueError) as exc:
                 reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
+                if isinstance(exc, QuestDialogueError) and self._quest_dialogue_snapshot_pending(reason):
+                    return True
                 return self._stop_leveling_unsafe(f"quest_dialogue_npc:{reason}")
         elif pending.phase is QuestDialoguePhase.NPC_DIALOG:
             from src.antibot_cv.automation.browser_injector import global_browser_injector
@@ -894,6 +903,8 @@ class QuestRuntimeMixin:
                 decision = self._quest_dialogue.decide_dialog(snapshot)
             except (json.JSONDecodeError, QuestDialogueError, RuntimeError, ValueError) as exc:
                 reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
+                if isinstance(exc, QuestDialogueError) and self._quest_dialogue_snapshot_pending(reason):
+                    return True
                 return self._stop_leveling_unsafe(f"quest_dialogue_action:{reason}")
         else:
             return self._stop_leveling_unsafe("quest_dialogue_phase_invalid")
@@ -908,6 +919,7 @@ class QuestRuntimeMixin:
             return self._stop_leveling_unsafe(decision.action_failure_reason)
         updated = self._quest_dialogue.acknowledge(decision)
         self._invalidate_quest_snapshot_cache()
+        self._quest_refresh_requested_monotonic = time.monotonic()
         if decision.intent is QuestDialogueIntent.COMPLETE_STEP:
             if self._quest_director is None:
                 return self._stop_leveling_unsafe("quest_dialogue_director_missing")

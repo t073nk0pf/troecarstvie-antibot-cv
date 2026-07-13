@@ -3857,6 +3857,21 @@ def test_dialogue_route_returns_parent_to_area_after_navigator_submit(
     assert sink.requests[-1].metadata["reason"] == "navigator_route_post_submit"
 
 
+def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(
+    test_config: AutomationConfig,
+) -> None:
+    controller = AutomationController(
+        test_config, sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    controller._quest_refresh_requested_monotonic = time.monotonic()
+    assert controller._quest_dialogue_snapshot_pending("dialogue_npc_snapshot_invalid")
+    assert controller._quest_dialogue_snapshot_pending("dialogue_snapshot_invalid")
+    assert not controller._quest_dialogue_snapshot_pending("dialogue_npc_missing_or_ambiguous")
+
+    controller._quest_refresh_requested_monotonic = time.monotonic() - 60
+    assert not controller._quest_dialogue_snapshot_pending("dialogue_npc_snapshot_invalid")
+
+
 def test_leveling_stops_on_ambiguous_quest_route_without_opening_hunt(
     test_config: AutomationConfig,
 ) -> None:
