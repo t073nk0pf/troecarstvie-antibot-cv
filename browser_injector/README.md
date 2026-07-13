@@ -13,6 +13,19 @@ Install once:
 
 After changing files in this folder, click reload on the extension card at `chrome://extensions/`, then refresh the game tab.
 
+## Development
+
+Do not edit `page_bridge.js` directly. It is the generated Chrome runtime
+bundle. Edit the bounded domain sources in `page_bridge_modules/`, then rebuild:
+
+```bash
+python scripts/build_page_bridge.py
+node --check browser_injector/page_bridge.js
+```
+
+The architecture test fails when the generated bundle is stale or an authored
+runtime module exceeds 1500 lines.
+
 Browser control panel:
 
 1. Start the local control server:

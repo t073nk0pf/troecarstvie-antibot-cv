@@ -25,6 +25,7 @@ class GameState(Enum):
     RESTING = "RESTING"
     DEAD = "DEAD"
     REVIVE_PENDING = "REVIVE_PENDING"
+    POST_REVIVE_RECOVERY = "POST_REVIVE_RECOVERY"
     ROUTE_RECOVERY = "ROUTE_RECOVERY"
     QUEST_REFRESH_PENDING = "QUEST_REFRESH_PENDING"
     NAVIGATOR_PENDING = "NAVIGATOR_PENDING"
@@ -44,6 +45,7 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
             GameState.STATISTICS_WAIT,
             GameState.RESTING,
             GameState.QUEST_REFRESH_PENDING,
+            GameState.NAVIGATOR_PENDING,
             GameState.STOPPED,
             GameState.ERROR,
         }
@@ -59,6 +61,7 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
             GameState.STATISTICS_WAIT,
             GameState.RESTING,
             GameState.QUEST_REFRESH_PENDING,
+            GameState.NAVIGATOR_PENDING,
             GameState.STOPPED,
             GameState.ERROR,
         }
@@ -82,12 +85,33 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
     GameState.RETURN_TO_HUNT: frozenset({GameState.COOLDOWN, GameState.STOPPED, GameState.ERROR}),
     GameState.COOLDOWN: frozenset({GameState.LOCATION_SEARCH, GameState.RESTING, GameState.STOPPED, GameState.ERROR}),
     GameState.RESTING: frozenset({GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}),
-    GameState.DEAD: frozenset({GameState.REVIVE_PENDING, GameState.ROUTE_RECOVERY, GameState.STOPPED, GameState.ERROR}),
+    GameState.DEAD: frozenset(
+        {GameState.REVIVE_PENDING, GameState.POST_REVIVE_RECOVERY, GameState.STOPPED, GameState.ERROR}
+    ),
     GameState.REVIVE_PENDING: frozenset(
-        {GameState.REVIVE_PENDING, GameState.ROUTE_RECOVERY, GameState.DEAD, GameState.STOPPED, GameState.ERROR}
+        {
+            GameState.REVIVE_PENDING,
+            GameState.POST_REVIVE_RECOVERY,
+            GameState.DEAD,
+            GameState.STOPPED,
+            GameState.ERROR,
+        }
+    ),
+    GameState.POST_REVIVE_RECOVERY: frozenset(
+        {
+            GameState.ROUTE_RECOVERY,
+            GameState.LOCATION_SEARCH,
+            GameState.QUEST_REFRESH_PENDING,
+            GameState.NAVIGATOR_PENDING,
+            GameState.DEAD,
+            GameState.STOPPED,
+            GameState.ERROR,
+        }
     ),
     GameState.ROUTE_RECOVERY: frozenset(
         {
+            GameState.BATTLE_ACTIVE,
+            GameState.WAIT_BATTLE_END,
             GameState.LOCATION_SEARCH,
             GameState.RESTING,
             GameState.QUEST_REFRESH_PENDING,
@@ -113,6 +137,7 @@ for _state in tuple(ALLOWED_TRANSITIONS):
         GameState.ERROR,
         GameState.DEAD,
         GameState.REVIVE_PENDING,
+        GameState.POST_REVIVE_RECOVERY,
         GameState.QUEST_REFRESH_PENDING,
         GameState.NAVIGATOR_PENDING,
     }:

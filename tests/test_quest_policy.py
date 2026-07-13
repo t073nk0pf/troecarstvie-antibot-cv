@@ -7,6 +7,7 @@ from src.antibot_cv.automation.quest_policy import (
     QuestIntent,
     QuestObjectiveKind,
     QuestPolicy,
+    QuestProgress,
     QuestSnapshot,
     QuestStatus,
 )
@@ -117,6 +118,18 @@ def test_different_explicit_location_requests_navigation() -> None:
     assert result.intent is QuestIntent.NAVIGATE
     assert result.locations == ("Город",)
     assert result.target_mobs == ("Волк",)
+
+
+def test_confirmed_objective_progress_stops_farming_for_turn_in() -> None:
+    result = decide(
+        quest_state=snapshot(
+            combat_quest(progress=QuestProgress(current=5, required=5, complete=True, evidence="objective_ratio"))
+        )
+    )
+    assert result.intent is QuestIntent.OBJECTIVE_COMPLETE
+    assert result.reason == "quest_objective_complete"
+    assert result.progress.current == 5
+    assert result.progress.required == 5
 
 
 def test_multiple_active_combat_quests_are_ambiguous() -> None:

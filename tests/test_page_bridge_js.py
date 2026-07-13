@@ -21,7 +21,7 @@ function makeWindow(name, href) {
   };
 }
 
-function setupBridge(finished) {
+function setupBridge(finished, resultText = null, resourceText = "") {
   const messages = [];
   const listeners = {};
   const root = makeWindow("top", "https://3kingdoms.ru/main.php");
@@ -30,6 +30,10 @@ function setupBridge(finished) {
   const hidden = makeWindow("main_hidden", "https://3kingdoms.ru/main_iframe.php");
   const devnull = makeWindow("devnull", "about:blank");
   const fightWin = makeWindow("main", "https://3kingdoms.ru/fight.php?1");
+  fightWin.document.body = {
+    innerText: resultText == null ? (finished ? "БОЙ ОКОНЧЕН ВЫ ПОБЕДИЛИ!" : "") : resultText,
+  };
+  mainFrame.document.body = { innerText: resourceText };
 
   root.top = root;
   root.window = root;
@@ -95,7 +99,18 @@ const finishedSnapshot = await finished.command("battle_snapshot");
 assert.strictEqual(finishedSnapshot.message.hasFight, false);
 assert.strictEqual(finishedSnapshot.message.rawHasFight, true);
 assert.strictEqual(finishedSnapshot.message.finished, true);
+assert.strictEqual(finishedSnapshot.message.outcome, "victory");
 assert.strictEqual(finishedSnapshot.message.useSkillAvailable, false);
+
+const finishedAlive = setupBridge(true, "БОЙ ОКОНЧЕН", "Жизнь 75% Удаль 40%");
+const finishedAliveSnapshot = await finishedAlive.command("battle_snapshot");
+assert.strictEqual(finishedAliveSnapshot.message.outcome, "victory");
+assert.strictEqual(finishedAliveSnapshot.message.outcomeEvidence, "finished_player_alive");
+
+const finishedDead = setupBridge(true, "БОЙ ОКОНЧЕН", "Жизнь 0% Удаль 40%");
+const finishedDeadSnapshot = await finishedDead.command("battle_snapshot");
+assert.strictEqual(finishedDeadSnapshot.message.outcome, "defeat");
+assert.strictEqual(finishedDeadSnapshot.message.outcomeEvidence, "finished_player_health_zero");
 
 const finishedUseSkill = await finished.command("use_skill_slot", { slot: 2 });
 assert.strictEqual(finishedUseSkill.ok, false);
@@ -163,7 +178,7 @@ const fightWin = {
       abilities: { all: [{ id: -4626, slot: 2, name: "skill" }] },
       items: [
         { id: 101, slot: 5, name: "Малый бурдюк жизни", ready: true, cooldown: 0, count: 2 },
-        { id: 102, slot: 6, name: "Малый бурдюк удали", disabled: false, cooldown: 0, count: 2 },
+        { id: 102, slot: 6, name: "Малый бурдюк удали", ready: true, disabled: false, cooldown: 0, count: 2 },
       ],
     },
   },
@@ -220,6 +235,12 @@ assert.strictEqual(byName.message.method, "useItemSlot");
 assert.deepStrictEqual(byName.message.args, [6]);
 assert.strictEqual(fightWin.usedItemSlot, 6);
 assert.strictEqual(byName.message.evidence.itemChanged, true);
+
+fightWin.fight.model.items[0].ready = false;
+const unavailable = await command("use_battle_item", { kind: "health", slots: [5], verifyDelayMs: 1 });
+assert.strictEqual(unavailable.ok, false);
+assert.strictEqual(unavailable.message.message, "battle_item_not_ready");
+assert.strictEqual(fightWin.fight.model.items[0].count, 1);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
@@ -486,8 +507,8 @@ const route = {
   querySelectorAll(selector) { return selector === "img" ? [routeMarker] : []; },
 };
 const container = {
-  innerText: "Охота на волка Текущая цель: Убить Волка Награда: опыт Отказаться",
-  textContent: "Охота на волка Текущая цель: Убить Волка Награда: опыт Отказаться",
+  innerText: "Охота на волка Текущая цель: Убить Волка 3/5 Награда: опыт Отказаться",
+  textContent: "Охота на волка Текущая цель: Убить Волка 3/5 Награда: опыт Отказаться",
   querySelector(selector) { return selector === ".npc-point__title" ? title : null; },
   querySelectorAll(selector) { return selector === "a" ? [route] : []; },
 };
@@ -530,7 +551,80 @@ assert.strictEqual(section.data.activeCount, 1);
 assert.strictEqual(section.data.items[0].id, "91");
 assert.strictEqual(section.data.items[0].status, "active");
 assert.strictEqual(section.data.items[0].objectiveKind, "combat");
+assert.strictEqual(section.data.items[0].progress.current, 3);
+assert.strictEqual(section.data.items[0].progress.required, 5);
+assert.strictEqual(section.data.items[0].progress.complete, false);
+assert.strictEqual(section.data.items[0].progress.evidence, "objective_ratio");
 assert.strictEqual(section.data.items[0].navigation[0].text, "Лесная опушка");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_reads_available_quest_giver_route_and_pagination() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const title = { innerText: "Заблудшие враги", textContent: "Заблудшие враги" };
+const marker = { getAttribute(name) { return name === "alt" ? "Проложить путь" : null; } };
+const route = {
+  textContent: "Лес призраковПроложить путь", innerText: "Лес призраковПроложить путь",
+  getAttribute(name) { return name === "href" ? "#" : null; },
+  querySelectorAll(selector) { return selector === "img" ? [marker] : []; },
+};
+const giver = {
+  textContent: "Хранитель леса Франк", innerText: "Хранитель леса Франк",
+  getAttribute(name) { return name === "href" ? "/info/library/index.php?obj=cat&id=46&page=5" : null; },
+  querySelectorAll() { return []; },
+};
+const cardText = "Заблудшие враги Награда: Опыт: 6000. Местоположение: В Лесу призраков у Хранителя леса Франка.";
+const card = {
+  innerText: cardText, textContent: cardText,
+  querySelector(selector) { return selector === ".npc-point__title" ? title : null; },
+  querySelectorAll(selector) {
+    if (selector === "a") return [route, giver];
+    if (selector.includes("info/library")) return [giver];
+    return [];
+  },
+};
+const pageLink = { getAttribute(name) { return name === "href" ? "user_quest.php?mode=avail&page=2" : null; } };
+const document = {
+  title: "Квесты", body: { innerText: cardText, textContent: cardText },
+  querySelectorAll(selector) {
+    if (selector.includes("action=cancel")) return [];
+    if (selector === ".npc-point") return [card];
+    if (selector.includes("user_quest.php") && selector.includes("page=")) return [pageLink];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/user_quest.php?mode=avail&page=0" },
+  frames: [], document,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console });
+listeners.message({ source: root, data: {
+  source: `antibot-cv-content:${version}`, token: "available-quests",
+  command: { type: "state_snapshot", payload: { include: ["quests"] } },
+} });
+assert.strictEqual(messages.length, 1);
+const result = JSON.parse(messages[0].message).sections.quests.data;
+assert.strictEqual(result.mode, "avail");
+assert.strictEqual(result.availableCount, 1);
+assert.strictEqual(result.pageCount, 3);
+assert.strictEqual(result.items[0].status, "available");
+assert.strictEqual(result.items[0].title, "Заблудшие враги");
+assert.strictEqual(result.items[0].navigation[0].text, "Лес призраков");
+assert.deepStrictEqual(result.items[0].giverNames, ["Хранитель леса Франк"]);
+assert.strictEqual(result.items[0].reward, "Опыт: 6000.");
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
 
@@ -572,6 +666,80 @@ assert.strictEqual(messages[0].ok, true);
 const result = JSON.parse(messages[0].message);
 assert.strictEqual(result.sections.location.data.pageKind, "area");
 assert.strictEqual(result.sections.location.data.semanticName, "Курганы бренности");
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_submits_guarded_compass_route_step() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const location = {
+  _href: "https://3kingdoms.ru/area.php",
+  get href() { return this._href; },
+  set href(value) { this._href = String(value); },
+};
+const document = {
+  title: "",
+  body: { innerText: "", textContent: "" },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+const root = {
+  name: "top", location, frames: [], document, setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+  area: {
+    model: {
+      userGhost: false,
+      area: {
+        title: "Городская площадь Арсы",
+        ftime: 4,
+        finishTimeLocal: Date.now() - 1000,
+        compassLocation: {
+          id: "11", name: "Пригород Арсы", locId: "171", mode: "area",
+          href: "/action_run.php?code=COME_IN&area_id=171&url_success=area.php&url_error=area.php",
+          confirm: 0, hidden: false, ltime: 0, dtime: 0,
+        },
+      },
+    },
+    controller: { compass: { data: { location: 102, target: 200, foundPath: [171, 200] } } },
+  },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command(type, payload = {}) {
+  messages.length = 0;
+  listeners.message({ source: root, data: { source: `antibot-cv-content:${version}`, token: "route", command: { type, payload } } });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const snapshot = await command("location_route_snapshot");
+  assert.strictEqual(snapshot.ok, true);
+  assert.strictEqual(snapshot.message.location.semanticName, "Городская площадь Арсы");
+  assert.strictEqual(snapshot.message.currentLocationId, "102");
+  assert.strictEqual(snapshot.message.nextTransition.locId, "171");
+  assert.strictEqual(snapshot.message.timerReady, true);
+  const result = await command("location_route_step", { expectedCurrentLocationId: "102", navigationDelayMs: 25 });
+  assert.strictEqual(result.ok, true);
+  assert.strictEqual(result.message.submitted, true);
+  assert.strictEqual(result.message.transition.nextLocationId, "171");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.strictEqual(location.href.includes("code=COME_IN"), true);
+  assert.strictEqual(location.href.includes("area_id=171"), true);
+})().catch((error) => { console.error(error); process.exit(1); });
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
 
@@ -734,6 +902,76 @@ vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
   assert.strictEqual(result.target, "Курганы бренности");
   assert.strictEqual(result.snapshot.routeTransitions, 3);
   assert.strictEqual(result.snapshot.visibleGoButtonCount, 1);
+  assert.strictEqual(candidateClicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_selects_one_exact_monster_before_route_submission() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let bodyText = "";
+let candidateClicks = 0;
+const heading = { innerText: "Монстры", textContent: "Монстры", parentElement: null, children: [] };
+const section = { innerText: "", textContent: "", parentElement: null, children: [heading] };
+heading.parentElement = section;
+const compass = {
+  value: "", innerText: "", textContent: "", offsetWidth: 450, offsetHeight: 24,
+  getAttribute(name) { return name === "name" ? "compassInput" : null; },
+  querySelectorAll() { return []; }, focus() {}, dispatchEvent() {},
+};
+const routeButton = {
+  value: "Проложить маршрут", innerText: "", textContent: "", offsetWidth: 194, offsetHeight: 24,
+  getAttribute() { return null; }, querySelectorAll() { return []; }, click() {},
+};
+const candidate = {
+  innerText: "Бродячий муравей [4]", textContent: "Бродячий муравей [4]", parentElement: section,
+  offsetWidth: 300, offsetHeight: 20, children: [], getAttribute() { return null; }, querySelectorAll() { return []; },
+  click() { candidateClicks += 1; compass.value = "Бродячий муравей [4]"; bodyText = "Путь займет 5 переходов"; },
+};
+const document = {
+  title: "Навигатор",
+  body: { get innerText() { return bodyText; }, get textContent() { return bodyText; } },
+  querySelectorAll(selector) {
+    if (selector === "input,button") return [compass, routeButton];
+    if (selector === "div,li,a,button,[role='option']") return [heading, candidate];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/navigator.php" }, frames: [], document, setTimeout,
+  getComputedStyle() { return { display: "block", visibility: "visible" }; },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+(async () => {
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`, token: "select-monster",
+      command: { type: "navigator_select_target", payload: { target: "Бродячий муравей [4]", kind: "monster", searchDelayMs: 1, routeDelayMs: 1 } },
+    },
+  });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  assert.strictEqual(messages[0].ok, true);
+  const result = JSON.parse(messages[0].message);
+  assert.strictEqual(result.message, "navigator_target_selected");
+  assert.strictEqual(result.target, "Бродячий муравей [4]");
+  assert.strictEqual(result.snapshot.routeTransitions, 5);
   assert.strictEqual(candidateClicks, 1);
 })().catch((error) => { console.error(error); process.exit(1); });
 """
@@ -3229,6 +3467,11 @@ async function command(payload) {
 }
 
 (async () => {
+  const blocked = await command({ confirmed: 1, verifyTimeoutMs: 500 });
+  assert.strictEqual(blocked.ok, false);
+  assert.strictEqual(blocked.message.message, "target_filter_required");
+  assert.strictEqual(bot.fightId, 0);
+
   const confirmed = await command({ allowedLevels: [5], confirmed: 1, verifyTimeoutMs: 500 });
   assert.strictEqual(confirmed.ok, true);
   assert.strictEqual(confirmed.message.message, "huntAttack_confirmed");

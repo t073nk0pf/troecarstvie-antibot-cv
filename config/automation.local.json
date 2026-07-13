@@ -129,6 +129,8 @@
     ],
     "free_revive_only": true,
     "revive_verify_timeout_ms": 15000,
+    "post_revive_resource_timeout_ms": 120000,
+    "post_revive_max_item_attempts": 4,
     "checkpoint_interval_ms": 5000,
     "quest_refresh_every_cycles": 5,
     "quest_refresh_timeout_ms": 10000,

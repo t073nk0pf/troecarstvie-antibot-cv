@@ -23,6 +23,7 @@ class QuestIntent(str, Enum):
     START_FARM = "START_FARM"
     SELECT_QUEST = "SELECT_QUEST"
     NAVIGATE = "NAVIGATE"
+    OBJECTIVE_COMPLETE = "OBJECTIVE_COMPLETE"
     COMPLETE = "COMPLETE"
     STOP_UNSAFE = "STOP_UNSAFE"
 
@@ -42,6 +43,14 @@ class QuestObjectiveKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class QuestProgress:
+    current: int | None = None
+    required: int | None = None
+    complete: bool = False
+    evidence: str | None = None
+
+
+@dataclass(frozen=True)
 class QuestIdentity:
     client_id: str
     profile_id: str
@@ -57,6 +66,7 @@ class Quest:
     status: QuestStatus = QuestStatus.UNKNOWN
     objective_kind: QuestObjectiveKind = QuestObjectiveKind.UNKNOWN
     suitable: bool = True
+    progress: QuestProgress = QuestProgress()
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,7 @@ class QuestDecision:
     quest_title: str | None = None
     target_mobs: tuple[str, ...] = ()
     locations: tuple[str, ...] = ()
+    progress: QuestProgress = QuestProgress()
     snapshot_id: str | None = None
 
     @property
@@ -176,8 +187,11 @@ class QuestPolicy:
             quest_title=quest.title,
             target_mobs=quest.target_mobs,
             locations=quest.locations,
+            progress=quest.progress,
             snapshot_id=snapshot.snapshot_id,
         )
+        if quest.progress.complete:
+            return QuestDecision(QuestIntent.OBJECTIVE_COMPLETE, "quest_objective_complete", **common)
         if quest.locations and _normalize(snapshot.current_location) != _normalize(quest.locations[0]):
             return QuestDecision(QuestIntent.NAVIGATE, "quest_location_differs", **common)
         return QuestDecision(QuestIntent.SELECT_QUEST, "active_combat_quest_confirmed", **common)
@@ -278,6 +292,7 @@ def _quest_from_mapping(item: Mapping[str, Any]) -> Quest:
         status=status,
         objective_kind=kind,
         suitable=suitable is True,
+        progress=_progress_from_mapping(item),
     )
 
 
@@ -289,8 +304,38 @@ def _quest_valid(quest: Quest) -> bool:
         and isinstance(quest.status, QuestStatus)
         and isinstance(quest.objective_kind, QuestObjectiveKind)
         and isinstance(quest.suitable, bool)
+        and _progress_valid(quest.progress)
         and all(_valid_text(value) for value in (*quest.target_mobs, *quest.locations))
     )
+
+
+def _progress_from_mapping(item: Mapping[str, Any]) -> QuestProgress:
+    raw = item.get("progress")
+    progress = raw if isinstance(raw, Mapping) else item
+    current = _strict_int(progress.get("current", progress.get("progressCurrent")))
+    required = _strict_int(progress.get("required", progress.get("progressRequired")))
+    explicit_complete = _strict_bool(progress.get("complete", progress.get("objectiveComplete")))
+    complete = explicit_complete is True or (
+        current is not None and required is not None and required > 0 and current >= required
+    )
+    return QuestProgress(
+        current=current,
+        required=required,
+        complete=complete,
+        evidence=_clean_optional(progress.get("evidence", progress.get("progressEvidence"))),
+    )
+
+
+def _progress_valid(progress: QuestProgress) -> bool:
+    if not isinstance(progress, QuestProgress) or not isinstance(progress.complete, bool):
+        return False
+    if progress.current is not None and not _nonnegative_int(progress.current):
+        return False
+    if progress.required is not None and not _positive_int(progress.required):
+        return False
+    if progress.complete and progress.required is not None and progress.current is not None:
+        return progress.current >= progress.required
+    return progress.evidence is None or _valid_text(progress.evidence)
 
 
 def _explicit_names(item: Mapping[str, Any], *keys: str) -> tuple[str, ...]:

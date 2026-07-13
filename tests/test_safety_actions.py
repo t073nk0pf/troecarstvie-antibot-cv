@@ -559,6 +559,7 @@ def test_live_recovery_items_extends_open_timeout_for_inventory_delay(monkeypatc
 
 def test_live_recovery_items_skips_confirm_when_not_required(monkeypatch) -> None:
     calls: list[str] = []
+    client_ids: list[str | None] = []
 
     class FakeInjector:
         def __init__(self) -> None:
@@ -571,8 +572,10 @@ def test_live_recovery_items_skips_confirm_when_not_required(monkeypatch) -> Non
             *,
             timeout_s: float = 2.5,
             required_version: str | None = None,
+            client_id: str | None = None,
         ) -> InjectorResult:
             calls.append(command)
+            client_ids.append(client_id)
             if command == "open_recovery_item":
                 kind = str((payload or {}).get("kind"))
                 if kind == "health":
@@ -613,7 +616,7 @@ def test_live_recovery_items_skips_confirm_when_not_required(monkeypatch) -> Non
 
     logger = InMemoryEventLogger(dry_run=False)
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
-    sink = LiveMacActionSink(logger)
+    sink = LiveMacActionSink(logger, browser_client_id="client-a")
 
     ok = sink.execute(
         ActionRequest(
@@ -637,6 +640,7 @@ def test_live_recovery_items_skips_confirm_when_not_required(monkeypatch) -> Non
     assert calls.count("open_recovery_item") == 2
     assert "confirm_action_form" not in calls
     assert "resource_snapshot" in calls
+    assert client_ids and set(client_ids) == {"client-a"}
     attempts = logger.events[-1]["recovery_item_attempts"]
     assert attempts[-1]["confirm_skipped"] == "not_required"
 
@@ -737,6 +741,12 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
                     '{"message":"navigator_go_submitted","submitted":true}',
                     client_id,
                 )
+            if command == "location_route_step":
+                return InjectorResult(
+                    True,
+                    '{"message":"location_route_step_submitted","submitted":true}',
+                    client_id,
+                )
             raise AssertionError(command)
 
     logger = InMemoryEventLogger(dry_run=False)
@@ -761,7 +771,8 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
         ActionRequest(
             "navigator_select_target",
             metadata={
-                "target": "Курганы бренности",
+                "target": "Бродячий муравей [4]",
+                "target_kind": "monster",
                 "navigator_client_id": "child-client",
                 "search_delay_ms": 250,
                 "route_delay_ms": 350,
@@ -776,6 +787,13 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             dry_run=False,
         )
     )
+    assert sink.execute(
+        ActionRequest(
+            "location_route_step",
+            metadata={"expected_current_location_id": "102", "navigation_delay_ms": 75},
+            dry_run=False,
+        )
+    )
 
     assert calls == [
         ("open_quest_navigator", "parent-client", {"target": "Дикий предел"}),
@@ -784,11 +802,16 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
             "navigator_select_target",
             "child-client",
             {
-                "target": "Курганы бренности",
-                "kind": "location",
+                "target": "Бродячий муравей [4]",
+                "kind": "monster",
                 "searchDelayMs": 250,
                 "routeDelayMs": 350,
             },
         ),
         ("navigator_go", "child-client", {"expectedTarget": "Дикий предел"}),
+        (
+            "location_route_step",
+            "parent-client",
+            {"expectedCurrentLocationId": "102", "navigationDelayMs": 75},
+        ),
     ]

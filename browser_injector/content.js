@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-11-leveling-mvp-v18";
+  const bridgeVersion = "2026-07-13-quest-sections-v29";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";

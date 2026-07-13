@@ -460,7 +460,7 @@ class LiveMacActionSink:
                 "navigator_select_target",
                 {
                     "target": target,
-                    "kind": "location",
+                    "kind": str(metadata.get("target_kind") or "location"),
                     "searchDelayMs": metadata.get("search_delay_ms", 250),
                     "routeDelayMs": metadata.get("route_delay_ms", 350),
                 },
@@ -528,6 +528,40 @@ class LiveMacActionSink:
                 "action_blocked",
                 logged_request,
                 block_reason=f"injector_navigator_go_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
+        if request.action_type == "location_route_step":
+            metadata = dict(request.metadata or {})
+            result = self._execute_injector(
+                global_browser_injector(),
+                "location_route_step",
+                {
+                    "expectedCurrentLocationId": metadata.get("expected_current_location_id", ""),
+                    "navigationDelayMs": metadata.get("navigation_delay_ms", 75),
+                },
+                timeout_s=3.0,
+            )
+            result_metadata = {
+                **metadata,
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            parsed: dict[str, object] | None = None
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and parsed is not None and parsed.get("submitted") is True:
+                _log_action(self.logger, "location_route_step_submitted", logged_request, dry_run=False)
+                return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_location_route_step_failed:{_compact_injector_message(result.message)}",
             )
             return False
 
@@ -636,13 +670,21 @@ class LiveMacActionSink:
                                 attempt["confirm_skipped"] = "not_required"
                                 if between_items_delay_s:
                                     time.sleep(between_items_delay_s)
-                                refresh_result = _refresh_resource_source_after_use(injector)
+                                refresh_result = _refresh_resource_source_after_use(
+                                    injector,
+                                    client_id=self.browser_client_id,
+                                )
                                 if refresh_result is not None:
                                     attempt["resource_refresh_ok"] = refresh_result.ok
                                     attempt["resource_refresh_message"] = _compact_injector_message(
                                         refresh_result.message
                                     )
-                                percent_after = _wait_resource_percent_after_use(injector, percent_key, percent_before)
+                                percent_after = _wait_resource_percent_after_use(
+                                    injector,
+                                    percent_key,
+                                    percent_before,
+                                    client_id=self.browser_client_id,
+                                )
                                 if percent_after is not None:
                                     last_percent = percent_after
                                     attempt["percent_after"] = percent_after
@@ -677,7 +719,10 @@ class LiveMacActionSink:
                     if confirm_result.ok:
                         if between_items_delay_s:
                             time.sleep(between_items_delay_s)
-                        refresh_result = _refresh_resource_source_after_use(injector)
+                        refresh_result = _refresh_resource_source_after_use(
+                            injector,
+                            client_id=self.browser_client_id,
+                        )
                         if refresh_result is not None:
                             attempt["resource_refresh_ok"] = refresh_result.ok
                             attempt["resource_refresh_message"] = _compact_injector_message(
@@ -687,6 +732,7 @@ class LiveMacActionSink:
                             injector,
                             percent_key,
                             attempt.get("percent_before"),
+                            client_id=self.browser_client_id,
                         )
                         if percent_after is not None:
                             last_percent = percent_after
@@ -901,9 +947,17 @@ def _resource_percent_from_open_result(parsed: dict[str, object], percent_key: s
         return None
 
 
-def _resource_percent_from_snapshot(injector: object, percent_key: str) -> float | None:
+def _resource_percent_from_snapshot(
+    injector: object,
+    percent_key: str,
+    *,
+    client_id: str | None = None,
+) -> float | None:
     try:
-        result = injector.execute("resource_snapshot", timeout_s=2.5)  # type: ignore[attr-defined]
+        kwargs: dict[str, object] = {"timeout_s": 2.5}
+        if client_id:
+            kwargs["client_id"] = client_id
+        result = injector.execute("resource_snapshot", **kwargs)  # type: ignore[attr-defined]
     except Exception:
         return None
     if not getattr(result, "ok", False):
@@ -928,6 +982,7 @@ def _wait_resource_percent_after_use(
     percent_key: str,
     previous_percent: object | None,
     *,
+    client_id: str | None = None,
     timeout_s: float = 3.0,
     interval_s: float = 0.5,
 ) -> float | None:
@@ -938,7 +993,7 @@ def _wait_resource_percent_after_use(
         previous = None
     last_seen: float | None = None
     while True:
-        current = _resource_percent_from_snapshot(injector, percent_key)
+        current = _resource_percent_from_snapshot(injector, percent_key, client_id=client_id)
         if current is not None:
             last_seen = current
             if previous is not None and current > previous:
@@ -950,9 +1005,16 @@ def _wait_resource_percent_after_use(
         time.sleep(max(0.05, interval_s))
 
 
-def _refresh_resource_source_after_use(injector: object) -> object | None:
+def _refresh_resource_source_after_use(
+    injector: object,
+    *,
+    client_id: str | None = None,
+) -> object | None:
     try:
-        return injector.execute("resource_refresh", timeout_s=2.5)  # type: ignore[attr-defined]
+        kwargs: dict[str, object] = {"timeout_s": 2.5}
+        if client_id:
+            kwargs["client_id"] = client_id
+        return injector.execute("resource_refresh", **kwargs)  # type: ignore[attr-defined]
     except Exception:
         return None
 

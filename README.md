@@ -3,6 +3,13 @@
 Local macOS CV automation harness for generating controlled game-session
 samples for anti-bot detector development.
 
+Current implementation status and the next verified development step are kept
+in [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md). Confirmed changes and live
+test conclusions are recorded in
+[`docs/DEVELOPMENT_LOG.md`](docs/DEVELOPMENT_LOG.md).
+The target product, current milestone, and staged exit criteria are defined in
+[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md).
+
 This project is intentionally not a stealth automation tool. It does not bypass
 anti-cheat, CAPTCHA, game restrictions, browser internals, process memory, or
 network traffic. Dry-run mode is the default and records intended actions

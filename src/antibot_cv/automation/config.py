@@ -148,6 +148,8 @@ class LevelingConfig:
     auto_target_level_offsets: tuple[int, ...] = (0,)
     free_revive_only: bool = True
     revive_verify_timeout_ms: int = 15000
+    post_revive_resource_timeout_ms: int = 120000
+    post_revive_max_item_attempts: int = 4
     checkpoint_interval_ms: int = 5000
     quest_refresh_every_cycles: int = 5
     quest_refresh_timeout_ms: int = 10000

@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from src.antibot_cv.automation.browser_injector import CURRENT_BRIDGE_VERSION, BrowserInjectorServer
+from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, LiveMacActionSink
 from src.antibot_cv.automation.config import to_plain_dict
 from src.antibot_cv.automation.controller import AutomationRunOptions, load_config, run_automation
+from src.antibot_cv.automation.safety import SafetyGuard
+from src.antibot_cv.automation.session import SessionState
 
 
 @dataclass
@@ -56,6 +59,8 @@ class AutomationControlApi:
             return self.state_snapshot(_query_client_id(query), _query_include(query))
         if path == "/api/location-route" and method == "GET":
             return self.location_route(_query_client_id(query))
+        if path == "/api/location-route-step" and method == "POST":
+            return self.location_route_step(payload or {})
         if path == "/api/start" and method == "POST":
             return self.start(payload or {})
         if path == "/api/stop" and method == "POST":
@@ -184,6 +189,107 @@ class AutomationControlApi:
             "snapshot": snapshot if isinstance(snapshot, dict) else None,
         }
         return (200 if payload["ok"] else 502), payload
+
+    def location_route_step(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if not self.allow_live:
+            return 403, {
+                "ok": False,
+                "error": "live_server_not_authorized",
+                "message": "Restart control-server with the explicit --live flag.",
+            }
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        before_status, before_payload = self.location_route(resolved_client_id)
+        before_snapshot = before_payload.get("snapshot") if before_status == 200 else None
+        if not isinstance(before_snapshot, dict):
+            return 409, {
+                "ok": False,
+                "error": "location_route_snapshot_unavailable",
+                "client_id": resolved_client_id,
+                "before": before_payload,
+            }
+        expected_current_location_id = str(
+            payload.get("expectedCurrentLocationId")
+            or before_snapshot.get("currentLocationId")
+            or ""
+        ).strip()
+        config = replace(load_config(self.default_config), dry_run=False)
+        guard = SafetyGuard(config)
+        guard.set_dry_run(False)
+        session = SessionState(requested_cycles=1)
+        executor = ActionExecutor(
+            guard=guard,
+            session=session,
+            sink=LiveMacActionSink(browser_client_id=resolved_client_id),
+        )
+        submitted = executor.execute(
+            ActionRequest(
+                "location_route_step",
+                dry_run=False,
+                metadata={
+                    "expected_current_location_id": expected_current_location_id,
+                    "navigation_delay_ms": max(25, min(250, int(payload.get("navigationDelayMs") or 75))),
+                },
+            )
+        )
+        if not submitted:
+            return 409, {
+                "ok": False,
+                "error": "location_route_step_blocked",
+                "client_id": resolved_client_id,
+                "before": _compact_route_snapshot(before_snapshot),
+            }
+        verify_delay_ms = max(300, min(3000, int(payload.get("verifyDelayMs") or 900)))
+        time.sleep(verify_delay_ms / 1000)
+        after_status, after_payload = self.location_route(resolved_client_id)
+        after_snapshot = after_payload.get("snapshot") if after_status == 200 else None
+        before_location_id = str(before_snapshot.get("currentLocationId") or "")
+        after_location_id = (
+            str(after_snapshot.get("currentLocationId") or "")
+            if isinstance(after_snapshot, dict)
+            else ""
+        )
+        before_location = before_snapshot.get("location")
+        after_location = after_snapshot.get("location") if isinstance(after_snapshot, dict) else None
+        next_transition = before_snapshot.get("nextTransition")
+        before_name = (
+            str(before_location.get("semanticName") or "").strip()
+            if isinstance(before_location, dict)
+            else ""
+        )
+        after_name = (
+            str(after_location.get("semanticName") or "").strip()
+            if isinstance(after_location, dict)
+            else ""
+        )
+        expected_next_name = (
+            str(next_transition.get("name") or "").strip()
+            if isinstance(next_transition, dict)
+            else ""
+        )
+        verified_by_id = bool(
+            before_location_id and after_location_id and before_location_id != after_location_id
+        )
+        verified_by_name = bool(
+            expected_next_name
+            and after_name == expected_next_name
+            and before_name != after_name
+        )
+        verified = verified_by_id or verified_by_name
+        verification_method = "location_id" if verified_by_id else "semantic_name" if verified_by_name else None
+        return 200, {
+            "ok": True,
+            "submitted": True,
+            "verified": verified,
+            "verification_method": verification_method,
+            "client_id": resolved_client_id,
+            "total_actions": session.total_actions,
+            "before": _compact_route_snapshot(before_snapshot),
+            "after": _compact_route_snapshot(after_snapshot) if isinstance(after_snapshot, dict) else None,
+            "after_error": None if isinstance(after_snapshot, dict) else after_payload,
+        }
 
     def start(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if "live" in payload and not isinstance(payload.get("live"), bool):
@@ -420,6 +526,23 @@ class AutomationControlApi:
 def _query_client_id(query: dict[str, list[str]]) -> str | None:
     value = query.get("clientId", [None])[0] or query.get("client_id", [None])[0]
     return str(value).strip() if value else None
+
+
+def _compact_route_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    location = snapshot.get("location")
+    return {
+        "href": snapshot.get("href"),
+        "pageKind": snapshot.get("pageKind"),
+        "location": location if isinstance(location, dict) else None,
+        "currentLocationId": snapshot.get("currentLocationId"),
+        "targetLocationId": snapshot.get("targetLocationId"),
+        "foundPath": snapshot.get("foundPath") if isinstance(snapshot.get("foundPath"), list) else [],
+        "nextTransition": snapshot.get("nextTransition") if isinstance(snapshot.get("nextTransition"), dict) else None,
+        "transitionTimerSeconds": snapshot.get("transitionTimerSeconds"),
+        "timerReady": snapshot.get("timerReady"),
+    }
 
 
 def _query_include(query: dict[str, list[str]]) -> list[str] | None:
