@@ -3808,6 +3808,55 @@ def test_leveling_routes_through_child_navigator_for_matching_quest_location(
     assert sink.requests[1].metadata["navigator_client_id"] == "navigator-client"
 
 
+def test_dialogue_route_returns_parent_to_area_after_navigator_submit(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.browser_injector import InjectorResult
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    controller = AutomationController(
+        test_config, sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.state_machine.state = GameState.NAVIGATOR_PENDING
+    controller._navigator_target_name = "Туманные луга"
+    controller._navigator_client_id = "navigator-client"
+    controller._navigator_started_monotonic = time.monotonic()
+    controller._navigator_requires_target_selection = False
+    controller._route_recovery_kind = "quest_dialogue"
+    controller._find_navigator_client = lambda: {"client_id": "navigator-client"}
+
+    class FakeInjector:
+        def execute(self, command, *, timeout_s, client_id):
+            assert command == "navigator_snapshot"
+            return InjectorResult(
+                True,
+                json.dumps(
+                    {
+                        "snapshotId": "dialogue-route",
+                        "generatedAt": time.time(),
+                        "href": "https://3kingdoms.ru/navigator.php?name=x",
+                        "target": "Туманные луга",
+                        "currentLocation": False,
+                        "hasRoute": True,
+                        "routeTransitions": 2,
+                        "visibleGoButtonCount": 1,
+                    }
+                ),
+                client_id=client_id,
+            )
+
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: FakeInjector())
+
+    controller._handle_navigator_pending()
+
+    assert controller.state_machine.state is GameState.ROUTE_RECOVERY
+    assert [request.action_type for request in sink.requests] == ["navigator_go", "open_area"]
+    assert sink.requests[-1].metadata["reason"] == "navigator_route_post_submit"
+
+
 def test_leveling_stops_on_ambiguous_quest_route_without_opening_hunt(
     test_config: AutomationConfig,
 ) -> None:

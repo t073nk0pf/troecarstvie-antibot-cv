@@ -203,7 +203,7 @@ class NavigationRuntimeMixin:
         if not self.action_executor.execute(request):
             self._stop_leveling_unsafe("navigator_go_failed_or_ambiguous")
             return
-        if self._route_recovery_kind == "quest_accept":
+        if self._route_recovery_kind in {"quest_accept", "quest_dialogue"}:
             if not self.config.dry_run:
                 time.sleep(0.35)
             open_area = ActionRequest(
