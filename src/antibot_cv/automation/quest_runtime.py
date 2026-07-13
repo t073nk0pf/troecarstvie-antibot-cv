@@ -40,8 +40,10 @@ class QuestRuntimeMixin:
     def _init_quest_runtime(self) -> None:
         self._quest_origin_location_name: str | None = None
         self._quest_target_names: tuple[str, ...] = ()
+        self._quest_target_levels: tuple[int, ...] = ()
         self._quest_route_locations: tuple[str, ...] = ()
         self._quest_target_routes: dict[str, tuple[str, ...]] = {}
+        self._quest_route_link_label: str | None = None
         self._next_quest_refresh_cycle = (
             0
             if (
@@ -124,7 +126,33 @@ class QuestRuntimeMixin:
         )
         raw_items = quest_data.get("items")
         quests: list[PolicyQuest] = []
-        if isinstance(raw_items, list):
+        active_objective = (
+            self._quest_director.active_objective
+            if self._quest_director is not None
+            else None
+        )
+        if (
+            director_quest_id is not None
+            and active_objective is not None
+            and active_objective.quest_id == director_quest_id
+        ):
+            quests.append(
+                PolicyQuest(
+                    id=active_objective.quest_id,
+                    title=active_objective.quest_title,
+                    target_mobs=(active_objective.monster.name,),
+                    locations=(active_objective.monster.target,),
+                    status=QuestStatus.ACTIVE,
+                    objective_kind=QuestObjectiveKind.COMBAT,
+                    progress=QuestProgress(
+                        active_objective.progress,
+                        active_objective.required,
+                        active_objective.complete,
+                        "active_catalog_objective_fingerprint",
+                    ),
+                )
+            )
+        elif isinstance(raw_items, list):
             for item in raw_items:
                 if not isinstance(item, dict):
                     quests.append(PolicyQuest(None, None))
@@ -276,7 +304,7 @@ class QuestRuntimeMixin:
         director = self._quest_director
         if director is None:
             return None
-        decision = director.decision()
+        decision = director.decision(current_level_cap=self.current_level)
         key = (
             decision.intent.value,
             decision.reason,
@@ -296,6 +324,12 @@ class QuestRuntimeMixin:
                 quest_location=decision.quest.location if decision.quest else None,
                 quest_givers=list(decision.quest.giver_names) if decision.quest else [],
                 intake_queue=[quest.id for quest in decision.intake_queue],
+                active_catalog_revision=director.active_catalog.revision,
+                objective_fingerprint=(
+                    director.active_objective.fingerprint
+                    if director.active_objective is not None
+                    else None
+                ),
             )
         return decision
 
@@ -331,14 +365,18 @@ class QuestRuntimeMixin:
         if decision.intent is QuestIntent.OBJECTIVE_COMPLETE:
             self._active_quest_id = decision.quest_id
             self._quest_target_names = ()
+            self._quest_target_levels = ()
             self._quest_route_locations = decision.locations
             self._quest_target_routes = {}
+            self._quest_route_link_label = None
             return
         if decision.intent not in {QuestIntent.SELECT_QUEST, QuestIntent.NAVIGATE}:
             self._active_quest_id = None
             self._quest_target_names = ()
+            self._quest_target_levels = ()
             self._quest_route_locations = ()
             self._quest_target_routes = {}
+            self._quest_route_link_label = None
             return
         self._active_quest_id = decision.quest_id
         self._quest_target_names = decision.target_mobs
@@ -347,6 +385,13 @@ class QuestRuntimeMixin:
             target: decision.locations
             for target in decision.target_mobs
         }
+        objective = self._quest_director.active_objective if self._quest_director is not None else None
+        if objective is not None and objective.quest_id == decision.quest_id:
+            self._quest_target_levels = (objective.monster.level,)
+            self._quest_route_link_label = objective.navigator_label
+        else:
+            self._quest_target_levels = ()
+            self._quest_route_link_label = None
 
     @staticmethod
     def _quest_progress_from_item(item: dict[str, object]) -> QuestProgress:
@@ -431,6 +476,8 @@ class QuestRuntimeMixin:
         return None
 
     def _effective_target_names(self) -> tuple[str, ...]:
+        if self._quest_director is not None and self._quest_director.active_objective is not None:
+            return self._quest_target_names
         configured = tuple(name for name in self.config.target.allowed_names if name)
         if configured:
             return configured
@@ -446,6 +493,12 @@ class QuestRuntimeMixin:
         if not config.enabled:
             return False
         if self._quest_director is not None:
+            if (
+                self._quest_director.active_objective is not None
+                and self._quest_director.active_snapshot_fresh
+                and self.session.completed_cycles >= self._next_quest_refresh_cycle
+            ):
+                return self._request_active_quest_snapshot("quest_objective_victory_refresh")
             decision = self._quest_director_decision()
             if decision is None:
                 return False
@@ -542,7 +595,9 @@ class QuestRuntimeMixin:
         if self._quest_active_page_requested is not None:
             return True
         if not self._quest_active_snapshot_requested:
-            director.begin_active_refresh()
+            director.begin_active_refresh(
+                after_confirmed_victory=reason == "quest_objective_victory_refresh"
+            )
             self._quest_active_snapshot_requested = True
         page = director.active_catalog.next_page
         if page is None:
@@ -564,6 +619,17 @@ class QuestRuntimeMixin:
         if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
             self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
         return True
+
+    def _prepare_post_revive_active_quest_refresh(self) -> None:
+        """Require a complete fresh active catalogue before quest resumption."""
+
+        director = self._quest_director
+        if director is None:
+            return
+        director.begin_active_refresh()
+        self._quest_active_snapshot_requested = True
+        self._quest_active_page_requested = 0
+        self._quest_active_request_snapshot_id = self._current_state_snapshot_id
 
     def _invalidate_quest_snapshot_cache(self) -> None:
         self._state_snapshot_cache = None
@@ -826,13 +892,26 @@ class QuestRuntimeMixin:
                     cycle_id=self.session.cycle_id,
                     battle_id=self.session.battle_id,
                     dry_run=self.config.dry_run,
-                    metadata={"reason": "quest_location_route", "target": target},
+                    metadata={
+                        "reason": "quest_location_route",
+                        "target": target,
+                        **(
+                            {"link_label": self._quest_route_link_label}
+                            if self._quest_route_link_label
+                            else {}
+                        ),
+                    },
                 )
                 if not self.action_executor.execute(request):
                     self._stop_leveling_unsafe("quest_navigator_open_failed")
                     return
                 self._navigator_target_name = target
-                self._navigator_target_kind = "location"
+                self._navigator_target_kind = (
+                    "monster"
+                    if self._quest_director is not None
+                    and self._quest_director.active_objective is not None
+                    else "location"
+                )
                 self._navigator_opened_monotonic = time.monotonic()
                 self._navigator_client_id = None
                 self._navigator_client_bound_monotonic = None
@@ -856,7 +935,12 @@ class QuestRuntimeMixin:
         )
         if not self.action_executor.execute(request):
             return self._stop_leveling_unsafe("quest_refresh_return_failed")
-        interval = max(1, int(self.config.leveling.quest_refresh_every_cycles))
+        interval = (
+            1
+            if self._quest_director is not None
+            and self._quest_director.active_objective is not None
+            else max(1, int(self.config.leveling.quest_refresh_every_cycles))
+        )
         self._next_quest_refresh_cycle = self.session.completed_cycles + interval
         self._quest_refresh_requested_monotonic = None
         self._navigator_target_name = None

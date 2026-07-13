@@ -24,8 +24,8 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-npc-proxy-v46`
-- Chrome extension version: `0.3.15`
+- Chrome bridge version: `2026-07-13-quest-objective-v47`
+- Chrome extension version: `0.3.16`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -60,6 +60,14 @@ leveling product.
   `Взять задание` control, and re-read every active-quest page before
   acknowledging success. Ambiguous names, IDs, controls, or stale snapshots
   fail closed. Autonomous mode remains disabled by default.
+- The first executable objective slice is implemented offline: from a complete
+  active catalogue the director selects the first supported exact monster
+  target at or below the character level, preserves its navigator link label,
+  routes to that monster, constrains hunt selection to its exact name and
+  level, and requires a complete active-list refresh after every victory and
+  after resurrection. It never skips an earlier navigation step to reach a
+  later monster, and stops after ten confirmed victories without observable
+  quest progress.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
@@ -120,11 +128,11 @@ to 24 and telemetry recorded `quest_accept_confirmed`.
 
 ## Current Blocker
 
-For autonomous questing, the next blocker is objective decomposition and
-execution: convert active quest text into bounded travel, interaction, combat,
-collection, and return-to-giver tasks, then verify progress and turn-in. Exact
-NPC quest acceptance and full active-list verification are now implemented and
-confirmed live.
+For autonomous questing, exact monster-hunt selection and route handoff are now
+implemented and covered end to end offline. The next blocker is a bounded live
+proof followed by step advancement and turn-in. Dialogue, pure travel,
+location-action, collection completion, and chained objectives still require
+their own typed executors before level-20 operation can be unattended.
 
 Route construction and full guarded multi-step movement are confirmed live, and
 the route loop is integrated into the main controller recovery state.
@@ -156,8 +164,8 @@ is two more consecutive natural recoveries, bringing the current streak from
 `max_deaths_recovered` stop, rather than relying on an external polling stop.
 This validation should not be replaced by repeated startup-only runs.
 
-Bridge v46 adds the bounded global catalogue and exact NPC acceptance slices
-described above. It does not yet execute arbitrary quest objectives or turn in
+Bridge v47 adds exact monster navigator selection for the first supported
+objective type. It does not yet execute arbitrary quest objectives or turn in
 completed quests. This work must not displace the M1 live gate.
 
 Compass targets are runtime inputs. Recovery is not tied to a specific monster
@@ -268,7 +276,7 @@ the current verified streak is `1/3`.
 1. Read this file, then `docs/DEVELOPMENT_LOG.md`.
    Use `docs/DEVELOPMENT_PLAN.md` to confirm the current milestone and avoid
    expanding scope before its exit gate passes.
-2. Start the control server and confirm bridge v38 with `version_ok: true`.
+2. Start the control server and confirm bridge v47 with `version_ok: true`.
 3. Start one bounded live run for the selected game tab.
 4. Trigger or observe one natural death while traveling/farming.
 5. Verify the full recovery sequence reaches the original destination and

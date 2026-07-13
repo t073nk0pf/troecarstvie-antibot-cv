@@ -408,25 +408,39 @@
   const openQuestNavigator = (payload) => {
     const context = mainContentContext();
     const target = safeString(payload && payload.target, 180);
+    const explicitLinkLabel = safeString(payload && payload.linkLabel, 180);
+    const linkLabel = explicitLinkLabel || target;
     if (context.pageKind !== "quests" || !context.doc) {
       return { ok: false, message: "quest_page_missing", pageKind: context.pageKind };
     }
     if (!target) return { ok: false, message: "quest_navigator_target_missing" };
     const candidates = questNavigatorLinks(context.doc);
-    const matches = candidates.filter((element) => exactLabelMatches(questNavigatorLabel(element), target));
+    const matches = candidates.filter((element) => {
+      if (!exactLabelMatches(questNavigatorLabel(element), linkLabel)) return false;
+      if (!explicitLinkLabel) return true;
+      const observedTarget = questNavigatorTargetFromOnclick(attr(element, "onclick"));
+      return exactLabelMatches(observedTarget, target);
+    });
     if (matches.length !== 1) {
       return {
         ok: false,
         message: matches.length ? "quest_navigator_link_ambiguous" : "quest_navigator_link_missing",
         target,
+        linkLabel,
         matchCount: matches.length,
       };
     }
     const link = matches[0];
     if (typeof link.click !== "function") return { ok: false, message: "quest_navigator_link_not_clickable", target };
-    const observedTarget = questNavigatorLabel(link);
+    const observedLinkLabel = questNavigatorLabel(link);
     link.click();
-    return { ok: true, message: "quest_navigator_opened", submitted: true, target: observedTarget };
+    return {
+      ok: true,
+      message: "quest_navigator_opened",
+      submitted: true,
+      target,
+      linkLabel: observedLinkLabel,
+    };
   };
 
   const percentFromText = (text, labels) => {

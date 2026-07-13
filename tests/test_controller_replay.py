@@ -11,6 +11,7 @@ from src.antibot_cv.automation.config import AutomationConfig
 from src.antibot_cv.automation.controller import AutomationController, _apply_runtime_overrides
 from src.antibot_cv.automation.actions import DryRunActionSink
 from src.antibot_cv.automation.death_recovery import RecoveryCheckpoint
+from src.antibot_cv.automation.quest_director_policy import QuestDirectorIntent
 from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.detection.attack import AttackButtonDetection
 from src.antibot_cv.detection.battle_end import BattleEndDetection
@@ -3028,6 +3029,7 @@ def test_leveling_revive_restores_active_quest_route_checkpoint(test_config: Aut
         "enabled": True,
         "target_level": 10,
         "auto_navigate_quest_targets": True,
+        "autonomous_quest_director": True,
     }
     controller = AutomationController(
         AutomationConfig.from_dict(data), sink_mode="live", logger=InMemoryEventLogger(dry_run=False)
@@ -3038,6 +3040,43 @@ def test_leveling_revive_restores_active_quest_route_checkpoint(test_config: Aut
     controller.current_location_name = "Дикий предел"
     controller._active_quest_id = "quest-91"
     controller._current_state_snapshot_id = "dead-state"
+    director = controller._quest_director
+    assert director is not None
+    director.begin_catalog_refresh()
+    director.ingest_catalog_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [],
+            "truncated": False,
+        }
+    )
+    director.begin_active_refresh()
+    director.ingest_active_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "started",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [
+                {
+                    "id": "91",
+                    "title": "Охота",
+                    "status": "active",
+                    "objective": "Убейте волка",
+                    "navigation": [{"text": "Волк", "target": "Волк [5]"}],
+                    "progress": None,
+                }
+            ],
+            "truncated": False,
+        }
+    )
+    assert director.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert director.active_snapshot_fresh is True
 
     assert controller._handle_leveling_death(
         {"dead": True, "freeReviveAvailable": True, "freeReviveOptionCount": 1}
@@ -3052,6 +3091,10 @@ def test_leveling_revive_restores_active_quest_route_checkpoint(test_config: Aut
     assert [request.action_type for request in sink.requests] == ["revive_free", "open_quests"]
     assert sink.requests[-1].metadata["checkpoint_quest"] == "quest-91"
     assert sink.requests[-1].metadata["checkpoint_location"] == "Дикий предел"
+    assert director.active_snapshot_fresh is False
+    assert director.active_catalog.complete is False
+    assert controller._quest_active_snapshot_requested is True
+    assert controller._quest_active_page_requested == 0
 
 
 def test_leveling_periodically_refreshes_quest_targets(test_config: AutomationConfig) -> None:
@@ -3371,6 +3414,119 @@ def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(
     assert mismatched.reason == "quest_snapshot_identity_mismatch"
     assert controller._quest_target_names == ()
     assert controller._quest_route_locations == ()
+
+
+def test_autonomous_director_routes_exact_supported_monster_from_complete_active_catalog(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_policy import QuestIntent
+    import src.antibot_cv.automation.browser_injector as browser_injector_module
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 20,
+        "required_character_name": "v3g45",
+        "autonomous_quest_director": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="replay",
+        logger=InMemoryEventLogger(),
+        browser_client_id="client-a",
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_character_name = "v3g45"
+    controller.current_level = 5
+    controller.current_xp_percent = 20.0
+    controller.current_page_kind = "area"
+    controller._last_state_snapshot_client_id = "client-a"
+
+    class FakeInjector:
+        def client_snapshot(self, client_id):
+            return {
+                "client_id": client_id,
+                "client_seen": True,
+                "version_ok": True,
+                "profile_id": "profile-a",
+                "tab_id": 17,
+            }
+
+    monkeypatch.setattr(browser_injector_module, "global_browser_injector", lambda: FakeInjector())
+
+    assert controller._maybe_start_quest_refresh()
+    controller.current_page_kind = "quests"
+    controller._observe_autonomous_quest_snapshot(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "snapshotId": "catalog-empty",
+            "items": [],
+            "truncated": False,
+        }
+    )
+    controller._handle_quest_refresh()
+
+    active_items = [
+        {
+            "id": "1",
+            "title": "Разговор",
+            "status": "active",
+            "objective": "Поговорите с Франком",
+            "navigation": [{"text": "Франк", "target": "Дом Франка"}],
+            "progress": None,
+        },
+        {
+            "id": "2",
+            "title": "Кабанья угроза",
+            "status": "active",
+            "objective": "Добудьте трофеи с кабанов-секачей",
+            "navigation": [
+                {"text": "Кабанов-секачей", "target": "Кабан-секач [5]"},
+                {"text": "Врата Древних", "target": "Врата Древних"},
+            ],
+            "progress": None,
+        },
+    ]
+    active_snapshot = {
+        "loadStatus": "loaded",
+        "mode": "started",
+        "currentPage": 0,
+        "pageCount": 1,
+        "hasNextPage": False,
+        "snapshotId": "active-complete",
+        "generatedAt": time.time(),
+        "pageKind": "quests",
+        "href": "https://3kingdoms.ru/user_quest.php?mode=started",
+        "currentLocation": "Городская площадь",
+        "items": active_items,
+        "truncated": False,
+    }
+    controller._observe_autonomous_quest_snapshot(active_snapshot)
+
+    decision = controller._evaluate_quest_policy(
+        {"snapshotId": "active-complete", "generatedAt": active_snapshot["generatedAt"]},
+        {"source": {"href": active_snapshot["href"]}},
+        active_snapshot,
+    )
+    controller._handle_quest_refresh()
+
+    assert decision.intent is QuestIntent.NAVIGATE
+    assert controller._quest_director.active_objective is not None
+    assert controller._quest_director.active_objective.quest_id == "2"
+    assert controller._effective_target_names() == ("Кабан-секач",)
+    assert controller._effective_target_levels() == (5,)
+    assert controller._navigator_target_kind == "monster"
+    assert sink.requests[-1].action_type == "open_quest_navigator"
+    assert sink.requests[-1].metadata["target"] == "Кабан-секач [5]"
+    assert sink.requests[-1].metadata["link_label"] == "Кабанов-секачей"
 
 
 def test_empty_loaded_quest_snapshot_cannot_start_quest_driven_farm(

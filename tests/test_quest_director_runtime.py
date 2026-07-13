@@ -45,6 +45,25 @@ def active_page(page: int, count: int, *items: dict[str, object]) -> dict[str, o
     }
 
 
+def active_monster(
+    quest_id: str,
+    *,
+    target: str = "Кабан-секач [5]",
+    progress: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": quest_id,
+        "title": f"Quest {quest_id}",
+        "status": "active",
+        "objective": "Убивая Кабанов-секачей, получите трофей.",
+        "navigation": [
+            {"text": "Кабанов-секачей", "target": target},
+            {"text": "Врата Древних", "target": "Врата Древних"},
+        ],
+        "progress": progress,
+    }
+
+
 def test_catalog_refresh_builds_intake_queue_across_every_page() -> None:
     runtime = QuestDirectorRuntime()
     assert runtime.decision().intent is QuestDirectorIntent.REFRESH_AVAILABLE
@@ -154,3 +173,91 @@ def test_active_snapshot_rejects_synthetic_identity() -> None:
 
     with pytest.raises(ValueError, match="identity"):
         runtime.observe_active([{"id": "active:title", "title": "Title", "status": "active"}])
+
+
+def test_execution_selects_supported_monster_from_complete_catalog_not_first_ref() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(
+        active_page(
+            0,
+            1,
+            {
+                "id": "1",
+                "title": "Dialogue",
+                "status": "active",
+                "objective": "Поговорите с воеводой.",
+                "navigation": [{"text": "Город", "target": "Город"}],
+                "progress": None,
+            },
+            active_monster("2"),
+        )
+    )
+
+    decision = runtime.decision(current_level_cap=5)
+
+    assert decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert decision.quest is not None and decision.quest.id == "2"
+    assert runtime.active_objective is not None
+    assert runtime.active_objective.monster.target == "Кабан-секач [5]"
+    assert runtime.active_objective_revision == 1
+
+
+def test_execution_fails_closed_without_complete_active_catalog() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
+    runtime.observe_active([{"id": "2", "title": "Quest 2", "status": "active"}])
+
+    decision = runtime.decision(current_level_cap=5)
+
+    assert decision.intent is QuestDirectorIntent.STOP_UNSAFE
+    assert decision.reason == "quest_objective_active_catalog_incomplete"
+
+
+def test_execution_requires_full_refresh_after_progress_and_stops_on_completed_step() -> None:
+    runtime = QuestDirectorRuntime()
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(
+        active_page(0, 1, active_monster("2", progress={"current": 3, "required": 5, "complete": False}))
+    )
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+
+    runtime.begin_active_refresh()
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.REFRESH_ACTIVE
+    runtime.ingest_active_page(
+        active_page(0, 1, active_monster("2", progress={"current": 4, "required": 5, "complete": False}))
+    )
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(
+        active_page(0, 1, active_monster("2", progress={"current": 5, "required": 5, "complete": True}))
+    )
+    stopped = runtime.decision(current_level_cap=5)
+    assert stopped.intent is QuestDirectorIntent.STOP_UNSAFE
+    assert "objective" in stopped.reason
+
+
+def test_execution_stops_after_bounded_confirmed_victories_without_progress() -> None:
+    runtime = QuestDirectorRuntime(max_unchanged_victories=2)
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1, active_monster("2", progress=None)))
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+
+    runtime.begin_active_refresh(after_confirmed_victory=True)
+    runtime.ingest_active_page(active_page(0, 1, active_monster("2", progress=None)))
+    assert runtime.decision(current_level_cap=5).intent is QuestDirectorIntent.EXECUTE_ACTIVE
+
+    runtime.begin_active_refresh(after_confirmed_victory=True)
+    runtime.ingest_active_page(active_page(0, 1, active_monster("2", progress=None)))
+    stopped = runtime.decision(current_level_cap=5)
+
+    assert stopped.intent is QuestDirectorIntent.STOP_UNSAFE
+    assert "unchanged_after_victory_budget" in stopped.reason

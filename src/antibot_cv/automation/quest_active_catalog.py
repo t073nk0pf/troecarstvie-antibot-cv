@@ -43,10 +43,17 @@ class ActiveQuestCatalogAccumulator:
         self._page_count: int | None = None
         self._pages: dict[int, tuple[ActiveQuestEntry, ...]] = {}
         self._by_id: dict[str, ActiveQuestEntry] = {}
+        self._revision = 0
 
     @property
     def page_count(self) -> int | None:
         return self._page_count
+
+    @property
+    def revision(self) -> int:
+        """Monotonic count of fully validated catalogue snapshots."""
+
+        return self._revision
 
     @property
     def collected_pages(self) -> tuple[int, ...]:
@@ -118,7 +125,10 @@ class ActiveQuestCatalogAccumulator:
         self._pages[page] = parsed
         for entry in parsed:
             self._by_id[entry.id] = entry
-        return self.result if self.complete else None
+        if self.complete:
+            self._revision += 1
+            return self.result
+        return None
 
 
 def _parse_entry(raw: object) -> ActiveQuestEntry:

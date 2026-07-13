@@ -762,6 +762,16 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
     )
     assert sink.execute(
         ActionRequest(
+            "open_quest_navigator",
+            metadata={
+                "target": "Кабан-секач [5]",
+                "link_label": "Кабанов-секачей",
+            },
+            dry_run=False,
+        )
+    )
+    assert sink.execute(
+        ActionRequest(
             "open_location_navigator",
             metadata={"target": "Курганы бренности"},
             dry_run=False,
@@ -797,6 +807,12 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
 
     assert calls == [
         ("open_quest_navigator", "parent-client", {"target": "Дикий предел"}, 2.5),
+        (
+            "open_quest_navigator",
+            "parent-client",
+            {"target": "Кабан-секач [5]", "linkLabel": "Кабанов-секачей"},
+            2.5,
+        ),
         ("open_location_navigator", "parent-client", {}, 2.5),
         (
             "navigator_select_target",

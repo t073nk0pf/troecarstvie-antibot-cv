@@ -32,6 +32,8 @@ browser bundle reproducibility contract.
 - `quest_giver.py`: conservative catalogue-giver to area-NPC matching.
 - `quest_director_policy.py` / `quest_director_runtime.py`: action-free quest
   scheduling policy and its observed state.
+- `quest_objective_runtime.py`: pure fail-closed parsing, selection, and
+  refresh comparison for typed active-quest objectives.
 - `navigation_runtime.py`: hunt target selection, compass child-window flow,
   route execution, direction and scrollbar search.
 - `combat_runtime.py`: battle synchronization, combat policy execution, skills,

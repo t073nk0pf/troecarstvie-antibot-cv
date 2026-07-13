@@ -1,5 +1,31 @@
 # Development Log
 
+## 2026-07-13 - Exact Monster Quest Objective Slice
+
+- Inspected all 24 currently active quests across the complete three-page live
+  catalogue and separated monster combat/collection, NPC dialogue, travel,
+  location-action, return, and chained objective shapes.
+- Added an action-free objective runtime that selects the first supported exact
+  `Name [level]` monster target from the complete active catalogue, rejects
+  ambiguous or above-level targets, fingerprints the step, and compares fresh
+  progress without treating a partial catalogue as authoritative.
+- Wired the selected quest target and exact navigator link label through the
+  quest orchestrator, safety action, and browser bridge. Quest name and level
+  override generic farming filters only while that typed objective is active.
+- Added a complete active-catalogue revision and mandatory refresh after every
+  confirmed victory. Same-step progress can continue; completion, a changed
+  step, removal, or regression stops safely for the next executor slice.
+- Restricted execution to a single monster target in the first actionable
+  navigation entry, bounded unchanged progress to ten confirmed victories, and
+  required a complete new active catalogue after resurrection before quest
+  execution can resume.
+- Aligned the generated bridge, content script, background worker, and Python
+  broker at `2026-07-13-quest-objective-v47`; extension version is `0.3.16`.
+- Added focused parser, director, action, JavaScript, and controller integration
+  coverage. Live mutation proof is intentionally pending until the updated
+  extension is active and the accept-all intake queue is exhausted or a
+  separately bounded objective test is started.
+
 ## 2026-07-13 - Exact NPC Quest Intake And Live Acceptance
 
 - Added a dedicated NPC quest bridge module with fail-closed area-NPC and

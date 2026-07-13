@@ -11,12 +11,28 @@ from src.antibot_cv.automation.quest_director_policy import (
     QuestRef,
     QuestDirectorIntent,
 )
+from src.antibot_cv.automation.quest_objective_runtime import (
+    ObjectiveRefreshComparison,
+    ObjectiveRefreshState,
+    ObjectiveSelectionStatus,
+    QuestObjective,
+    compare_refreshed_objective,
+    select_monster_hunt_objective,
+)
 
 
 class QuestDirectorRuntime:
     """Maintain director observations while an orchestrator performs actions."""
 
-    def __init__(self, *, refresh_every_completed: int = 5, catalog_max_pages: int = 20) -> None:
+    def __init__(
+        self,
+        *,
+        refresh_every_completed: int = 5,
+        catalog_max_pages: int = 20,
+        max_unchanged_victories: int = 10,
+    ) -> None:
+        if max_unchanged_victories <= 0:
+            raise ValueError("max unchanged victories must be positive")
         self.policy = QuestDirectorPolicy(refresh_every_completed=refresh_every_completed)
         self.catalog = QuestCatalogAccumulator(max_pages=catalog_max_pages)
         self.active_catalog = ActiveQuestCatalogAccumulator(max_pages=catalog_max_pages)
@@ -29,8 +45,14 @@ class QuestDirectorRuntime:
         self.available_quests: tuple[QuestRef, ...] = ()
         self.intake_queue: tuple[QuestRef, ...] = ()
         self.pending_accept: QuestRef | None = None
+        self.active_objective: QuestObjective | None = None
+        self.active_objective_revision: int | None = None
+        self.objective_refresh: ObjectiveRefreshComparison | None = None
+        self.max_unchanged_victories = max_unchanged_victories
+        self.unchanged_victory_refreshes = 0
+        self._active_refresh_after_victory = False
 
-    def decision(self) -> QuestDirectorDecision:
+    def decision(self, *, current_level_cap: int | None = None) -> QuestDirectorDecision:
         if self.pending_accept is not None:
             return QuestDirectorDecision(
                 QuestDirectorIntent.WAIT,
@@ -40,6 +62,49 @@ class QuestDirectorRuntime:
             )
         result = self.policy.decide(self.snapshot())
         self.intake_queue = result.intake_queue
+        if result.intent is QuestDirectorIntent.EXECUTE_ACTIVE:
+            if current_level_cap is None:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.STOP_UNSAFE,
+                    "quest_objective_level_cap_missing",
+                    intake_queue=self.intake_queue,
+                )
+            if not self.active_catalog.complete:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.STOP_UNSAFE,
+                    "quest_objective_active_catalog_incomplete",
+                    intake_queue=self.intake_queue,
+                )
+            if self.objective_refresh is not None and self.objective_refresh.state in {
+                ObjectiveRefreshState.ADVANCED,
+                ObjectiveRefreshState.QUEST_REMOVED,
+                ObjectiveRefreshState.REGRESSED_UNSAFE,
+            }:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.STOP_UNSAFE,
+                    f"quest_objective_refresh:{self.objective_refresh.reason}",
+                    intake_queue=self.intake_queue,
+                )
+            if self.active_objective is None:
+                selection = select_monster_hunt_objective(
+                    self.active_catalog.result,
+                    current_level_cap=current_level_cap,
+                )
+                if selection.status is not ObjectiveSelectionStatus.SELECTED or selection.objective is None:
+                    return QuestDirectorDecision(
+                        QuestDirectorIntent.STOP_UNSAFE,
+                        f"quest_objective_selection:{selection.reason}",
+                        intake_queue=self.intake_queue,
+                    )
+                self.active_objective = selection.objective
+                self.active_objective_revision = self.active_catalog.revision
+                self.unchanged_victory_refreshes = 0
+            result = QuestDirectorDecision(
+                QuestDirectorIntent.EXECUTE_ACTIVE,
+                "supported_monster_hunt_ready",
+                quest=QuestRef(self.active_objective.quest_id, self.active_objective.quest_title),
+                intake_queue=self.intake_queue,
+            )
         return result
 
     def snapshot(self) -> QuestDirectorState:
@@ -101,9 +166,11 @@ class QuestDirectorRuntime:
         self.active_quests = tuple(refs)
         self.active_snapshot_fresh = True
 
-    def begin_active_refresh(self) -> None:
+    def begin_active_refresh(self, *, after_confirmed_victory: bool = False) -> None:
         self.active_catalog.reset()
         self.active_snapshot_fresh = False
+        self.objective_refresh = None
+        self._active_refresh_after_victory = after_confirmed_victory
 
     def ingest_active_page(self, data: object) -> int | None:
         result = self.active_catalog.ingest(data)
@@ -111,6 +178,35 @@ class QuestDirectorRuntime:
             return self.active_catalog.next_page
         self.active_quests = tuple(QuestRef(entry.id, entry.title) for entry in result)
         self.active_snapshot_fresh = True
+        if self.active_objective is not None:
+            previous = self.active_objective
+            comparison = compare_refreshed_objective(
+                previous,
+                result,
+                current_level_cap=previous.monster.level,
+            )
+            progressed = (
+                comparison.state is ObjectiveRefreshState.SAME_STEP
+                and comparison.refreshed is not None
+                and previous.progress is not None
+                and comparison.refreshed.progress is not None
+                and comparison.refreshed.progress > previous.progress
+            )
+            if self._active_refresh_after_victory and comparison.state is ObjectiveRefreshState.SAME_STEP:
+                self.unchanged_victory_refreshes = (
+                    0 if progressed else self.unchanged_victory_refreshes + 1
+                )
+                if self.unchanged_victory_refreshes >= self.max_unchanged_victories:
+                    comparison = ObjectiveRefreshComparison(
+                        ObjectiveRefreshState.REGRESSED_UNSAFE,
+                        comparison.refreshed,
+                        "quest_progress_unchanged_after_victory_budget",
+                    )
+            self.objective_refresh = comparison
+            if comparison.state is ObjectiveRefreshState.SAME_STEP and comparison.refreshed is not None:
+                self.active_objective = comparison.refreshed
+                self.active_objective_revision = self.active_catalog.revision
+        self._active_refresh_after_victory = False
         return None
 
     def begin_accept(self, quest_id: str) -> QuestRef:
@@ -145,6 +241,11 @@ class QuestDirectorRuntime:
         if not any(quest.id == quest_id for quest in self.active_quests):
             raise RuntimeError("completed quest was not active")
         self.active_quests = tuple(quest for quest in self.active_quests if quest.id != quest_id)
+        if self.active_objective is not None and self.active_objective.quest_id == quest_id:
+            self.active_objective = None
+            self.active_objective_revision = None
+            self.objective_refresh = None
+            self.unchanged_victory_refreshes = 0
         self.completed_since_refresh += 1
 
     def expire_available_snapshot(self) -> None:

@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-13-npc-proxy-v46";
+  const bridgeVersion = "2026-07-13-quest-objective-v47";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";

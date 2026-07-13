@@ -1570,7 +1570,7 @@ assert.strictEqual(clicks, 1);
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_page_bridge_opens_quest_navigator_by_location_label() -> None:
+def test_page_bridge_opens_quest_navigator_by_exact_label_and_route_target() -> None:
     script = r"""
 const assert = require("assert");
 const fs = require("fs");
@@ -1583,9 +1583,13 @@ const listeners = {};
 let clicks = 0;
 const marker = { getAttribute(name) { return name === "alt" ? "Проложить путь" : null; } };
 const link = {
-  textContent: "Дикий предел",
-  innerText: "Дикий предел",
-  getAttribute(name) { return name === "href" ? "#" : null; },
+  textContent: "Кабанов-секачей",
+  innerText: "Кабанов-секачей",
+  getAttribute(name) {
+    if (name === "href") return "#";
+    if (name === "onclick") return "showMsg('navigator.php?name=%CA%E0%E1%E0%ED-%F1%E5%EA%E0%F7%20%5B5%5D','Navigator',560,423);return false;";
+    return null;
+  },
   querySelectorAll(selector) { return selector === "img" ? [marker] : []; },
   click() { clicks += 1; },
 };
@@ -1605,19 +1609,23 @@ const root = {
 root.top = root;
 root.window = root;
 
-vm.runInNewContext(source, { window: root, console });
+vm.runInNewContext(source, { window: root, console, TextDecoder });
 listeners.message({
   source: root,
   data: {
     source: `antibot-cv-content:${version}`,
     token: "quest-route-token",
-    command: { type: "open_quest_navigator", payload: { target: "Дикий предел" } },
+    command: {
+      type: "open_quest_navigator",
+      payload: { target: "Кабан-секач [5]", linkLabel: "Кабанов-секачей" },
+    },
   },
 });
 assert.strictEqual(messages.length, 1);
 assert.strictEqual(messages[0].ok, true);
 const result = JSON.parse(messages[0].message);
-assert.strictEqual(result.target, "Дикий предел");
+assert.strictEqual(result.target, "Кабан-секач [5]");
+assert.strictEqual(result.linkLabel, "Кабанов-секачей");
 assert.strictEqual(clicks, 1);
 """
     result = subprocess.run(

@@ -676,7 +676,14 @@ class LiveMacActionSink:
             result = self._execute_injector(
                 global_browser_injector(),
                 "open_quest_navigator",
-                {"target": metadata.get("target", "")},
+                {
+                    "target": metadata.get("target", ""),
+                    **(
+                        {"linkLabel": metadata.get("link_label")}
+                        if metadata.get("link_label")
+                        else {}
+                    ),
+                },
                 timeout_s=2.5,
             )
             result_metadata = {

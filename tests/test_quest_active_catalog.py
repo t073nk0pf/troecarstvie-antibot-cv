@@ -34,6 +34,7 @@ def page(number: int, count: int, items: list[dict[str, object]]) -> dict[str, o
 def test_collects_sequential_pages_and_exposes_result_only_after_terminal_page() -> None:
     catalog = ActiveQuestCatalogAccumulator()
 
+    assert catalog.revision == 0
     assert catalog.ingest(page(0, 2, [item("1"), item("2")])) is None
     assert catalog.complete is False
     assert catalog.next_page == 1
@@ -49,6 +50,7 @@ def test_collects_sequential_pages_and_exposes_result_only_after_terminal_page()
     assert tuple(entry.title for entry in result) == ("Quest 1", "Quest 2", "Quest 3")
     assert catalog.complete is True
     assert catalog.next_page is None
+    assert catalog.revision == 1
 
 
 def test_empty_terminal_catalogue_is_distinct_from_incomplete_catalogue() -> None:
@@ -150,10 +152,16 @@ def test_reset_discards_previous_result_and_requires_a_new_terminal_page() -> No
     catalog = ActiveQuestCatalogAccumulator()
     catalog.ingest(page(0, 1, [item("1")]))
 
+    assert catalog.revision == 1
+
     catalog.reset()
 
     assert catalog.complete is False
     assert catalog.collected_pages == ()
     assert catalog.next_page == 0
+    assert catalog.revision == 1
     with pytest.raises(ActiveQuestCatalogError, match="incomplete"):
         _ = catalog.result
+
+    catalog.ingest(page(0, 1, []))
+    assert catalog.revision == 2

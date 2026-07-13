@@ -671,6 +671,7 @@ class LevelingRuntimeMixin:
             )
             if not self.action_executor.execute(request):
                 return self._stop_leveling_unsafe("post_revive_quest_open_failed")
+            self._prepare_post_revive_active_quest_refresh()
             self._quest_refresh_requested_monotonic = time.monotonic()
             self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="post_revive_quest_opened")
             self.logger.log_event(
@@ -807,6 +808,13 @@ class LevelingRuntimeMixin:
         return True
 
     def _effective_target_levels(self) -> tuple[int, ...]:
+        quest_levels = tuple(
+            int(level)
+            for level in getattr(self, "_quest_target_levels", ())
+            if isinstance(level, int) and not isinstance(level, bool) and level > 0
+        )
+        if quest_levels:
+            return quest_levels
         configured = tuple(int(level) for level in self.config.target.allowed_levels if int(level) > 0)
         if configured:
             return configured
