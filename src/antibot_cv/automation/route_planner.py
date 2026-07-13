@@ -332,6 +332,24 @@ def validate_navigator_route(
         return NavigatorRouteDecision(RouteAction.STOP_UNSAFE, "navigator_current_location_unknown", target, snapshot_id=snapshot_id)
     visible_buttons = snapshot.get("visibleGoButtonCount")
     transitions = snapshot.get("routeTransitions")
+    route_length_observed = (
+        isinstance(transitions, int)
+        and not isinstance(transitions, bool)
+        and transitions > 0
+    )
+    if (
+        snapshot.get("hasRoute") is False
+        and isinstance(visible_buttons, int)
+        and not isinstance(visible_buttons, bool)
+        and visible_buttons >= 0
+    ):
+        return NavigatorRouteDecision(
+            RouteAction.REFRESH,
+            "navigator_route_render_pending",
+            target,
+            transitions if route_length_observed else None,
+            snapshot_id,
+        )
     if (
         snapshot.get("hasRoute") is not True
         or not isinstance(visible_buttons, int)
@@ -340,9 +358,7 @@ def validate_navigator_route(
     ):
         return NavigatorRouteDecision(RouteAction.STOP_UNSAFE, "navigator_route_ambiguous", target, snapshot_id=snapshot_id)
     if (
-        not isinstance(transitions, int)
-        or isinstance(transitions, bool)
-        or transitions <= 0
+        not route_length_observed
         or not isinstance(max_transitions, int)
         or isinstance(max_transitions, bool)
         or max_transitions <= 0

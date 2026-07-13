@@ -1,12 +1,12 @@
 importScripts("update_runtime.js");
 
 const ENDPOINT = "http://127.0.0.1:17654";
-const BRIDGE_VERSION = "2026-07-13-self-update-v31";
+const BRIDGE_VERSION = "2026-07-13-visibility-v36";
 const PROFILE_ID_KEY = "antibotCvProfileId";
 let profileIdPromise = null;
 const tabSessionNonceById = new Map();
 
-globalThis.AntibotCvUpdateRuntime.registerExtensionUpdateLifecycle({
+const extensionUpdateLifecycle = globalThis.AntibotCvUpdateRuntime.registerExtensionUpdateLifecycle({
   chromeApi: chrome,
   bridgeVersion: BRIDGE_VERSION,
 });
@@ -14,6 +14,7 @@ const extensionUpdateMonitor = globalThis.AntibotCvUpdateRuntime.startExtensionU
   chromeApi: chrome,
   bridgeVersion: BRIDGE_VERSION,
   endpoint: ENDPOINT,
+  ready: extensionUpdateLifecycle.startup,
 });
 
 const ALLOWED_PATHS = [

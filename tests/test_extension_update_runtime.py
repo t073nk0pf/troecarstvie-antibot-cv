@@ -15,6 +15,8 @@ def test_extension_update_runtime_is_wired_without_new_permissions() -> None:
     assert 'importScripts("update_runtime.js")' in background
     assert "registerExtensionUpdateLifecycle" in background
     assert "startExtensionUpdateMonitor" in background
+    assert "const extensionUpdateLifecycle" in background
+    assert "ready: extensionUpdateLifecycle.startup" in background
     assert "const extensionUpdateMonitor" in background
     assert "void extensionUpdateMonitor.checkNow()" in background
     assert 'const status = await api("/status")' in popup
@@ -36,9 +38,16 @@ const context = { URL, console };
 vm.runInNewContext(source, context);
 const update = context.AntibotCvUpdateRuntime;
 const key = update.UPDATE_MARKER_KEY;
+const refreshKey = update.TAB_REFRESH_RETRY_KEY;
 
-function makeChrome({ url = "https://3kingdoms.ru/main.php", marker = null } = {}) {
-  const data = marker ? { [key]: marker } : {};
+function makeChrome({
+  url = "https://3kingdoms.ru/main.php",
+  marker = null,
+  refreshRetry = null,
+} = {}) {
+  const data = {};
+  if (marker) data[key] = marker;
+  if (refreshRetry) data[refreshKey] = refreshRetry;
   const events = [];
   const state = { data, events, runtimeReloads: 0, tabReloads: 0, listener: null };
   const chromeApi = {
@@ -155,6 +164,13 @@ async function expectCode(promise, code) {
     expectedVersion: "v31",
     attemptedAt: 1000,
   });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(requested.state.data[refreshKey])), {
+    tabId: 17,
+    expectedVersion: "v31",
+    createdAt: 1000,
+    retryAfter: 1000 + update.TAB_REFRESH_RETRY_BACKOFF_MS,
+    attempts: 0,
+  });
   assert.deepStrictEqual(requested.state.events, ["tabs.query", "storage.set", "runtime.reload"]);
 
   const validMarker = { tabId: 17, expectedVersion: "v31", createdAt: 1000, attempts: 0 };
@@ -168,10 +184,18 @@ async function expectCode(promise, code) {
   const startupResult = await registration.startup;
   assert.strictEqual(startupResult.handled, true);
   assert.strictEqual(consumed.state.data[key], undefined);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(consumed.state.data[refreshKey])), {
+    tabId: 17,
+    expectedVersion: "v31",
+    createdAt: 1050,
+    retryAfter: 1050 + update.TAB_REFRESH_RETRY_BACKOFF_MS,
+    attempts: 0,
+  });
   assert.deepStrictEqual(consumed.state.events, [
     "onInstalled.addListener",
     "storage.get",
     "tabs.get",
+    "storage.set",
     "storage.remove",
     "tabs.reload:17:true",
   ]);
@@ -179,7 +203,6 @@ async function expectCode(promise, code) {
   assert.strictEqual(consumed.state.tabReloads, 1);
 
   for (const [marker, currentTime] of [
-    [{ tabId: 17, expectedVersion: "other", createdAt: 1000, attempts: 0 }, 1050],
     [{ tabId: 17, expectedVersion: "v31", createdAt: 0, attempts: 0 }, 200000],
     [{ tabId: 17, expectedVersion: "v31", createdAt: 1000, attempts: 1 }, 1050],
   ]) {
@@ -195,6 +218,25 @@ async function expectCode(promise, code) {
     assert.strictEqual(rejected.state.tabReloads, 0);
   }
 
+  const oldWorkerMarker = { tabId: 17, expectedVersion: "v31", createdAt: 1000, attempts: 0 };
+  const oldWorkerRetry = {
+    tabId: 17,
+    expectedVersion: "v31",
+    createdAt: 1000,
+    retryAfter: 2000,
+    attempts: 0,
+  };
+  const oldWorker = makeChrome({ marker: oldWorkerMarker, refreshRetry: oldWorkerRetry });
+  const oldWorkerResult = await update.consumePendingUpdate({
+    chromeApi: oldWorker.chromeApi,
+    bridgeVersion: "v30",
+    now: () => 1050,
+  });
+  assert.strictEqual(oldWorkerResult.reason, "worker_version_mismatch");
+  assert.deepStrictEqual(oldWorker.state.data[key], oldWorkerMarker);
+  assert.deepStrictEqual(oldWorker.state.data[refreshKey], oldWorkerRetry);
+  assert.strictEqual(oldWorker.state.tabReloads, 0);
+
   const navigated = makeChrome({
     url: "https://example.com/after-marker",
     marker: { tabId: 17, expectedVersion: "v31", createdAt: 1000, attempts: 0 },
@@ -204,9 +246,158 @@ async function expectCode(promise, code) {
     bridgeVersion: "v31",
     now: () => 1050,
   });
-  assert.strictEqual(navigatedResult.reason, "tab_not_game");
+  assert.strictEqual(navigatedResult.reason, "tab_not_primary_game");
   assert.strictEqual(navigated.state.data[key], undefined);
+  assert.strictEqual(navigated.state.data[refreshKey], undefined);
   assert.strictEqual(navigated.state.tabReloads, 0);
+
+  const refreshRecord = {
+    tabId: 17,
+    expectedVersion: "v31",
+    createdAt: 5000,
+    retryAfter: 6000,
+    attempts: 0,
+  };
+  const beforeRefreshBackoff = makeChrome({ refreshRetry: refreshRecord });
+  const backoffResult = await update.checkForExtensionUpdate({
+    chromeApi: beforeRefreshBackoff.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() { return { ok: true, any_running: false, required_version: "v31", clients: [] }; },
+    }),
+    now: () => 5500,
+  });
+  assert.strictEqual(backoffResult.reason, "tab_refresh_backoff");
+  assert.strictEqual(beforeRefreshBackoff.state.tabReloads, 0);
+  assert.notStrictEqual(beforeRefreshBackoff.state.data[refreshKey], undefined);
+
+  const stalePrimary = makeChrome({ refreshRetry: refreshRecord });
+  const staleResult = await update.checkForExtensionUpdate({
+    chromeApi: stalePrimary.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          any_running: false,
+          required_version: "v31",
+          clients: [
+            {
+              client_seen: true,
+              tab_id: 17,
+              client_version: "v30",
+              href: "https://3kingdoms.ru/main.php",
+            },
+            {
+              client_seen: true,
+              tab_id: 21,
+              client_version: "v31",
+              href: "https://3kingdoms.ru/navigator.php",
+            },
+          ],
+        };
+      },
+    }),
+    now: () => 6000,
+  });
+  assert.strictEqual(staleResult.requested, true);
+  assert.strictEqual(staleResult.reason, "tab_refresh_retry_requested");
+  assert.strictEqual(staleResult.tabId, 17);
+  assert.strictEqual(stalePrimary.state.data[refreshKey], undefined);
+  assert.strictEqual(stalePrimary.state.tabReloads, 1);
+  assert.deepStrictEqual(stalePrimary.state.events.slice(-3), [
+    "tabs.get",
+    "storage.remove",
+    "tabs.reload:17:true",
+  ]);
+  const afterOneRetry = await update.checkForExtensionUpdate({
+    chromeApi: stalePrimary.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() { return { ok: true, any_running: false, required_version: "v31", clients: [] }; },
+    }),
+    now: () => 7000,
+  });
+  assert.strictEqual(afterOneRetry.reason, "already_current");
+  assert.strictEqual(stalePrimary.state.tabReloads, 1);
+
+  const confirmedPrimary = makeChrome({ refreshRetry: refreshRecord });
+  const confirmedResult = await update.checkForExtensionUpdate({
+    chromeApi: confirmedPrimary.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          any_running: false,
+          required_version: "v31",
+          clients: [{
+            client_seen: true,
+            tab_id: 17,
+            client_version: "v31",
+            href: "https://3kingdoms.ru/main.php",
+          }],
+        };
+      },
+    }),
+    now: () => 5500,
+  });
+  assert.strictEqual(confirmedResult.reason, "tab_refresh_confirmed");
+  assert.strictEqual(confirmedPrimary.state.data[refreshKey], undefined);
+  assert.strictEqual(confirmedPrimary.state.tabReloads, 0);
+
+  const offOriginClient = makeChrome({ refreshRetry: refreshRecord });
+  const offOriginResult = await update.checkForExtensionUpdate({
+    chromeApi: offOriginClient.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          ok: true,
+          any_running: false,
+          required_version: "v31",
+          clients: [{
+            client_seen: true,
+            tab_id: 17,
+            client_version: "v31",
+            href: "",
+          }],
+        };
+      },
+    }),
+    now: () => 6000,
+  });
+  assert.strictEqual(offOriginResult.reason, "tab_refresh_retry_requested");
+  assert.strictEqual(offOriginClient.state.data[refreshKey], undefined);
+  assert.strictEqual(offOriginClient.state.tabReloads, 1);
+
+  const navigatorRefresh = makeChrome({
+    url: "https://3kingdoms.ru/navigator.php",
+    refreshRetry: refreshRecord,
+  });
+  const navigatorRefreshResult = await update.checkForExtensionUpdate({
+    chromeApi: navigatorRefresh.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() { return { ok: true, any_running: false, required_version: "v31", clients: [] }; },
+    }),
+    now: () => 6000,
+  });
+  assert.strictEqual(navigatorRefreshResult.reason, "tab_refresh_tab_not_primary");
+  assert.strictEqual(navigatorRefresh.state.data[refreshKey], undefined);
+  assert.strictEqual(navigatorRefresh.state.tabReloads, 0);
 
   const unavailable = makeChrome();
   const unavailableResult = await update.checkForExtensionUpdate({
@@ -340,6 +531,35 @@ async function expectCode(promise, code) {
   assert.strictEqual((await monitor.checkNow()).reason, "cooldown");
   assert.strictEqual(fetchCalls, 1);
   monitor.stop();
+
+  let releaseStartup;
+  const startupGate = new Promise((resolve) => { releaseStartup = resolve; });
+  let gatedFetchCalls = 0;
+  const gatedScheduled = [];
+  const gatedMonitorChrome = makeChrome();
+  const gatedMonitor = update.startExtensionUpdateMonitor({
+    chromeApi: gatedMonitorChrome.chromeApi,
+    bridgeVersion: "v31",
+    endpoint: "http://127.0.0.1:17654",
+    ready: startupGate,
+    fetchImpl: async () => {
+      gatedFetchCalls += 1;
+      return {
+        ok: true,
+        async json() { return { ok: true, any_running: false, required_version: "v31" }; },
+      };
+    },
+    now: () => 8000,
+    setTimeoutImpl(callback, delay) { gatedScheduled.push({ callback, delay }); return gatedScheduled.length; },
+    clearTimeoutImpl() {},
+  });
+  const gatedCheck = gatedMonitor.checkNow();
+  await Promise.resolve();
+  assert.strictEqual(gatedFetchCalls, 0);
+  releaseStartup({ handled: true, reason: "tab_reloaded" });
+  assert.strictEqual((await gatedCheck).reason, "already_current");
+  assert.strictEqual(gatedFetchCalls, 1);
+  gatedMonitor.stop();
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

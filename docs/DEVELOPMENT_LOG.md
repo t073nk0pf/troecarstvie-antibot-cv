@@ -1,5 +1,38 @@
 # Development Log
 
+## 2026-07-13 - Bridge v36 And First Complete M1 Natural Recovery
+
+- Made the page bridge load explicitly as UTF-8 on the game's legacy-encoded
+  pages, preserving Cyrillic navigator labels such as `Монстры` and the exact
+  target `Белая Рысь [6]`.
+- Hardened exact autocomplete section resolution, delayed route rendering,
+  hidden duplicate route-button filtering, navigator child handoff, and strict
+  parent-page route confirmation after a child ACK timeout.
+- Added a guarded `open_area` preparation action so a run starting on hunt can
+  capture a semantic location checkpoint before configured navigation.
+- Added a bounded exact-tab extension refresh retry and lifecycle ordering;
+  aligned Python, content, background, and generated bridge versions at
+  `2026-07-13-visibility-v36` with manifest version `0.3.5`.
+- Live session `c3fc0238e6c049548af0b610cbd9b07d` selected and attacked one
+  `Белая Рысь` level 6, observed one natural death, used the confirmed free
+  resurrection, restored resources, returned to `Порт безбрежного моря`, and
+  reopened hunt. No paid action or controller error was recorded. The external
+  polling stop arrived after one second attack request, exposing a bounded-run
+  race; no second battle was observed before the stop.
+- Fixed that race inside the controller: a positive reached death limit now
+  stops synchronously after `death_recovery_completed`, and the leveling policy
+  no longer grants an off-by-one extra farm attempt. A focused full-recovery
+  regression proves that `max_deaths_per_session=1` opens hunt, records all
+  evidence, enters `STOPPED`, and emits no further attack.
+- Recovery ID `mriuwwj6-47` contains all nine ordered M1 phases. Offline
+  assessment passed with `complete_attempts=1`,
+  `consecutive_complete_attempts=1`, and `offline_ready=true`; the formal M1
+  streak is now `1/3`.
+- Validation: full `349 passed` regression suite, deterministic generated
+  bridge, JavaScript syntax, authored-source line limits, and
+  `git diff --check` passed. Independent review found no unresolved blocking
+  finding.
+
 ## 2026-07-13 - Extension Self-Update And Navigator Child Hardening
 
 - Added an idle-only extension update runtime with a one-shot persistent

@@ -32,6 +32,10 @@
     try {
       const style = win && typeof win.getComputedStyle === "function" ? win.getComputedStyle(element) : null;
       if (style && (style.display === "none" || style.visibility === "hidden")) return false;
+      if (typeof element.getClientRects === "function") {
+        const rects = Array.from(element.getClientRects() || []);
+        return rects.some((rect) => Number(rect.width) > 0 || Number(rect.height) > 0);
+      }
       if (Number(element.offsetWidth) > 0 || Number(element.offsetHeight) > 0) return true;
       return !style || style.display !== "none";
     } catch (_) {
@@ -126,26 +130,91 @@
     return { ok: true, message: "navigator_go_submitted", submitted: true, before };
   };
 
-  const navigatorCandidateSection = (element) => {
-    let node = element && element.parentElement;
+  const navigatorSectionHeader = (element) => {
+    const label = safeString(element && (element.innerText || element.textContent), 120)
+      .trim()
+      .toLowerCase();
+    const match = label.match(/^(локации|ресурсы|монстры|персонажи|инстансы)\s*:?[\s]*$/);
+    return match ? match[1] : "";
+  };
+
+  const navigatorSectionPrefix = (element) => {
+    const label = safeString(element && (element.innerText || element.textContent), 500)
+      .trim()
+      .toLowerCase();
+    const match = label.match(/^(локации|ресурсы|монстры|персонажи|инстансы)(?:\s|$)/);
+    return { section: match ? match[1] : "", label };
+  };
+
+  const navigatorPrecedingSiblings = (element, limit = 120) => {
+    const siblings = [];
+    let sibling = element && element.previousElementSibling;
+    while (sibling && siblings.length < limit) {
+      siblings.push(sibling);
+      sibling = sibling.previousElementSibling;
+    }
+    if (siblings.length || !element || !element.parentElement) return siblings;
+    const children = Array.from(element.parentElement.children || []);
+    const index = children.indexOf(element);
+    if (index < 0) return siblings;
+    return children.slice(Math.max(0, index - limit), index).reverse();
+  };
+
+  const navigatorCandidateSectionDiagnostic = (element) => {
+    const inspected = [];
+    let node = element;
     for (let depth = 0; node && depth < 8; depth += 1) {
-      const nodeLabel = safeString(node && (node.innerText || node.textContent), 500)
-        .trim()
-        .toLowerCase();
-      const nodeMatch = nodeLabel.match(/^(локации|ресурсы|монстры|персонажи|инстансы)(?:\s|$)/);
-      if (nodeMatch) return nodeMatch[1];
+      const preceding = navigatorPrecedingSiblings(node);
+      const precedingLabels = [];
+      for (const sibling of preceding) {
+        const label = safeString(sibling && (sibling.innerText || sibling.textContent), 120);
+        if (precedingLabels.length < 6) precedingLabels.push(label);
+        const section = navigatorSectionHeader(sibling);
+        if (section) {
+          return {
+            section,
+            evidence: "preceding_sibling_header",
+            depth,
+            header: label,
+            inspected,
+          };
+        }
+      }
+      inspected.push({ depth, precedingLabels });
+      node = node.parentElement;
+    }
+    node = element && element.parentElement;
+    for (let depth = 0; node && depth < 8; depth += 1) {
+      const nodePrefix = navigatorSectionPrefix(node);
+      if (nodePrefix.section) {
+        return {
+          section: nodePrefix.section,
+          evidence: "ancestor_text_prefix",
+          depth,
+          header: safeString(nodePrefix.label, 120),
+          inspected,
+        };
+      }
       const children = Array.from(node.children || []).slice(0, 8);
       for (const child of children) {
-        const label = safeString(child && (child.innerText || child.textContent), 240)
-          .trim()
-          .toLowerCase();
-        const match = label.match(/^(локации|ресурсы|монстры|персонажи|инстансы)(?:\s|$)/);
-        if (match) return match[1];
+        const childPrefix = navigatorSectionPrefix(child);
+        if (childPrefix.section) {
+          return {
+            section: childPrefix.section,
+            evidence: "ancestor_child_prefix",
+            depth,
+            header: safeString(childPrefix.label, 120),
+            inspected,
+          };
+        }
       }
       node = node.parentElement;
     }
-    return "";
+    return { section: "", evidence: "none", depth: null, header: "", inspected };
   };
+
+  const navigatorCandidateSection = (element) =>
+    navigatorCandidateSectionDiagnostic(element).section;
 
   const setNavigatorInputValue = (context, input, value) => {
     try {
@@ -190,10 +259,11 @@
     ) {
       return { ok: true, message: "navigator_target_already_selected", selected: false, target, snapshot: before };
     }
-    if (!setNavigatorInputValue(context, input, target)) {
+    const inputAlreadyMatches = exactLabelMatches(safeString(input && input.value, 180), target);
+    if (!inputAlreadyMatches && !setNavigatorInputValue(context, input, target)) {
       return { ok: false, message: "navigator_target_input_failed", target };
     }
-    const searchTimeoutMs = Math.max(250, Math.min(8000, Number(payload && payload.searchDelayMs) || 1500));
+    const searchTimeoutMs = Math.max(250, Math.min(15000, Number(payload && payload.searchDelayMs) || 1500));
     const searchDeadline = Date.now() + searchTimeoutMs;
     let scanContext = context;
     let contextChanges = 0;
@@ -233,26 +303,51 @@
         expectedSection,
         exactCandidateCount: exactCandidates.length,
         exactCandidateSections: exactCandidates.map((element) => navigatorCandidateSection(element)),
+        exactCandidateSectionDiagnostics: exactCandidates.map((element) =>
+          navigatorCandidateSectionDiagnostic(element)
+        ),
         candidateSections: allCandidates.map((element) => navigatorCandidateSection(element)),
         visibleCandidateCount: visibleCandidates.length,
         candidateCount: allCandidates.length,
         contextChanges,
+        inputDispatched: !inputAlreadyMatches,
       };
     }
     const candidate = candidates[0];
+    const candidateSectionDiagnostic = navigatorCandidateSectionDiagnostic(candidate);
     if (typeof candidate.click !== "function") {
       return { ok: false, message: "navigator_target_not_clickable", target, kind };
     }
     candidate.click();
-    await delayMs(Math.max(100, Number(payload && payload.routeDelayMs) || 350));
-    const after = navigatorSnapshot();
+    const routeTimeoutMs = Math.max(100, Math.min(8000, Number(payload && payload.routeDelayMs) || 350));
+    const routeDeadline = Date.now() + routeTimeoutMs;
+    let after = navigatorSnapshot();
+    while (
+      Date.now() < routeDeadline &&
+      (!after.ok ||
+        !after.target ||
+        !exactLabelMatches(after.target, target) ||
+        (!after.currentLocation && !after.hasRoute))
+    ) {
+      await delayMs(100);
+      after = navigatorSnapshot();
+    }
     if (!after.ok || !after.target || !exactLabelMatches(after.target, target)) {
       return { ok: false, message: "navigator_target_selection_unconfirmed", target, after };
     }
     if (!after.currentLocation && !after.hasRoute) {
       return { ok: false, message: "navigator_route_not_ready", target, after };
     }
-    return { ok: true, message: "navigator_target_selected", selected: true, target, snapshot: after };
+    return {
+      ok: true,
+      message: "navigator_target_selected",
+      selected: true,
+      target,
+      section: candidateSectionDiagnostic.section,
+      sectionEvidence: candidateSectionDiagnostic.evidence,
+      inputDispatched: !inputAlreadyMatches,
+      snapshot: after,
+    };
   };
 
   const openLocationNavigator = () => {

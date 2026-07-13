@@ -2499,11 +2499,39 @@ def test_leveling_routes_to_configured_location_before_farming(test_config: Auto
 
     controller.process_frame(blank_frame())
 
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH
+    assert [request.action_type for request in sink.requests] == ["open_area"]
+    assert sink.requests[0].metadata["reason"] == "capture_configured_route_checkpoint"
+
+    controller._search_pause_until_monotonic = 0.0
+    controller._state_snapshot_via_injector = lambda force=False: {
+        "schemaVersion": 1,
+        "snapshotId": "configured-route-area",
+        "sections": {
+            "player": {
+                "data": {
+                    "name": "v3g45",
+                    "level": 5,
+                    "xpPercent": 20,
+                    "hpPercent": 100,
+                    "prowessPercent": 100,
+                }
+            },
+            "location": {"data": {"pageKind": "area", "semanticName": "Городская площадь"}},
+            "deathRevive": {"data": {"dead": False, "freeReviveAvailable": False}},
+            "battle": {"data": {"rawHasFight": False, "hasFight": False}},
+            "quests": {"data": {"loadStatus": "not_loaded", "items": []}},
+            "shopInventory": {"data": {"items": []}},
+        },
+    }
+
+    controller.process_frame(blank_frame())
+
     assert controller.state_machine.state is GameState.NAVIGATOR_PENDING
     assert controller._navigator_target_name == "Длань Рода"
     assert controller._navigator_requires_target_selection is True
     assert controller._route_recovery_kind == "configured_location"
-    assert [request.action_type for request in sink.requests] == ["open_location_navigator"]
+    assert [request.action_type for request in sink.requests] == ["open_area", "open_location_navigator"]
 
 
 def test_configured_location_route_leaves_quests_before_opening_compass(test_config: AutomationConfig) -> None:
@@ -2612,6 +2640,61 @@ def test_configured_monster_route_is_not_reopened_after_confirmed_arrival(
     controller.current_location_name = "Порт безбрежного моря"
     assert controller._maybe_start_configured_location_route() is False
     assert [request.action_type for request in sink.requests] == ["open_hunt"]
+
+    controller._last_alive_location_name = "Порт безбрежного моря"
+    controller._state_snapshot_via_injector = lambda: {
+        "schemaVersion": 1,
+        "snapshotId": "hunt-after-configured-route",
+        "sections": {
+            "player": {
+                "data": {
+                    "name": "v3g45",
+                    "level": 5,
+                    "xpPercent": 20,
+                    "hpPercent": 100,
+                    "prowessPercent": 100,
+                }
+            },
+            "location": {"data": {"pageKind": "hunt", "semanticName": None}},
+            "deathRevive": {"data": {"dead": False}},
+            "hunt": {"data": {"hasHunt": True}},
+            "quests": {"data": {"items": []}},
+        },
+    }
+
+    assert controller._observe_leveling_goal() is False
+    assert controller.state_machine.state is GameState.LOCATION_SEARCH
+    assert controller.last_leveling_intent == "FARM"
+    assert controller.last_leveling_reason == "ready_to_farm"
+
+
+def test_configured_route_captures_area_checkpoint_when_session_starts_in_hunt(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "target_level": 9,
+        "target_location_name": "Белая Рысь [6]",
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="live",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "hunt"
+    controller.current_location_name = None
+    controller._last_alive_location_name = None
+
+    assert controller._maybe_start_configured_location_route() is True
+    assert [request.action_type for request in sink.requests] == ["open_area"]
+    assert sink.requests[0].metadata["reason"] == "capture_configured_route_checkpoint"
 
 
 def test_location_route_executes_one_confirmed_step_per_location(test_config: AutomationConfig) -> None:

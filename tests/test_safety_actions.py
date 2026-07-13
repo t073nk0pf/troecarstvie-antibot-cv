@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, DryRunActionSink, LiveMacActionSink
-from src.antibot_cv.automation.actions import _log_action
+from src.antibot_cv.automation.actions import _log_action, _route_confirmation_reason
 from src.antibot_cv.automation.browser_injector import InjectorResult
 from src.antibot_cv.automation.config import AutomationConfig
 from src.antibot_cv.automation.safety import SafetyGuard
@@ -863,8 +863,8 @@ def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> No
                 "target": "Белая Рысь [6]",
                 "target_kind": "monster",
                 "navigator_client_id": "child-client",
-                "search_delay_ms": 8000,
-                "route_delay_ms": 500,
+                "search_delay_ms": 12000,
+                "route_delay_ms": 8000,
                 "retry_delay_ms": 500,
             },
             dry_run=False,
@@ -873,8 +873,307 @@ def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> No
 
     assert len(calls) == 2
     assert calls[0] == calls[1]
+    assert calls[0][2]["commandTimeoutMs"] == 22000
+    assert calls[0][3] == 23.0
     assert sleeps == [0.5]
     assert [event["event_type"] for event in logger.events[-2:]] == [
         "navigator_target_selection_retry",
         "navigator_target_selected",
     ]
+
+
+def test_live_navigator_retries_once_after_confirmed_target_route_lag(monkeypatch) -> None:
+    calls: list[tuple[str, str | None, dict[str, object], float]] = []
+    sleeps: list[float] = []
+    responses = iter(
+        [
+            InjectorResult(
+                False,
+                '{"ok":false,"message":"navigator_route_not_ready",'
+                '"after":{"ok":true,"target":"Белая Рысь [6]","hasRoute":false}}',
+                "child-client",
+            ),
+            InjectorResult(
+                True,
+                '{"ok":true,"message":"navigator_snapshot","target":"Белая Рысь [6]",'
+                '"currentLocation":false,"hasRoute":false,"routeTransitions":6}',
+                "child-client",
+            ),
+        ]
+    )
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
+            return next(responses)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    monkeypatch.setattr("src.antibot_cv.automation.actions.time.sleep", sleeps.append)
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "navigator_select_target",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "target_kind": "monster",
+                "navigator_client_id": "child-client",
+                "search_delay_ms": 12000,
+                "route_delay_ms": 8000,
+                "retry_delay_ms": 500,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert len(calls) == 2
+    assert calls[0][0] == "navigator_select_target"
+    assert calls[1] == ("navigator_snapshot", "child-client", {}, 2.5)
+    assert sleeps == [0.5]
+    assert [event["event_type"] for event in logger.events[-2:]] == [
+        "navigator_target_selection_retry",
+        "navigator_target_selected",
+    ]
+
+
+def test_live_navigator_go_confirms_parent_route_after_child_ack_timeout(monkeypatch) -> None:
+    calls: list[tuple[str, str | None, dict[str, object], float]] = []
+    parent_snapshots = iter(
+        [
+            '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+            '"currentLocationId":"112","targetLocationId":"0","foundPath":[],'
+            '"nextTransition":null,"transitionTimerSeconds":0}',
+            '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+            '"currentLocationId":"112","targetLocationId":"125",'
+            '"foundPath":["111","110","121","122","123","125"],'
+            '"nextTransition":{"id":"12","locId":"111"},"transitionTimerSeconds":0}',
+        ]
+    )
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, client_id, dict(payload or {}), timeout_s))
+            if command == "navigator_go":
+                return InjectorResult(False, "injector_ack_timeout", "child-client")
+            if command == "location_route_snapshot":
+                return InjectorResult(
+                    True,
+                    next(parent_snapshots),
+                    "parent-client",
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "navigator_go",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "navigator_client_id": "child-client",
+                "route_transitions": 6,
+            },
+            dry_run=False,
+        )
+    )
+
+    assert calls == [
+        ("location_route_snapshot", "parent-client", {}, 2.5),
+        ("navigator_go", "child-client", {"expectedTarget": "Белая Рысь [6]"}, 3.0),
+        ("location_route_snapshot", "parent-client", {}, 2.5),
+    ]
+    assert logger.events[-1]["event_type"] == "navigator_go_requested"
+    assert logger.events[-1]["route_confirmation"] == "parent_route_snapshot_after_ack_timeout"
+
+
+def test_live_navigator_go_rejects_unchanged_parent_route_after_ack_timeout(monkeypatch) -> None:
+    route = (
+        '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+        '"currentLocationId":"112","targetLocationId":"125",'
+        '"foundPath":["111","110","121","122","123","125"],'
+        '"nextTransition":{"id":"12","locId":"111"}}'
+    )
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            if command == "location_route_snapshot":
+                return InjectorResult(True, route, "parent-client")
+            if command == "navigator_go":
+                return InjectorResult(False, "injector_ack_timeout", "child-client")
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert not sink.execute(
+        ActionRequest(
+            "navigator_go",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "navigator_client_id": "child-client",
+                "route_transitions": 6,
+            },
+            dry_run=False,
+        )
+    )
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert logger.events[-1]["route_confirmation_rejected"] == "parent_route_unchanged_after_go"
+
+
+def test_live_navigator_go_rejects_disconnected_parent_route_after_ack_timeout(monkeypatch) -> None:
+    parent_snapshots = iter(
+        [
+            '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+            '"currentLocationId":"112","targetLocationId":"0","foundPath":[],"nextTransition":null}',
+            '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+            '"currentLocationId":"112","targetLocationId":"125",'
+            '"foundPath":["999","110","121","122","123","124"],'
+            '"nextTransition":{"id":"12","locId":"999"}}',
+        ]
+    )
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            if command == "location_route_snapshot":
+                return InjectorResult(True, next(parent_snapshots), "parent-client")
+            if command == "navigator_go":
+                return InjectorResult(False, "injector_ack_timeout", "child-client")
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert not sink.execute(
+        ActionRequest(
+            "navigator_go",
+            metadata={
+                "target": "Белая Рысь [6]",
+                "navigator_client_id": "child-client",
+                "route_transitions": 6,
+            },
+            dry_run=False,
+        )
+    )
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert logger.events[-1]["route_confirmation_rejected"] == "parent_route_destination_disconnected"
+
+
+def test_navigator_go_route_confirmation_rejects_zero_target_sentinel() -> None:
+    before = {
+        "message": "location_route_snapshot",
+        "pageKind": "area",
+        "currentLocationId": "112",
+        "targetLocationId": "125",
+        "foundPath": ["125"],
+        "nextTransition": {"locId": "125"},
+    }
+    malformed_after = {
+        "message": "location_route_snapshot",
+        "pageKind": "area",
+        "currentLocationId": "112",
+        "targetLocationId": "0",
+        "foundPath": ["0"],
+        "nextTransition": {"locId": "0"},
+    }
+
+    assert (
+        _route_confirmation_reason(before, malformed_after, 1)
+        == "parent_route_target_missing"
+    )
+
+
+def test_live_open_area_uses_bounded_bridge_command(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s))
+            return InjectorResult(True, '{"ok":true,"message":"area_opened","opened":true}', "parent-client")
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(ActionRequest("open_area", metadata={"reason": "checkpoint"}, dry_run=False))
+    assert calls == [("open_area", {"commandTimeoutMs": 4000}, 5.0)]
+    assert logger.events[-1]["event_type"] == "open_area_requested"
+
+
+def test_live_open_area_confirms_delayed_area_navigation(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], float]] = []
+    sleeps: list[float] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), timeout_s))
+            if command == "open_area":
+                return InjectorResult(False, '{"ok":false,"message":"area_open_unconfirmed"}', "parent-client")
+            if command == "location_route_snapshot":
+                return InjectorResult(
+                    True,
+                    '{"ok":true,"message":"location_route_snapshot","pageKind":"area",'
+                    '"location":{"id":"125","semanticName":"Порт безбрежного моря"}}',
+                    "parent-client",
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    monkeypatch.setattr("src.antibot_cv.automation.actions.time.sleep", sleeps.append)
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(ActionRequest("open_area", metadata={"reason": "checkpoint"}, dry_run=False))
+    assert calls == [
+        ("open_area", {"commandTimeoutMs": 4000}, 5.0),
+        ("location_route_snapshot", {}, 2.5),
+    ]
+    assert sleeps == [0.5]
+    assert logger.events[-1]["event_type"] == "open_area_requested"
+    assert logger.events[-1]["area_confirmation"] == "location_snapshot_after_delayed_navigation"

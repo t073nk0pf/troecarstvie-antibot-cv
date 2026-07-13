@@ -375,6 +375,80 @@ class LiveMacActionSink:
             )
             return False
 
+        if request.action_type == "open_area":
+            result = self._execute_injector(
+                global_browser_injector(),
+                "open_area",
+                {"commandTimeoutMs": 4000},
+                timeout_s=5.0,
+            )
+            result_metadata = {
+                **dict(request.metadata or {}),
+                "injector_message": _compact_injector_message(result.message),
+                "injector_client_id": result.client_id,
+            }
+            logged_request = _copy_request(request, metadata=result_metadata)
+            try:
+                candidate = json.loads(result.message)
+                parsed = candidate if isinstance(candidate, dict) else None
+            except json.JSONDecodeError:
+                parsed = None
+            if result.ok and parsed is not None and parsed.get("message") in {
+                "area_opened",
+                "area_already_open",
+            }:
+                _log_action(self.logger, "open_area_requested", logged_request, dry_run=False)
+                return True
+            if parsed is not None and parsed.get("message") == "area_open_unconfirmed":
+                time.sleep(0.5)
+                confirmation = self._execute_injector(
+                    global_browser_injector(),
+                    "location_route_snapshot",
+                    {},
+                    timeout_s=2.5,
+                )
+                try:
+                    confirmation_candidate = json.loads(confirmation.message)
+                    confirmation_parsed = (
+                        confirmation_candidate if isinstance(confirmation_candidate, dict) else None
+                    )
+                except json.JSONDecodeError:
+                    confirmation_parsed = None
+                location = (
+                    confirmation_parsed.get("location")
+                    if isinstance(confirmation_parsed, dict)
+                    else None
+                )
+                if (
+                    confirmation.ok
+                    and isinstance(confirmation_parsed, dict)
+                    and confirmation_parsed.get("message") == "location_route_snapshot"
+                    and confirmation_parsed.get("pageKind") == "area"
+                    and isinstance(location, dict)
+                    and bool(str(location.get("id") or "").strip())
+                    and bool(str(location.get("semanticName") or "").strip())
+                ):
+                    confirmed_metadata = {
+                        **result_metadata,
+                        "area_confirmation": "location_snapshot_after_delayed_navigation",
+                        "area_confirmation_message": _compact_injector_message(confirmation.message),
+                        "area_confirmation_client_id": confirmation.client_id,
+                    }
+                    _log_action(
+                        self.logger,
+                        "open_area_requested",
+                        _copy_request(request, metadata=confirmed_metadata),
+                        dry_run=False,
+                    )
+                    return True
+            _log_action(
+                self.logger,
+                "action_blocked",
+                logged_request,
+                block_reason=f"injector_open_area_failed:{_compact_injector_message(result.message)}",
+            )
+            return False
+
         if request.action_type == "open_quests":
             result = self._execute_injector(
                 global_browser_injector(),
@@ -456,12 +530,15 @@ class LiveMacActionSink:
                 _log_action(self.logger, "action_blocked", request, block_reason=reason)
                 return False
             injector = global_browser_injector()
+            search_delay_ms = max(250, min(15000, int(metadata.get("search_delay_ms", 250) or 250)))
+            route_delay_ms = max(100, min(8000, int(metadata.get("route_delay_ms", 350) or 350)))
+            command_timeout_ms = max(9000, min(25000, search_delay_ms + route_delay_ms + 2000))
             payload = {
                 "target": target,
                 "kind": str(metadata.get("target_kind") or "location"),
-                "searchDelayMs": metadata.get("search_delay_ms", 250),
-                "routeDelayMs": metadata.get("route_delay_ms", 350),
-                "commandTimeoutMs": 9000,
+                "searchDelayMs": search_delay_ms,
+                "routeDelayMs": route_delay_ms,
+                "commandTimeoutMs": command_timeout_ms,
             }
 
             def select_target_once():
@@ -469,7 +546,7 @@ class LiveMacActionSink:
                     injector,
                     "navigator_select_target",
                     payload,
-                    timeout_s=10.0,
+                    timeout_s=(command_timeout_ms / 1000) + 1.0,
                     client_id_override=navigator_client_id,
                 )
 
@@ -487,7 +564,14 @@ class LiveMacActionSink:
                 and parsed.get("exactCandidateCount") == 1
                 and parsed.get("candidateCount") == 0
             )
-            if retryable_unique_result:
+            route_snapshot = parsed.get("after") if parsed is not None else None
+            retryable_route_result = (
+                parsed is not None
+                and parsed.get("message") == "navigator_route_not_ready"
+                and isinstance(route_snapshot, dict)
+                and str(route_snapshot.get("target") or "").strip().casefold() == target.casefold()
+            )
+            if retryable_unique_result or retryable_route_result:
                 retry_delay_ms = max(0, min(2000, int(metadata.get("retry_delay_ms", 500) or 0)))
                 retry_request = _copy_request(
                     request,
@@ -502,7 +586,19 @@ class LiveMacActionSink:
                 _log_action(self.logger, "navigator_target_selection_retry", retry_request, dry_run=False)
                 if retry_delay_ms:
                     time.sleep(retry_delay_ms / 1000)
-                result = select_target_once()
+                if retryable_unique_result:
+                    result = select_target_once()
+                else:
+                    # The site's delayed route render is started by the first
+                    # exact candidate click. Re-clicking the candidate can reset
+                    # that render, so confirm it with a read-only snapshot.
+                    result = self._execute_injector(
+                        injector,
+                        "navigator_snapshot",
+                        {},
+                        timeout_s=2.5,
+                        client_id_override=navigator_client_id,
+                    )
                 try:
                     candidate = json.loads(result.message)
                     parsed = candidate if isinstance(candidate, dict) else None
@@ -516,10 +612,28 @@ class LiveMacActionSink:
             if initial_message != result_metadata["injector_message"]:
                 result_metadata["initial_injector_message"] = initial_message
             logged_request = _copy_request(request, metadata=result_metadata)
-            if result.ok and parsed is not None and parsed.get("message") in {
-                "navigator_target_selected",
-                "navigator_target_already_selected",
-            }:
+            route_snapshot_confirmed = (
+                result.ok
+                and parsed is not None
+                and parsed.get("message") == "navigator_snapshot"
+                and str(parsed.get("target") or "").strip().casefold() == target.casefold()
+                and (
+                    parsed.get("currentLocation") is True
+                    or parsed.get("hasRoute") is True
+                    or (
+                        isinstance(parsed.get("routeTransitions"), int)
+                        and not isinstance(parsed.get("routeTransitions"), bool)
+                        and int(parsed["routeTransitions"]) > 0
+                    )
+                )
+            )
+            if result.ok and parsed is not None and (
+                parsed.get("message") in {
+                    "navigator_target_selected",
+                    "navigator_target_already_selected",
+                }
+                or route_snapshot_confirmed
+            ):
                 _log_action(self.logger, "navigator_target_selected", logged_request, dry_run=False)
                 return True
             _log_action(
@@ -536,8 +650,26 @@ class LiveMacActionSink:
             if not navigator_client_id:
                 _log_action(self.logger, "action_blocked", request, block_reason="navigator_client_missing")
                 return False
+            injector = global_browser_injector()
+            expected_transitions = metadata.get("route_transitions")
+            parent_route_before = None
+            parent_route_before_result = None
+            if (
+                self.browser_client_id
+                and isinstance(expected_transitions, int)
+                and not isinstance(expected_transitions, bool)
+                and expected_transitions > 0
+            ):
+                parent_route_before_result = self._execute_injector(
+                    injector,
+                    "location_route_snapshot",
+                    {},
+                    timeout_s=2.5,
+                    client_id_override=self.browser_client_id,
+                )
+                parent_route_before = _parse_injector_dict(parent_route_before_result.message)
             result = self._execute_injector(
-                global_browser_injector(),
+                injector,
                 "navigator_go",
                 {"expectedTarget": metadata.get("target", "")},
                 timeout_s=3.0,
@@ -555,6 +687,61 @@ class LiveMacActionSink:
                 parsed = candidate if isinstance(candidate, dict) else None
             except json.JSONDecodeError:
                 parsed = None
+            if (
+                not result.ok
+                and result.message == "injector_ack_timeout"
+                and self.browser_client_id
+            ):
+                confirmation = self._execute_injector(
+                    injector,
+                    "location_route_snapshot",
+                    {},
+                    timeout_s=2.5,
+                    client_id_override=self.browser_client_id,
+                )
+                try:
+                    confirmation_candidate = json.loads(confirmation.message)
+                    confirmation_parsed = (
+                        confirmation_candidate if isinstance(confirmation_candidate, dict) else None
+                    )
+                except json.JSONDecodeError:
+                    confirmation_parsed = None
+                route_confirmation_reason = _route_confirmation_reason(
+                    parent_route_before,
+                    confirmation_parsed if confirmation.ok else None,
+                    expected_transitions,
+                )
+                if route_confirmation_reason == "confirmed_changed_connected_route":
+                    confirmed_metadata = {
+                        **result_metadata,
+                        "route_confirmation": "parent_route_snapshot_after_ack_timeout",
+                        "route_confirmation_before_message": _compact_injector_message(
+                            parent_route_before_result.message
+                            if parent_route_before_result is not None
+                            else ""
+                        ),
+                        "route_confirmation_message": _compact_injector_message(confirmation.message),
+                        "route_confirmation_client_id": confirmation.client_id,
+                    }
+                    _log_action(
+                        self.logger,
+                        "navigator_go_requested",
+                        _copy_request(request, metadata=confirmed_metadata),
+                        dry_run=False,
+                    )
+                    return True
+                result_metadata = {
+                    **result_metadata,
+                    "route_confirmation_rejected": route_confirmation_reason,
+                    "route_confirmation_before_message": _compact_injector_message(
+                        parent_route_before_result.message
+                        if parent_route_before_result is not None
+                        else ""
+                    ),
+                    "route_confirmation_message": _compact_injector_message(confirmation.message),
+                    "route_confirmation_client_id": confirmation.client_id,
+                }
+                logged_request = _copy_request(request, metadata=result_metadata)
             if result.ok and parsed is not None and (
                 parsed.get("submitted") is True or parsed.get("message") == "navigator_already_at_target"
             ):
@@ -917,19 +1104,95 @@ def _compact_injector_message(message: object, *, max_length: int = 1800) -> str
         "confirmed",
         "option",
         "pageKind",
+        "expectedSection",
         "exactCandidateCount",
         "exactCandidateSections",
+        "exactCandidateSectionDiagnostics",
         "candidateCount",
         "candidateSections",
         "visibleCandidateCount",
         "contextChanges",
         "inputCount",
+        "inputDispatched",
+        "section",
+        "sectionEvidence",
+        "currentLocation",
+        "hasRoute",
+        "routeTransitions",
+        "currentLocationId",
+        "targetLocationId",
+        "foundPath",
+        "transitionTimerSeconds",
+        "location",
     )
     compact = {key: parsed[key] for key in compact_keys if key in parsed}
     if not compact:
         compact = {"message": parsed.get("message", "injector_result")}
     serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
     return serialized[:max_length]
+
+
+def _parse_injector_dict(message: object) -> dict[str, object] | None:
+    try:
+        parsed = json.loads(str(message or ""))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _route_snapshot_fingerprint(
+    snapshot: object,
+) -> tuple[str, str, tuple[str, ...], str] | None:
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("message") != "location_route_snapshot" or snapshot.get("pageKind") != "area":
+        return None
+    current_location_id = str(snapshot.get("currentLocationId") or "").strip()
+    target_location_id = str(snapshot.get("targetLocationId") or "").strip()
+    raw_path = snapshot.get("foundPath")
+    if not current_location_id or not target_location_id or not isinstance(raw_path, list):
+        return None
+    found_path = tuple(str(item or "").strip() for item in raw_path)
+    if any(not item for item in found_path):
+        return None
+    transition = snapshot.get("nextTransition")
+    next_location_id = (
+        str(transition.get("locId") or "").strip() if isinstance(transition, dict) else ""
+    )
+    return current_location_id, target_location_id, found_path, next_location_id
+
+
+def _route_confirmation_reason(
+    before: object,
+    after: object,
+    expected_transitions: object,
+) -> str:
+    if (
+        not isinstance(expected_transitions, int)
+        or isinstance(expected_transitions, bool)
+        or expected_transitions <= 0
+    ):
+        return "expected_transition_count_invalid"
+    before_fingerprint = _route_snapshot_fingerprint(before)
+    after_fingerprint = _route_snapshot_fingerprint(after)
+    if before_fingerprint is None:
+        return "parent_route_before_unconfirmed"
+    if after_fingerprint is None:
+        return "parent_route_after_unconfirmed"
+    current_location_id, target_location_id, found_path, next_location_id = after_fingerprint
+    if target_location_id == "0":
+        return "parent_route_target_missing"
+    if current_location_id == target_location_id:
+        return "parent_route_already_at_target"
+    if len(found_path) != expected_transitions:
+        return "parent_route_transition_count_mismatch"
+    if not found_path or found_path[-1] != target_location_id:
+        return "parent_route_destination_disconnected"
+    if next_location_id != found_path[0]:
+        return "parent_route_next_transition_disconnected"
+    if after_fingerprint == before_fingerprint:
+        return "parent_route_unchanged_after_go"
+    return "confirmed_changed_connected_route"
 
 
 def _compact_recovery_result(parsed: dict[str, object]) -> dict[str, object]:

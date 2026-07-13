@@ -24,7 +24,8 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-self-update-v31`
+- Chrome bridge version: `2026-07-13-visibility-v36`
+- Chrome extension version: `0.3.5`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -44,6 +45,8 @@ leveling product.
 - The post-resurrection notice can be closed by its exact `Закрыть` control.
 - The compass child window accepts an exact monster/location target and can
   build a route. Focus then returns to `main.php`.
+- The injected UTF-8 bridge is decoded correctly on the game's legacy-encoded
+  pages, so Cyrillic navigator sections and targets remain intact.
 - Quest snapshots distinguish active and available quest cards, preserve the
   quest ID and route labels, and parse explicit objective progress such as
   `5/5`. Completed objectives stop safely before an unimplemented turn-in.
@@ -75,13 +78,27 @@ confirmed victory, one result exit, and one return to hunt. The summary was
 by the finished battle plus a live nonzero player-health observation; unknown
 outcomes no longer count as completed cycles.
 
-The 2026-07-13 level-6 route acceptance attempts found the exact
-`Белая Рысь [6]` autocomplete candidate, but the loaded Chrome page
-context returned an empty result section and stopped fail-closed before route
-submission, movement, combat, or death. The source resolver was correct, which
-identified a stale extension/page context rather than a target-search failure.
-Bridge v31 adds automatic extension lifecycle handling so later bridge changes
-do not depend on a manual `chrome://extensions` reload.
+The 2026-07-13 bounded M1 live run on bridge v36 completed the requested fair
+scenario end to end. The level-5 character selected the exact monster
+`Белая Рысь [6]` (`botId=1102`), entered one battle, died naturally, used only
+the explicit free resurrection option, closed the resurrection notice, restored
+100% health and prowess, and returned from `Городская площадь Арсы` to the
+saved checkpoint `Порт безбрежного моря`. Hunt reopened at the destination and
+the complete recovery evidence was recorded. The external polling stop then
+raced with the resumed farm loop: one second attack request was emitted before
+the stop reached the controller, although a second battle was not observed.
+The runtime now stops internally and synchronously after terminal recovery when
+the configured death limit is reached, so a one-death session cannot issue that
+extra attack; this boundary fix is covered by regression tests but still needs
+its next live proof.
+
+All nine required phases were recorded in order under recovery ID
+`mriuwwj6-47`. The offline assessment for
+`runs/c3fc0238e6c049548af0b610cbd9b07d/events.jsonl` reports
+`complete_attempts=1`, `consecutive_complete_attempts=1`,
+`latest_attempt_passed=true`, and `offline_ready=true`. No controller error or
+paid action was recorded. This is the first of the three consecutive natural
+recoveries required by the formal M1 exit gate.
 
 ## Current Blocker
 
@@ -106,13 +123,15 @@ location, persists the original destination, and reconstructs the remaining
 route after battle or death interruptions. Automated regressions cover all of
 these branches.
 
-The current blocker is applying bridge v31 to the already loaded pre-updater
-Chrome extension and then completing live acceptance of the integrated sequence:
+Bridge v36 is active in the loaded Chrome context and the integrated sequence
 `death -> free revive -> close notice -> checkpoint route -> original route ->
-hunt`. One successful run must be followed by three consecutive natural death
-recoveries before M1 is considered complete.
+hunt` has passed once without manual game input. The remaining formal M1 gate
+is two more consecutive natural recoveries, bringing the current streak from
+`1/3` to `3/3`. The next run must also confirm the new internal
+`max_deaths_recovered` stop, rather than relying on an external polling stop.
+This validation should not be replaced by repeated startup-only runs.
 
-Bridge v31 also contains the first bounded quest-progress slice. It observes
+Bridge v36 also contains the first bounded quest-progress slice. It observes
 active/available quests and can identify a completed combat objective, but it
 does not accept or turn in quests. This work must not displace the M1 live gate.
 
@@ -142,12 +161,14 @@ allow battle/death recovery to finish, and then resume from the saved route.
 - Some UI and replay CV fallbacks still coexist with JS control. Mob sprite
   template targeting has been removed; keep any remaining fallback changes
   inside their owning runtime module with focused replay coverage.
-- The v31 updater handles later bridge changes automatically, but a Chrome
-  context older than v31 must load the updater once before it can self-update.
+- The updater handles later bridge changes only after a context containing the
+  updater has loaded. The exact-tab retry is bounded, but automatic primary-tab
+  refresh still needs a dedicated live proof; the v36 acceptance used
+  computer-controlled reload after the extension source update.
   Python and extension bridge versions must still match before a run starts.
-- Bridge v31 passes the full 338-test suite, JavaScript syntax checks, Python
-  compilation, generated-bundle consistency, and whitespace checks, but still
-  needs a bounded live acceptance run.
+- Bridge v36 has passed a bounded end-to-end M1 live run. Final regression,
+  JavaScript syntax, generated-bundle, architecture-limit, and whitespace
+  results are recorded in `DEVELOPMENT_LOG.md`.
 
 ## Architecture Map
 
@@ -205,21 +226,22 @@ python -m src.antibot_cv.automation.controller assess-m1-recovery \
   --events runs/<session-id>/events.jsonl
 ```
 
-`offline_ready: true` means the recorded phases are internally complete. M1
-still requires the documented live run and three consecutive natural recovery
-passes.
+`offline_ready: true` means the recorded phases are internally complete. The
+formal M1 gate requires a trailing streak of three natural recovery passes;
+the current verified streak is `1/3`.
 
 ## Next Session Checklist
 
 1. Read this file, then `docs/DEVELOPMENT_LOG.md`.
    Use `docs/DEVELOPMENT_PLAN.md` to confirm the current milestone and avoid
    expanding scope before its exit gate passes.
-2. Start the control server and confirm bridge v31 with `version_ok: true`.
+2. Start the control server and confirm bridge v36 with `version_ok: true`.
 3. Start one bounded live run for the selected game tab.
 4. Trigger or observe one natural death while traveling/farming.
 5. Verify the full recovery sequence reaches the original destination and
    opens hunt without manual input.
-6. Repeat for three consecutive natural deaths and record the results.
+6. Record two more consecutive natural recoveries to complete the `3/3` M1
+   gate, then continue with the stable farm/resource loop.
 
 ## Safety Boundary
 

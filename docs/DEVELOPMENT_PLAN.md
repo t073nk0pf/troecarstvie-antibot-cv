@@ -48,15 +48,16 @@ generated from five ordered domain modules.
 
 The main controller now executes every confirmed marked route transition,
 preserves the destination across PvP or death, and waits for proven arrival
-before hunt resumes. The route mechanics passed a manual live test and the
-integrated controller loop is covered by automated tests. The remaining M1
-gate is a full live death-to-return acceptance run, followed by three
-consecutive natural recovery runs. The runtime now records a correlated
+before hunt resumes. The route mechanics and one integrated natural
+death-to-return run passed live on bridge v36, and the controller loop is
+covered by automated tests. The remaining M1 gate is two more consecutive
+natural recovery runs, bringing the verified trailing streak from `1/3` to
+`3/3`. The runtime records a correlated
 nine-phase recovery evidence chain, and a read-only offline validator
 identifies missing or out-of-order phases from a run log. Offline readiness is
 diagnostic only and does not satisfy the live exit gate.
 
-The local v31 bridge also includes a bounded quest observation slice: active
+The local v36 bridge also includes a bounded quest observation slice: active
 and available cards, route labels, and explicit objective progress are parsed,
 and a completed objective stops safely before turn-in. Quest acceptance and
 turn-in remain outside the current milestone.
@@ -107,15 +108,15 @@ Status: mostly complete.
 - guarded action sink and telemetry;
 - popup configuration and start/stop controls.
 - idle-only bridge self-update with one-shot reload and retry backoff
-  (implemented; first v31 lifecycle activation still needs live confirmation).
+  (implemented; exact-tab automatic refresh still needs dedicated live proof).
 
 Exit gate: focused automated tests pass and one selected Chrome tab can be
 controlled without affecting another tab.
 
 ### Stage 1 - Survival And Route Recovery
 
-Status: implementation complete; live acceptance in progress. This remains the
-current priority.
+Status: implementation complete; live acceptance is at `1/3` consecutive
+natural recoveries. This remains the current priority.
 
 - death detection;
 - free resurrection;
@@ -233,7 +234,7 @@ but it must not bypass the guarded action interface or invent page actions.
 
 ## Priority Order
 
-1. Finish M1 route execution after death.
+1. Complete the remaining two consecutive M1 natural recovery validations.
 2. Revalidate the complete farm loop and sequential burdjuk recovery.
 3. Stabilize adaptive skills and battle consumables.
 4. Build the quest line module on top of those stable modules.

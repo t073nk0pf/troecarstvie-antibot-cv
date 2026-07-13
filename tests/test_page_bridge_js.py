@@ -142,6 +142,130 @@ assert.strictEqual(activeUseSkill.message.message, "useSkill_confirmed");
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_page_bridge_preserves_slow_navigator_search_and_classifies_preceding_header() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const moduleNames = [
+  "00_core_combat.js",
+  "10_hunt_inventory.js",
+  "20_hunt_actions.js",
+  "30_navigation_death.js",
+  "40_state_layout_dispatch.js",
+];
+const modules = moduleNames.map((name) =>
+  fs.readFileSync(`browser_injector/page_bridge_modules/${name}`, "utf8")
+);
+assert.ok(modules[3].includes("Math.min(15000"));
+const source = `(() => {\n${modules.join("\n")}\n})();`;
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let bodyText = "";
+let candidatePresent = false;
+let dispatchCount = 0;
+let candidateClicks = 0;
+const compass = {
+  value: "", innerText: "", textContent: "", offsetWidth: 450, offsetHeight: 24,
+  getAttribute(name) { return name === "name" ? "compassInput" : null; },
+  querySelectorAll() { return []; }, focus() {}, dispatchEvent() { dispatchCount += 1; },
+};
+const routeButton = {
+  value: "Проложить маршрут", innerText: "", textContent: "", offsetWidth: 0, offsetHeight: 0,
+  getAttribute() { return null; }, querySelectorAll() { return []; }, click() {},
+  getClientRects() { return this.offsetWidth ? [{ width: this.offsetWidth, height: this.offsetHeight }] : []; },
+};
+const hiddenRouteButton = {
+  value: "Проложить маршрут", innerText: "", textContent: "", offsetWidth: 0, offsetHeight: 0,
+  getAttribute() { return null; }, querySelectorAll() { return []; }, click() {},
+  getClientRects() { return []; },
+};
+const heading = {
+  innerText: "Монстры", textContent: "Монстры", parentElement: null,
+  previousElementSibling: null, children: [],
+};
+const section = { innerText: "", textContent: "", parentElement: null, children: [] };
+const candidate = {
+  innerText: "Белая Рысь [6]", textContent: "Белая Рысь [6]", parentElement: section,
+  previousElementSibling: heading, offsetWidth: 300, offsetHeight: 20, children: [],
+  getAttribute() { return null; }, querySelectorAll() { return []; },
+  click() {
+    candidateClicks += 1;
+    compass.value = "Белая Рысь [6]";
+    setTimeout(() => {
+      routeButton.offsetWidth = 194;
+      routeButton.offsetHeight = 24;
+      bodyText = "Путь займет 6 переходов";
+    }, 250);
+  },
+};
+heading.parentElement = section;
+section.children = [heading, candidate];
+const document = {
+  title: "Навигатор",
+  body: { get innerText() { return bodyText; }, get textContent() { return bodyText; } },
+  querySelectorAll(selector) {
+    if (selector === "input,button") return [compass, routeButton, hiddenRouteButton];
+    if (selector === "div,li,a,button,[role='option']") return candidatePresent ? [heading, candidate] : [];
+    return [];
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/navigator.php" }, frames: [], document, setTimeout,
+  Event: class BridgeEvent { constructor(type) { this.type = type; } },
+  getComputedStyle(element) {
+    return { display: element === routeButton && !routeButton.offsetWidth ? "none" : "block", visibility: "visible" };
+  },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root;
+root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+
+async function command() {
+  messages.length = 0;
+  listeners.message({
+    source: root,
+    data: {
+      source: `antibot-cv-content:${version}`,
+      token: "slow-navigator-search",
+      command: {
+        type: "navigator_select_target",
+        payload: { target: "Белая Рысь [6]", kind: "monster", searchDelayMs: 250, routeDelayMs: 600 },
+      },
+    },
+  });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return { ok: messages[0].ok, message: JSON.parse(messages[0].message) };
+}
+
+(async () => {
+  const initial = await command();
+  assert.strictEqual(initial.ok, false);
+  assert.strictEqual(initial.message.message, "navigator_target_missing_in_section");
+  assert.strictEqual(initial.message.inputDispatched, true);
+  assert.strictEqual(dispatchCount, 3);
+
+  candidatePresent = true;
+  const retry = await command();
+  assert.strictEqual(retry.ok, true);
+  assert.strictEqual(retry.message.message, "navigator_target_selected");
+  assert.strictEqual(retry.message.section, "монстры");
+  assert.strictEqual(retry.message.sectionEvidence, "preceding_sibling_header");
+  assert.strictEqual(retry.message.inputDispatched, false);
+  assert.strictEqual(dispatchCount, 3);
+  assert.strictEqual(candidateClicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_page_bridge_reports_and_uses_battle_items_by_slot_or_name() -> None:
     script = r"""
 const assert = require("assert");

@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-13-self-update-v31";
+  const bridgeVersion = "2026-07-13-visibility-v36";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";
@@ -49,6 +49,11 @@
     document.documentElement.dataset.antibotCvBridgeInjected = bridgeVersion;
     return new Promise((resolve) => {
       const script = document.createElement("script");
+      // The game document is served with a legacy Cyrillic encoding. Without an
+      // explicit charset Chrome decodes this external classic script using the
+      // page encoding and corrupts every UTF-8 Cyrillic literal in the bridge.
+      script.charset = "UTF-8";
+      script.setAttribute("charset", "UTF-8");
       script.src = chrome.runtime.getURL("page_bridge.js");
       script.async = false;
       script.onload = () => {
@@ -167,10 +172,10 @@
     const rawVerifyTimeout = Number(payload && payload.verifyTimeoutMs);
     const verifyTimeout = Number.isFinite(rawVerifyTimeout) ? Math.max(0, Math.min(10000, rawVerifyTimeout)) : 0;
     const rawCommandTimeout = Number(payload && payload.commandTimeoutMs);
-    const commandTimeout = Number.isFinite(rawCommandTimeout) ? Math.max(0, Math.min(15000, rawCommandTimeout)) : 0;
+    const commandTimeout = Number.isFinite(rawCommandTimeout) ? Math.max(0, Math.min(25000, rawCommandTimeout)) : 0;
     return Math.max(
       2000,
-      Math.min(15000, Math.max(inventoryDelay + 5000, verifyTimeout + 2500, commandTimeout))
+      Math.min(25000, Math.max(inventoryDelay + 5000, verifyTimeout + 2500, commandTimeout))
     );
   }
 

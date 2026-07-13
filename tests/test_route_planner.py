@@ -104,6 +104,29 @@ def test_navigator_route_requires_fresh_exact_unambiguous_observation() -> None:
     assert validate_navigator_route({**observed, "target": "Дикий предел II"}, "Дикий предел", now=lambda: 1001.0).reason == "navigator_target_mismatch"
     assert validate_navigator_route({**observed, "visibleGoButtonCount": 2}, "Дикий предел", now=lambda: 1001.0).reason == "navigator_route_ambiguous"
     assert validate_navigator_route({**observed, "routeTransitions": 51}, "Дикий предел", max_transitions=50, now=lambda: 1001.0).reason == "navigator_route_length_invalid"
+    rendering = {
+        **observed,
+        "hasRoute": False,
+        "visibleGoButtonCount": 0,
+    }
+    rendering_decision = validate_navigator_route(rendering, "Дикий предел", now=lambda: 1001.0)
+    assert rendering_decision.action is RouteAction.REFRESH
+    assert rendering_decision.reason == "navigator_route_render_pending"
+    transient_rendering = validate_navigator_route(
+        {**rendering, "routeTransitions": None},
+        "Дикий предел",
+        now=lambda: 1001.0,
+    )
+    assert transient_rendering.action is RouteAction.REFRESH
+    assert transient_rendering.reason == "navigator_route_render_pending"
+    oversized_rendering = validate_navigator_route(
+        {**rendering, "routeTransitions": 51},
+        "Дикий предел",
+        max_transitions=50,
+        now=lambda: 1001.0,
+    )
+    assert oversized_rendering.action is RouteAction.REFRESH
+    assert oversized_rendering.reason == "navigator_route_render_pending"
     assert validate_navigator_route(observed, "Дикий предел", now=lambda: 1020.0).action is RouteAction.REFRESH
 
 

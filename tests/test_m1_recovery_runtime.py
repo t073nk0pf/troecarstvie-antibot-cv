@@ -14,13 +14,17 @@ from src.antibot_cv.telemetry.m1_recovery import M1_RECOVERY_PHASES, assess_m1_r
 from tests.conftest import blank_frame
 
 
-def _controller_for_recovery(test_config: AutomationConfig) -> tuple[AutomationController, DryRunActionSink]:
+def _controller_for_recovery(
+    test_config: AutomationConfig,
+    *,
+    max_deaths_per_session: int = 3,
+) -> tuple[AutomationController, DryRunActionSink]:
     data = to_plain_dict(test_config)
     data["dry_run"] = False
     data["leveling"] = {
         **data["leveling"],
         "enabled": False,
-        "max_deaths_per_session": 3,
+        "max_deaths_per_session": max_deaths_per_session,
         "route_settle_ms": 1,
     }
     logger = InMemoryEventLogger(dry_run=False)
@@ -253,6 +257,24 @@ def test_m1_recovery_emits_one_ordered_offline_evidence_chain(
     assert assessment["offline_ready"] is True
     assert assessment["complete_attempts"] == 1
     assert assessment["consecutive_complete_attempts"] == 1
+
+
+def test_m1_recovery_stops_immediately_after_reaching_death_limit(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    controller, sink = _controller_for_recovery(test_config, max_deaths_per_session=1)
+
+    _advance_through_recovery_routes(controller, monkeypatch)
+
+    event_types = [event["event_type"] for event in controller.logger.events]
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason is None
+    assert event_types.index("death_recovery_completed") < event_types.index(
+        "death_recovery_limit_reached"
+    )
+    assert [request.action_type for request in sink.requests][-1] == "open_hunt"
+    assert not any(request.action_type == "attack_visible_target" for request in sink.requests)
 
 
 def test_m1_recovery_does_not_complete_when_final_hunt_is_rejected(

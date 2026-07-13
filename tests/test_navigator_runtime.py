@@ -43,7 +43,8 @@ def test_navigator_selection_uses_full_autocomplete_window(
     assert len(requests) == 1
     assert requests[0].action_type == "navigator_select_target"
     assert requests[0].metadata["target_kind"] == "monster"
-    assert requests[0].metadata["search_delay_ms"] == 8000
+    assert requests[0].metadata["search_delay_ms"] == 12000
+    assert requests[0].metadata["route_delay_ms"] == 8000
     assert requests[0].metadata["retry_delay_ms"] == 500
 
 

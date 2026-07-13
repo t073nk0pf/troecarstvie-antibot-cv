@@ -224,6 +224,30 @@ class LevelingRuntimeMixin:
             or _same_location_name(self._configured_route_completed_target, target)
         ):
             return False
+        if (
+            self.current_page_kind == "hunt"
+            and not self.current_location_name
+            and not self._last_alive_location_name
+        ):
+            request = ActionRequest(
+                "open_area",
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                dry_run=self.config.dry_run,
+                metadata={"reason": "capture_configured_route_checkpoint", "target": target},
+            )
+            if not self.action_executor.execute(request):
+                return self._stop_leveling_unsafe("configured_location_area_open_failed")
+            self._search_pause_until_monotonic = time.monotonic() + 0.5
+            self.logger.log_event(
+                "configured_location_route_preparing",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                page_kind=self.current_page_kind,
+                target=target,
+                reason="capture_configured_route_checkpoint",
+            )
+            return True
         if self.current_page_kind not in {"area", "hunt", "main"}:
             if self.current_page_kind not in {"quests", "inventory", "shop", "statistics"}:
                 return False
@@ -313,14 +337,28 @@ class LevelingRuntimeMixin:
             if isinstance(hunt_data, dict) and hunt_data.get("hasHunt") is True:
                 alive = True
         target_location = str(self.config.leveling.target_location_name or "").strip()
+        configured_route_resolved = bool(
+            target_location
+            and _same_location_name(self._configured_route_completed_target, target_location)
+        )
+        policy_location_name = self.current_location_name
+        if (
+            not policy_location_name
+            and self.current_page_kind == "hunt"
+            and configured_route_resolved
+        ):
+            policy_location_name = self._last_alive_location_name
         page_kind_known = bool(self.current_page_kind)
         location_safe: bool | None = True if page_kind_known else None
         if target_location:
-            location_safe = (
-                None
-                if not self.current_location_name
-                else _same_location_name(self.current_location_name, target_location)
-            )
+            if configured_route_resolved and policy_location_name:
+                location_safe = True
+            else:
+                location_safe = (
+                    None
+                    if not policy_location_name
+                    else _same_location_name(policy_location_name, target_location)
+                )
         inventory_items: dict[str, int] | None = None
         shop_section = sections.get("shopInventory") if isinstance(sections, dict) else None
         shop_data = shop_section.get("data") if isinstance(shop_section, dict) else None
@@ -337,7 +375,11 @@ class LevelingRuntimeMixin:
         policy = LevelingPolicy(
             required_character=self._bound_character_name or self.current_character_name,
             target_level=int(self.config.leveling.target_level or self.current_level + 1),
-            max_deaths=max(0, int(self.config.leveling.max_deaths_per_session)) + 1,
+            # A zero-death session may run until the first observed death, at
+            # which point DeathRecoveryPolicy stops before revival. Positive
+            # limits stop farming as soon as the recovered count reaches the
+            # configured cap; do not allow an extra attack with ``+ 1``.
+            max_deaths=max(1, int(self.config.leveling.max_deaths_per_session)),
             hp_threshold=max(0.0, min(1.0, self.config.resources.health_min_percent / 100)),
             prowess_threshold=max(0.0, min(1.0, self.config.resources.prowess_min_percent / 100)),
             hp_item_allowlist=tuple(self.config.item_recovery.health_names),
@@ -354,7 +396,7 @@ class LevelingRuntimeMixin:
                 alive=alive,
             ),
             LevelingLocation(
-                name=self.current_location_name,
+                name=policy_location_name,
                 safe=location_safe,
                 in_hunt=None if not page_kind_known else self.current_page_kind == "hunt",
                 hunt_open=None if not page_kind_known else self.current_page_kind == "hunt",
@@ -715,6 +757,18 @@ class LevelingRuntimeMixin:
         if completed:
             self._active_recovery_id = None
             self._recovery_phase_events.clear()
+            max_deaths = max(0, int(self.config.leveling.max_deaths_per_session))
+            if max_deaths > 0 and self.deaths_observed >= max_deaths:
+                self.logger.log_event(
+                    "death_recovery_limit_reached",
+                    state=self.state_machine.state.value,
+                    cycle_id=self.session.cycle_id,
+                    battle_id=self.session.battle_id,
+                    deaths_observed=self.deaths_observed,
+                    max_deaths=max_deaths,
+                    reason="max_deaths_recovered",
+                )
+                self._safe_transition(GameState.STOPPED, reason="max_deaths_recovered")
         return completed
 
     def _confirmed_recovery_location(self) -> str | None:

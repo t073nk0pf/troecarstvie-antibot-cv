@@ -32,7 +32,7 @@ def test_content_command_timeout_allows_inventory_delay() -> None:
     assert "inventoryOpenDelayMs" in content
     assert "Number.isFinite(rawInventoryDelay)" in content
     assert "inventoryDelay + 5000" in content
-    assert "Math.min(15000, Math.max(" in content
+    assert "Math.min(25000, Math.max(" in content
 
 
 def test_content_exposes_current_client_to_popup() -> None:
@@ -46,6 +46,19 @@ def test_content_exposes_current_client_to_popup() -> None:
     assert "chrome.tabs.query({ active: true, currentWindow: true })" in popup
     assert "chrome.tabs.sendMessage" in popup
     assert "tabs" in manifest["permissions"]
+
+
+def test_content_injects_page_bridge_as_utf8_for_legacy_game_document() -> None:
+    content = Path("browser_injector/content.js").read_text(encoding="utf-8")
+
+    charset_assignment = 'script.charset = "UTF-8"'
+    charset_attribute = 'script.setAttribute("charset", "UTF-8")'
+    source_assignment = 'script.src = chrome.runtime.getURL("page_bridge.js")'
+
+    assert charset_assignment in content
+    assert charset_attribute in content
+    assert content.index(charset_assignment) < content.index(source_assignment)
+    assert content.index(charset_attribute) < content.index(source_assignment)
 
 
 def test_extension_routes_local_fetch_through_background() -> None:
