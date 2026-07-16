@@ -71,6 +71,9 @@ Completed objectives stop before turn-in; turn-in remains outside the completed
 slice. Persisted quest leases, a bounded work scheduler, world/instance routing,
 and deferred gathering groundwork are also present offline. Gathering node
 discovery and a complete gathering mutation loop are not yet implemented.
+A pure turn-in safety runtime now defines the required identity, action, and
+fresh-catalogue contract, but it is not connected to the controller until
+authoritative quest-reference persistence is available.
 
 ## Main Current Milestone
 
@@ -182,7 +185,8 @@ acceptance are implemented and live-confirmed. Exact monster-objective
 selection, route handoff, preferred-quest intake, and the first dialogue
 executor are implemented offline. Persisted pinned chains and deferred work
 scheduling preserve ownership across refreshes; live proof, completed-quest
-turn-in, and other objective types are next.
+turn-in integration, and other objective types are next. The standalone turn-in
+safety contract is implemented and tested offline.
 
 This module accelerates leveling but must use the stable travel, combat,
 inventory, and death-recovery modules instead of duplicating them.

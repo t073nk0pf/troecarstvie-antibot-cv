@@ -1,5 +1,19 @@
 # Development Log
 
+## 2026-07-17 - Completed Quest Turn-In Safety Contract
+
+- Added a pure offline turn-in domain runtime with explicit route, NPC lookup,
+  dialogue, completion, and active-catalogue verification phases.
+- Turn-in begins only when a completed active entry, current persisted chain
+  lease, saved giver, and exact location agree. It emits only existing guarded
+  action contracts and performs no side effects itself.
+- Malformed or ambiguous action collections fail closed. Terminal completion
+  requires a complete active catalogue with a revision newer than the submitted
+  completion action and with the pinned quest absent.
+- Controller wiring is intentionally pending because intake does not yet
+  guarantee persistence of the authoritative quest reference required by the
+  turn-in contract. No bridge change or live claim is included in this slice.
+
 ## 2026-07-17 - Bounded Quest Scope And Safety Hardening
 
 - Added an offline-covered dialogue-objective executor that parses two

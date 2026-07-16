@@ -93,6 +93,12 @@ leveling product.
   Other failures remain blocked.
 - Completed quest progress takes priority over a missing current-location
   observation and stops at the unimplemented turn-in boundary.
+- A pure completed-quest turn-in runtime now defines the offline safety
+  contract for that boundary: completed active entry, persisted chain lease,
+  saved giver, and exact location must agree; NPC and dialogue decisions are
+  snapshot-bound; malformed alternatives fail closed; terminal success needs a
+  newer complete active-catalogue revision with the quest absent. Controller
+  wiring remains pending until intake persists an authoritative quest reference.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
@@ -259,6 +265,8 @@ allow battle/death recovery to finish, and then resume from the saved route.
   registry.
 - `src/antibot_cv/automation/navigator_action_runtime.py`: explicit bounded
   navigator fallback policy.
+- `src/antibot_cv/automation/quest_turnin_runtime.py`: pure completed-quest
+  turn-in transaction and terminal-verification policy.
 - `src/antibot_cv/automation/quest_giver.py`: conservative catalogue-giver to
   area-NPC resolution.
 - `src/antibot_cv/automation/recovery_items_runtime.py`: between-battle items.
