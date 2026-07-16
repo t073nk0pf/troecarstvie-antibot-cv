@@ -170,6 +170,53 @@ def test_dialog_decisions_normalize_title_and_choose_open_answer_then_accept() -
     assert runtime.pending is None
 
 
+def test_dialog_prefers_the_only_reply_without_refusal_language() -> None:
+    runtime = ready_dialog_runtime()
+    runtime.acknowledge(
+        runtime.decide_dialog(
+            dialog_snapshot(
+                questActions=[
+                    {
+                        "questId": "314",
+                        "title": "Письмо моряку",
+                        "action": "open",
+                        "visible": True,
+                        "disabled": False,
+                    }
+                ]
+            )
+        )
+    )
+
+    decision = runtime.decide_dialog(
+        dialog_snapshot(
+            dialogActions=[
+                {
+                    "questId": "314",
+                    "npcId": "6",
+                    "action": "answer",
+                    "visible": True,
+                    "disabled": False,
+                    "ref": "401",
+                    "text": "Где мне искать моряка?",
+                },
+                {
+                    "questId": "314",
+                    "npcId": "6",
+                    "action": "answer",
+                    "visible": True,
+                    "disabled": False,
+                    "ref": "402",
+                    "text": "Не могу я сейчас отправиться в путь.",
+                },
+            ]
+        )
+    )
+
+    assert decision.intent is QuestIntakeIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "401"
+
+
 @pytest.mark.parametrize(
     "snapshot,unsafe_reason",
     [

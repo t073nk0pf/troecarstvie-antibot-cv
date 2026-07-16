@@ -113,6 +113,7 @@ class QuestPolicy:
         *,
         require_active_quest: bool = True,
         require_route_location: bool = True,
+        allow_missing_current_location_route: bool = False,
         expected_identity: QuestIdentity | None = None,
         max_snapshot_age_s: float = 15.0,
         now: Callable[[], float] = time.time,
@@ -120,6 +121,7 @@ class QuestPolicy:
         self.required_character_name = _text(required_character_name)
         self.require_active_quest = require_active_quest
         self.require_route_location = require_route_location
+        self.allow_missing_current_location_route = allow_missing_current_location_route
         self.expected_identity = expected_identity
         self.max_snapshot_age_s = max_snapshot_age_s
         self.now = now
@@ -179,9 +181,6 @@ class QuestPolicy:
             return _unsafe("ambiguous_quest_route", snapshot)
         if self.require_route_location and len(quest.locations) != 1:
             return _unsafe("quest_route_missing", snapshot)
-        if quest.locations and not _valid_text(snapshot.current_location):
-            return _unsafe("current_location_unknown", snapshot)
-
         common = dict(
             quest_id=quest.id,
             quest_title=quest.title,
@@ -192,6 +191,14 @@ class QuestPolicy:
         )
         if quest.progress.complete:
             return QuestDecision(QuestIntent.OBJECTIVE_COMPLETE, "quest_objective_complete", **common)
+        if quest.locations and not _valid_text(snapshot.current_location):
+            if self.allow_missing_current_location_route:
+                return QuestDecision(
+                    QuestIntent.NAVIGATE,
+                    "quest_current_location_unobserved",
+                    **common,
+                )
+            return _unsafe("current_location_unknown", snapshot)
         if quest.locations and _normalize(snapshot.current_location) != _normalize(quest.locations[0]):
             return QuestDecision(QuestIntent.NAVIGATE, "quest_location_differs", **common)
         return QuestDecision(QuestIntent.SELECT_QUEST, "active_combat_quest_confirmed", **common)
@@ -201,6 +208,7 @@ class QuestPolicy:
             bool(self.required_character_name)
             and isinstance(self.require_active_quest, bool)
             and isinstance(self.require_route_location, bool)
+            and isinstance(self.allow_missing_current_location_route, bool)
             and isinstance(self.max_snapshot_age_s, (int, float))
             and not isinstance(self.max_snapshot_age_s, bool)
             and math.isfinite(float(self.max_snapshot_age_s))

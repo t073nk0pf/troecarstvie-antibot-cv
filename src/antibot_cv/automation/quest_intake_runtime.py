@@ -8,6 +8,9 @@ from enum import Enum
 from types import MappingProxyType
 
 from src.antibot_cv.automation.quest_director_policy import QuestRef
+from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+    select_progress_dialogue_action,
+)
 from src.antibot_cv.automation.quest_giver import resolve_unique_giver
 
 
@@ -239,13 +242,18 @@ class QuestIntakeRuntime:
             npc_id=pending.npc_id,
             action="answer",
         )
-        if len(dialog_actions) == 1:
+        selected_dialog_action = (
+            dialog_actions[0]
+            if len(dialog_actions) == 1
+            else select_progress_dialogue_action(dialog_actions)
+        )
+        if selected_dialog_action is not None:
             if pending.dialog_steps >= max_steps:
                 raise QuestIntakeDecisionError(
                     "quest_accept_dialog_step_limit_exceeded",
                     "quest dialogue step limit exceeded",
                 )
-            candidate = dialog_actions[0]
+            candidate = selected_dialog_action
             expected_ref = _bounded_text(candidate.get("ref"), max_length=80)
             expected_text = _bounded_text(candidate.get("text"), max_length=1200)
             if not expected_ref.isdecimal() or int(expected_ref) <= 0 or not expected_text:

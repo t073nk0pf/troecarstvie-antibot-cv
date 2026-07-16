@@ -256,6 +256,7 @@ class QuestRuntimeMixin:
                 self.config.leveling.auto_navigate_quest_targets
                 or self.config.leveling.autonomous_quest_director
             ),
+            allow_missing_current_location_route=self.config.leveling.autonomous_quest_director,
             expected_identity=expected_identity,
             max_snapshot_age_s=max(1.0, self.config.leveling.snapshot_stale_timeout_ms / 1000),
         )
@@ -1195,6 +1196,15 @@ class QuestRuntimeMixin:
             ):
                 self._begin_non_combat_quest_executor(decision.quest.id)
                 return
+            if decision is not None and decision.intent is QuestDirectorIntent.WAIT:
+                # The director owns transitional states such as an accepted
+                # quest whose navigation is still being observed.  Do not let
+                # the generic policy turn that expected wait into a false
+                # navigation failure.
+                return
+            if decision is not None and decision.intent is QuestDirectorIntent.STOP_UNSAFE:
+                self._stop_leveling_unsafe(f"quest_director:{decision.reason}")
+                return
         if self.current_page_kind == "quests":
             if (
                 self.config.leveling.auto_navigate_quest_targets
@@ -1207,6 +1217,12 @@ class QuestRuntimeMixin:
                     self._finish_quest_refresh_to_hunt("quest_target_already_local")
                     return
                 if self._quest_policy_intent is not QuestIntent.NAVIGATE:
+                    if self._quest_director is not None:
+                        # The generic policy is deliberately incomplete while
+                        # the director is collecting or reconciling a quest
+                        # catalogue.  A later fresh snapshot decides whether
+                        # to accept, execute, defer, or stop safely.
+                        return
                     self._stop_leveling_unsafe("quest_policy_not_ready_for_navigation")
                     return
                 target = self._select_quest_route_target()

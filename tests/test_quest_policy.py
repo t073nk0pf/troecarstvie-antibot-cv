@@ -132,6 +132,30 @@ def test_confirmed_objective_progress_stops_farming_for_turn_in() -> None:
     assert result.progress.required == 5
 
 
+def test_completed_objective_precedes_missing_current_location_navigation() -> None:
+    result = policy(allow_missing_current_location_route=True).decide(
+        character_name="герой",
+        current_level=4,
+        current_xp=50.0,
+        goal_level=5,
+        quest_state=snapshot(
+            combat_quest(
+                locations=("Город",),
+                progress=QuestProgress(
+                    current=5,
+                    required=5,
+                    complete=True,
+                    evidence="objective_ratio",
+                ),
+            ),
+            current_location=None,
+        ),
+    )
+
+    assert result.intent is QuestIntent.OBJECTIVE_COMPLETE
+    assert result.reason == "quest_objective_complete"
+
+
 def test_multiple_active_combat_quests_are_ambiguous() -> None:
     result = decide(quest_state=snapshot(combat_quest(), combat_quest(id="q2", title="Другая охота")))
     assert result.intent is QuestIntent.STOP_UNSAFE
@@ -191,6 +215,20 @@ def test_current_location_is_required_for_route_quest() -> None:
     result = decide(quest_state=snapshot(combat_quest(), current_location=None))
     assert result.intent is QuestIntent.STOP_UNSAFE
     assert result.reason == "current_location_unknown"
+
+
+def test_autonomous_route_may_defer_current_location_to_the_navigator() -> None:
+    result = policy(allow_missing_current_location_route=True).decide(
+        character_name="герой",
+        current_level=4,
+        current_xp=50.0,
+        goal_level=5,
+        quest_state=snapshot(combat_quest(locations=("Город",)), current_location=None),
+    )
+
+    assert result.intent is QuestIntent.NAVIGATE
+    assert result.reason == "quest_current_location_unobserved"
+    assert result.locations == ("Город",)
 
 
 def test_goal_and_player_observation_are_strict() -> None:

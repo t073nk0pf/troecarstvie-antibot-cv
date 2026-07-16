@@ -101,13 +101,21 @@ def parse_dialogue_objective(entry: ActiveQuestEntry) -> QuestDialogueObjective:
             "dialogue navigation does not identify one exact location",
         )
 
-    # Require the exact navigation label to occur after the Russian locative
-    # preposition. This rejects NPC/building targets such as ``Дом Франка``.
+    # The active page uses two evidenced, unambiguous Russian word orders:
+    # ``к NPC в Location`` and ``в/на Location к NPC и <next instruction>``.
+    # Both bind the NPC phrase directly to the sole navigable location.  This
+    # deliberately rejects building targets and free-form prose.
     npc_match = re.search(
         rf"(?:^|\s)к\s+(.+?)\s+в\s+{re.escape(label)}(?=\s|[.,!?;:]|$)",
         raw_objective,
         flags=re.IGNORECASE,
     )
+    if npc_match is None:
+        npc_match = re.search(
+            rf"(?:^|\s)(?:в|на)\s+{re.escape(label)}\s+к\s+(.+?)(?=\s+и\s+|[.,!?;:]|$)",
+            raw_objective,
+            flags=re.IGNORECASE,
+        )
     if npc_match is None:
         raise QuestDialogueError(
             "dialogue_npc_missing_or_ambiguous",

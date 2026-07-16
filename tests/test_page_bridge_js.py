@@ -785,14 +785,14 @@ const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
 const messages = [];
 const listeners = {};
 const title = { innerText: "Письмо дозорному", textContent: "Письмо дозорному" };
-const description = { innerText: "Поговорить с Дозорным и передать письмо.", textContent: "Поговорить с Дозорным и передать письмо." };
+const description = { innerText: "Отправляйтесь к волхву Алстарду и узнайте, где искать героя.", textContent: "Отправляйтесь к волхву Алстарду и узнайте, где искать героя." };
 const folding = {
   getAttribute(name) { return name === "onclick" ? "quest_folding.toggle(314);" : null; },
 };
 const detail = { id: "quest_314" };
 const card = {
-  innerText: "Письмо дозорному Текущая цель: Поговорить с Дозорным Награда: 900 опыта Местоположение: Южная застава",
-  textContent: "Письмо дозорному Текущая цель: Поговорить с Дозорным Награда: 900 опыта Местоположение: Южная застава",
+  innerText: "Письмо дозорному Текущая цель: Отправляйтесь к волхву Алстарду и узнайте, где искать героя Награда: 900 опыта Местоположение: Южная застава",
+  textContent: "Письмо дозорному Текущая цель: Отправляйтесь к волхву Алстарду и узнайте, где искать героя Награда: 900 опыта Местоположение: Южная застава",
   querySelector(selector) {
     if (selector === ".npc-point__title") return title;
     if (selector === ".npc-quest-description") return description;
@@ -832,7 +832,7 @@ assert.strictEqual(result.nextPageHref, "https://3kingdoms.ru/user_quest.php?mod
 assert.deepStrictEqual(result.catalogPages.map((entry) => entry.page), [1, 2]);
 assert.strictEqual(result.items[0].id, "314");
 assert.strictEqual(result.items[0].idSource, "numeric_dom");
-assert.strictEqual(result.items[0].description, "Поговорить с Дозорным и передать письмо.");
+assert.strictEqual(result.items[0].description, "Отправляйтесь к волхву Алстарду и узнайте, где искать героя.");
 assert.strictEqual(result.items[0].objectiveKind, "dialogue");
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)

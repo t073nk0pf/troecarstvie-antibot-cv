@@ -1,5 +1,63 @@
 # Development Log
 
+## 2026-07-17 - Bounded Quest Scope And Safety Hardening
+
+- Added an offline-covered dialogue-objective executor that parses two
+  evidenced Russian objective word orders, routes through the existing guarded
+  navigation runtime, resolves one exact NPC, submits one snapshot-bound action
+  at a time, and verifies progress from a fresh complete active catalogue.
+- Added a conservative dialogue-choice policy. Exact duplicate controls are
+  deduplicated, a unique non-refusal reply may advance, and tied, unknown, or
+  malformed alternatives fail closed.
+- Made an explicit preferred quest an intake preference until fresh available
+  and active catalogues confirm acceptance; the resulting persisted chain lease
+  then owns scheduling without redundant catalogue refreshes.
+- Added a bounded generic-navigator fallback only for the explicit
+  `quest_navigator_link_missing` result. All other injector failures remain
+  blocked through the existing safety action sink.
+- Corrected quest-policy ordering so confirmed completion stops at the pending
+  turn-in boundary even when the current location is unavailable. Transitional
+  director waits no longer fall through to a false missing-navigation stop.
+- Tightened gathering inventory matching so derived names cannot be mistaken
+  for one unambiguous required resource, and expanded objective classification
+  for evidenced Russian dialogue verbs.
+- Aligned the generated bridge, content script, background worker, and Python
+  broker at `2026-07-13-quest-scope-v52`; extension version is `0.3.21`.
+- Validation on the migrated arm64 Python 3.11 environment: full `490 passed`
+  regression suite, Python compilation, JavaScript syntax checks for the bridge
+  and extension scripts, deterministic bundle consistency, architecture limits,
+  and `git diff --check` passed. Independent review reported no findings. No new
+  live acceptance claim is made by this entry.
+
+## 2026-07-17 - Deferred Quest And Gathering Groundwork (v51)
+
+- Added deferred quest-work scheduling, gathering snapshots, pure gathering
+  plan/progress policy, and quest-chain support for non-combat work that is not
+  yet executable end to end.
+- Added conservative inflected resource-name matching and complete-catalogue
+  refresh waits. Gathering node discovery and mutation remain pending.
+- Aligned bridge `2026-07-13-quest-scope-v51` and extension `0.3.20` before the
+  subsequent v52 safety hardening.
+
+## 2026-07-17 - Typed Pinned Dialogue Execution (v50)
+
+- Added the first typed pinned-NPC dialogue executor: exact location and NPC
+  verification, snapshot-bound bounded actions, duplicate-answer prevention,
+  route return to the area page, and fresh active-catalogue verification.
+- Transitional snapshot retries are bounded, and dialogue work is dispatched
+  before legacy combat/intake fallbacks.
+- Aligned bridge `2026-07-13-quest-scope-v50` and extension `0.3.19`.
+
+## 2026-07-17 - Pinned Quest Chains And Instance Routing (v49)
+
+- Added persisted pinned quest chains, explicit pin scheduling, opportunistic
+  exact local-monster matching, a bounded world registry, guarded instance
+  entry/actions, and a dedicated quest-work scheduler.
+- Preserved dry-run isolation, allowed an explicit pin to replace stale chain
+  state, and restricted lease release to confirmed terminal evidence.
+- Aligned bridge `2026-07-13-instance-entry-v49` and extension `0.3.18`.
+  There was no separate v48 release.
+
 ## 2026-07-13 - Exact Monster Quest Objective Slice
 
 - Inspected all 24 currently active quests across the complete three-page live

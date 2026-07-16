@@ -1,6 +1,6 @@
 # Current State
 
-Updated: 2026-07-13
+Updated: 2026-07-17
 
 The staged roadmap and acceptance criteria are in
 [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md).
@@ -24,8 +24,8 @@ leveling product.
 
 - Branch: `codex/leveling-mvp`
 - Python entry point: `src.antibot_cv.automation.controller`
-- Chrome bridge version: `2026-07-13-quest-objective-v47`
-- Chrome extension version: `0.3.16`
+- Chrome bridge version: `2026-07-13-quest-scope-v52`
+- Chrome extension version: `0.3.21`
 - Main config: `config/automation.local.json`
 - Local bridge: `http://127.0.0.1:17654`
 - Chrome extension source: `browser_injector/`
@@ -55,6 +55,11 @@ leveling product.
   givers. The autonomous director builds a deduplicated accept-all queue,
   refreshes after five completed quests, and permits profit farming only after
   a fresh empty active/available observation.
+- Quest chains can be pinned and persisted across refreshes. A bounded work
+  scheduler keeps one leased quest authoritative, permits an explicit pin to
+  replace stale chain state, and releases the lease only on confirmed terminal
+  evidence. Opportunistic local monster matching, the bounded world registry,
+  and guarded instance-entry routing are available offline.
 - Exact NPC quest intake is implemented as a snapshot-bound action chain:
   resolve one area NPC, open the matching quest, click the exact
   `Взять задание` control, and re-read every active-quest page before
@@ -68,6 +73,26 @@ leveling product.
   after resurrection. It never skips an earlier navigation step to reach a
   later monster, and stops after ten confirmed victories without observable
   quest progress.
+- A bounded dialogue-objective executor is implemented offline. It recognizes
+  two evidenced Russian objective word orders, routes to one exact location,
+  resolves one exact NPC, advances only snapshot-bound dialogue actions, and
+  requires a fresh active-catalogue verification before accepting completion
+  or step advancement. Ambiguous or malformed alternatives fail closed; when
+  several valid replies are visible, only a unique non-refusal choice is
+  eligible.
+- Deferred quest work and gathering groundwork preserve unsupported work
+  without silently farming through it. Gathering snapshots and pure inventory
+  progress planning handle inflected resource names conservatively, but node
+  discovery and a complete gathering executor remain pending.
+- An explicitly preferred quest is treated as an intake preference until it is
+  confirmed active, after which the persisted chain lease owns scheduling.
+  Catalogue reconciliation waits do not fall through into legacy navigation
+  failures.
+- Quest navigation may use the generic location navigator only after the exact
+  quest-link action returns the explicit `quest_navigator_link_missing` error.
+  Other failures remain blocked.
+- Completed quest progress takes priority over a missing current-location
+  observation and stops at the unimplemented turn-in boundary.
 - M1 recovery telemetry now correlates every required phase under one
   `recovery_id`. A deterministic offline validator reports missing or
   out-of-order evidence without claiming that the live gate passed.
@@ -128,11 +153,12 @@ to 24 and telemetry recorded `quest_accept_confirmed`.
 
 ## Current Blocker
 
-For autonomous questing, exact monster-hunt selection and route handoff are now
-implemented and covered end to end offline. The next blocker is a bounded live
-proof followed by step advancement and turn-in. Dialogue, pure travel,
-location-action, collection completion, and chained objectives still require
-their own typed executors before level-20 operation can be unattended.
+For autonomous questing, exact monster-hunt selection, route handoff, and the
+first bounded dialogue executor are implemented and covered offline. The next
+blocker is bounded live proof followed by completed-quest turn-in. Pure travel,
+location-action, collection execution/completion, and further chained
+objective shapes still require typed executors before level-20 operation can
+be unattended.
 
 Route construction and full guarded multi-step movement are confirmed live, and
 the route loop is integrated into the main controller recovery state.
@@ -164,9 +190,10 @@ is two more consecutive natural recoveries, bringing the current streak from
 `max_deaths_recovered` stop, rather than relying on an external polling stop.
 This validation should not be replaced by repeated startup-only runs.
 
-Bridge v47 adds exact monster navigator selection for the first supported
-objective type. It does not yet execute arbitrary quest objectives or turn in
-completed quests. This work must not displace the M1 live gate.
+Bridge v52 adds the bounded quest-scope work described above. These additions
+have offline regression coverage but no new live acceptance evidence. It does
+not yet execute arbitrary quest objectives or turn in completed quests. This
+work must not displace the M1 live gate.
 
 Compass targets are runtime inputs. Recovery is not tied to a specific monster
 name: the bridge enters the supplied target, selects the exact matching result,
@@ -218,6 +245,20 @@ allow battle/death recovery to finish, and then resume from the saved route.
   pagination.
 - `src/antibot_cv/automation/quest_intake_runtime.py`: exact NPC acceptance
   state machine.
+- `src/antibot_cv/automation/quest_dialogue_runtime.py`: bounded dialogue
+  objective state machine.
+- `src/antibot_cv/automation/quest_dialogue_choice_policy.py`: conservative
+  dialogue reply selection.
+- `src/antibot_cv/automation/quest_chain_runtime.py`: persisted quest lease and
+  terminal reconciliation.
+- `src/antibot_cv/automation/quest_work_scheduler.py`: bounded deferred quest
+  work scheduling.
+- `src/antibot_cv/automation/gathering_activity_runtime.py`: pure gathering
+  plan and inventory-progress policy.
+- `src/antibot_cv/automation/world_registry.py`: bounded location and instance
+  registry.
+- `src/antibot_cv/automation/navigator_action_runtime.py`: explicit bounded
+  navigator fallback policy.
 - `src/antibot_cv/automation/quest_giver.py`: conservative catalogue-giver to
   area-NPC resolution.
 - `src/antibot_cv/automation/recovery_items_runtime.py`: between-battle items.
@@ -276,7 +317,7 @@ the current verified streak is `1/3`.
 1. Read this file, then `docs/DEVELOPMENT_LOG.md`.
    Use `docs/DEVELOPMENT_PLAN.md` to confirm the current milestone and avoid
    expanding scope before its exit gate passes.
-2. Start the control server and confirm bridge v47 with `version_ok: true`.
+2. Start the control server and confirm bridge v52 with `version_ok: true`.
 3. Start one bounded live run for the selected game tab.
 4. Trigger or observe one natural death while traveling/farming.
 5. Verify the full recovery sequence reaches the original destination and

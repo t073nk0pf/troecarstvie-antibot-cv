@@ -12,6 +12,7 @@ from src.antibot_cv.automation.controller import AutomationController, _apply_ru
 from src.antibot_cv.automation.actions import DryRunActionSink
 from src.antibot_cv.automation.death_recovery import RecoveryCheckpoint
 from src.antibot_cv.automation.quest_director_policy import QuestDirectorIntent
+from src.antibot_cv.automation.quest_policy import QuestIntent
 from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.detection.attack import AttackButtonDetection
 from src.antibot_cv.detection.battle_end import BattleEndDetection
@@ -3393,6 +3394,58 @@ def test_autonomous_quest_director_collects_every_active_page_before_deciding(
         ("open_active_quest_page", 1),
     ]
     assert controller.last_error_reason is None
+
+
+def test_autonomous_quest_director_wait_does_not_become_navigation_failure(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_director_policy import (
+        QuestDirectorDecision,
+        QuestDirectorIntent,
+    )
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "quests"
+    controller._quest_refresh_requested_monotonic = time.monotonic()
+    controller._quest_policy_intent = QuestIntent.START_FARM
+    controller._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="test")
+    director = controller._quest_director
+    assert director is not None
+    director.begin_catalog_refresh()
+    director.ingest_catalog_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [],
+            "truncated": False,
+        }
+    )
+    monkeypatch.setattr(
+        controller,
+        "_quest_director_decision",
+        lambda: QuestDirectorDecision(QuestDirectorIntent.WAIT, "navigation_in_progress"),
+    )
+
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert controller.last_error_reason is None
+    assert sink.requests == []
 
 
 def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(

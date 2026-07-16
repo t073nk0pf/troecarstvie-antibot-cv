@@ -75,6 +75,25 @@ def test_parse_travel_to_npc_objective_with_inflected_query() -> None:
     assert len(parsed.fingerprint) == 64
 
 
+def test_parse_dialogue_objective_with_location_before_inflected_npc() -> None:
+    parsed = parse_dialogue_objective(
+        entry(
+            objective=(
+                "Отправляйтесь на Прокалённое плато к волхву Алстарду и узнайте, "
+                "где можно найти героя Рокоша."
+            ),
+            navigation=(
+                MappingProxyType(
+                    {"text": "Прокалённое плато", "target": "Прокалённое плато"}
+                ),
+            ),
+        )
+    )
+
+    assert parsed.npc_query == "волхву Алстарду"
+    assert parsed.location == "Прокалённое плато"
+
+
 @pytest.mark.parametrize(
     "bad_entry",
     [

@@ -205,12 +205,15 @@ def test_execution_selects_supported_monster_from_complete_catalog_not_first_ref
     assert runtime.active_objective_revision == 1
 
 
-def test_preferred_chain_refreshes_active_first_and_preempts_intake(tmp_path) -> None:
+def test_preferred_chain_refreshes_available_then_active_and_preempts_intake(tmp_path) -> None:
     state_path = tmp_path / "quest-chain.json"
     runtime = QuestDirectorRuntime(
         pinned_quest_id="246",
         chain_state_path=state_path,
     )
+    assert runtime.decision().intent is QuestDirectorIntent.REFRESH_AVAILABLE
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1))
     assert runtime.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
     runtime.begin_active_refresh()
     runtime.ingest_active_page(
@@ -236,12 +239,43 @@ def test_preferred_chain_refreshes_active_first_and_preempts_intake(tmp_path) ->
     assert decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
     assert decision.quest is not None and decision.quest.id == "246"
     assert decision.reason == "pinned_chain_requires_non_monster_executor"
+    assert runtime.preferred_quest_id == ""
     assert state_path.exists()
 
     restored = QuestDirectorRuntime(chain_state_path=state_path)
     assert restored.chain.lease is not None
     assert restored.chain.lease.quest_id == "246"
     assert restored.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
+
+
+def test_preferred_available_quest_is_accepted_after_complete_snapshots() -> None:
+    runtime = QuestDirectorRuntime(pinned_quest_id="31")
+
+    assert runtime.decision().intent is QuestDirectorIntent.REFRESH_AVAILABLE
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1, available("31", 0), available("91", 0)))
+    assert runtime.decision().intent is QuestDirectorIntent.REFRESH_ACTIVE
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1))
+
+    decision = runtime.decision()
+
+    assert decision.intent is QuestDirectorIntent.ACCEPT_QUEST
+    assert decision.quest is not None and decision.quest.id == "31"
+    assert [quest.id for quest in decision.intake_queue] == ["31"]
+
+
+def test_preferred_quest_stops_only_after_available_and_active_catalogues_are_fresh() -> None:
+    runtime = QuestDirectorRuntime(pinned_quest_id="31")
+    runtime.begin_catalog_refresh()
+    runtime.ingest_catalog_page(catalog_page(0, 1, available("91", 0)))
+    runtime.begin_active_refresh()
+    runtime.ingest_active_page(active_page(0, 1, active_monster("246")))
+
+    decision = runtime.decision()
+
+    assert decision.intent is QuestDirectorIntent.STOP_UNSAFE
+    assert decision.reason == "preferred_pinned_quest_not_available_or_active"
 
 
 def test_confirmed_terminal_removal_releases_persisted_chain(tmp_path) -> None:

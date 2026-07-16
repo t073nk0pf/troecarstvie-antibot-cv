@@ -1,6 +1,6 @@
 # Development Plan
 
-Updated: 2026-07-13
+Updated: 2026-07-17
 
 ## Product Result
 
@@ -57,15 +57,20 @@ nine-phase recovery evidence chain, and a read-only offline validator
 identifies missing or out-of-order phases from a run log. Offline readiness is
 diagnostic only and does not satisfy the live exit gate.
 
-The local v47 bridge includes bounded quest observation and exact NPC intake:
+The local v52 bridge includes bounded quest observation and exact NPC intake:
 active and available cards are parsed across all pages; the bot can travel to a
 unique giver, open the exact quest, click `Взять задание`, and acknowledge
 success only after the quest ID appears in a fresh active catalogue. The first
 typed objective executor selects and routes to an exact same-or-lower-level
 monster from the complete active catalogue and refreshes progress after every
 victory and resurrection. It stops after a bounded ten victories without
-observable progress. Step advancement and turn-in remain outside the completed
-slice.
+observable progress. A bounded dialogue executor now handles one exact NPC and
+snapshot-bound progression actions, with fresh active-catalogue verification
+and fail-closed handling for ambiguous or malformed reply alternatives.
+Completed objectives stop before turn-in; turn-in remains outside the completed
+slice. Persisted quest leases, a bounded work scheduler, world/instance routing,
+and deferred gathering groundwork are also present offline. Gathering node
+discovery and a complete gathering mutation loop are not yet implemented.
 
 ## Main Current Milestone
 
@@ -174,8 +179,10 @@ hard-coded fixed skill set and never uses a non-allowlisted item.
 
 Status: catalogue discovery, scheduling, travel-to-giver, and exact NPC
 acceptance are implemented and live-confirmed. Exact monster-objective
-selection and route handoff are implemented offline; live proof, step
-advancement, other objective types, and turn-in are next.
+selection, route handoff, preferred-quest intake, and the first dialogue
+executor are implemented offline. Persisted pinned chains and deferred work
+scheduling preserve ownership across refreshes; live proof, completed-quest
+turn-in, and other objective types are next.
 
 This module accelerates leveling but must use the stable travel, combat,
 inventory, and death-recovery modules instead of duplicating them.
@@ -190,18 +197,20 @@ Responsibilities:
 - convert objectives into route/combat/inventory tasks; exact monster route and
   combat targeting implemented offline;
 - track progress and turn completed quests in; full refresh after each monster
-  victory implemented, advancement and turn-in pending;
+  victory and dialogue progression implemented, completed-quest turn-in
+  pending;
 - skip blocked, unsafe, unaffordable, or explicitly denied quests;
 - re-plan when a quest target or location is unavailable.
 
 Current guarded boundary: discovery produces an ordered intake queue, resolves
-one unique giver, performs one snapshot-bound dialogue action at a time, and
+one unique giver, performs one snapshot-bound acceptance action at a time, and
 confirms acceptance from the complete active list. It can then select one exact
-monster-hunt step from that complete list, route and filter combat to the
-snapshot target, and re-read all active pages after each victory. Changed,
-completed, unknown, or unsupported steps stop before a new mutation. The
-fallback farm intent is allowed only after a fresh empty catalogue and active
-list.
+monster-hunt or dialogue step, route through the shared navigation runtime, and
+re-read all active pages after each verified mutation. Dialogue alternatives
+must have one conservative progression choice; malformed or ambiguous choices
+fail closed. Changed, completed, unknown, or unsupported steps stop before a
+new mutation. The fallback farm intent is allowed only after a fresh empty
+catalogue and active list.
 
 Exit gate: complete a configured level-range quest chain from a clean level 1
 post-tutorial character without manual navigation.

@@ -209,10 +209,10 @@
         : [];
       const giverNames = giverLinks.map((entry) => entry.name);
       const objectiveEvidence = objective || catalogDescription;
-      const objectiveKind = /(?:собра(?:ть|йте)|добы(?:ть|удьте)|принес(?:ти|ите)|получи(?:ть|те)|найти)/i.test(objectiveEvidence || "")
-        ? "collect"
-        : /(?:поговори(?:ть|те)|обрати(?:ть|тесь)|расспроси(?:ть|те))/i.test(objectiveEvidence || "")
-          ? "dialogue"
+      const objectiveKind = /(?:поговори(?:ть|те)|обрати(?:ть|тесь)|расспроси(?:ть|те)|узнай(?:те|ть)|выясни(?:те|ть))/i.test(objectiveEvidence || "")
+        ? "dialogue"
+        : /(?:собра(?:ть|йте)|добы(?:ть|удьте)|принес(?:ти|ите)|получи(?:ть|те)|найти)/i.test(objectiveEvidence || "")
+          ? "collect"
           : /(?:посети(?:ть|те)|прибы(?:ть|удьте)|отправ(?:иться|ьтесь))/i.test(objectiveEvidence || "")
             ? "travel"
             : /(?:уби(?:ть|йте)|уничтож|побед|одол|сраз|атак)/i.test(objectiveEvidence || "")

@@ -88,13 +88,40 @@ class QuestDirectorRuntime:
                 quest=self.pending_accept,
                 intake_queue=self.intake_queue,
             )
-        if (
-            (self.chain.lease is not None or self.preferred_quest_id)
-            and not self.active_snapshot_fresh
-        ):
+        if self.chain.lease is not None and not self.active_snapshot_fresh:
             return QuestDirectorDecision(
                 QuestDirectorIntent.REFRESH_ACTIVE,
                 "pinned_chain_active_refresh_required",
+                intake_queue=self.intake_queue,
+            )
+        if self.preferred_quest_id:
+            if not self.available_snapshot_fresh:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.REFRESH_AVAILABLE,
+                    "preferred_quest_available_refresh_required",
+                    intake_queue=self.intake_queue,
+                )
+            if not self.active_snapshot_fresh:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.REFRESH_ACTIVE,
+                    "preferred_quest_active_refresh_required",
+                    intake_queue=self.intake_queue,
+                )
+            preferred = next(
+                (quest for quest in self.available_quests if quest.id == self.preferred_quest_id),
+                None,
+            )
+            if preferred is None:
+                return QuestDirectorDecision(
+                    QuestDirectorIntent.STOP_UNSAFE,
+                    "preferred_pinned_quest_not_available_or_active",
+                    intake_queue=self.intake_queue,
+                )
+            self.intake_queue = (preferred,)
+            return QuestDirectorDecision(
+                QuestDirectorIntent.ACCEPT_QUEST,
+                "preferred_available_quest_waiting_for_acceptance",
+                quest=preferred,
                 intake_queue=self.intake_queue,
             )
         if self.active_snapshot_fresh and self.chain.lease is not None and not any(
@@ -103,14 +130,6 @@ class QuestDirectorRuntime:
             return QuestDirectorDecision(
                 QuestDirectorIntent.STOP_UNSAFE,
                 "pinned_quest_missing_without_terminal_evidence",
-                intake_queue=self.intake_queue,
-            )
-        if self.active_snapshot_fresh and self.preferred_quest_id and not any(
-            quest.id == self.preferred_quest_id for quest in self.active_quests
-        ):
-            return QuestDirectorDecision(
-                QuestDirectorIntent.STOP_UNSAFE,
-                "preferred_pinned_quest_missing",
                 intake_queue=self.intake_queue,
             )
         result = self.policy.decide(self.snapshot())
@@ -302,19 +321,18 @@ class QuestDirectorRuntime:
             if quest_id in active_ids
         }
         self.active_snapshot_fresh = True
-        if self.chain.lease is None and self.preferred_quest_id:
+        if self.preferred_quest_id:
             preferred = next(
                 (entry for entry in result if entry.id == self.preferred_quest_id),
                 None,
             )
-            if preferred is None:
-                self.objective_refresh = ObjectiveRefreshComparison(
-                    ObjectiveRefreshState.REGRESSED_UNSAFE,
-                    None,
-                    "preferred_pinned_quest_missing",
-                )
-            else:
-                self.chain.pin_entry(preferred, revision=self.active_catalog.revision)
+            if preferred is not None:
+                if self.chain.lease is None:
+                    self.chain.pin_entry(preferred, revision=self.active_catalog.revision)
+                # The explicit pin is an intake preference only.  Once its
+                # accepted quest is confirmed active, the persisted chain
+                # lease owns subsequent scheduling and must not trigger an
+                # unnecessary available-catalogue refresh.
                 self.preferred_quest_id = ""
         if self.active_objective is not None:
             previous = self.active_objective

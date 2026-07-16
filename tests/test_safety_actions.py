@@ -853,6 +853,35 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
     ]
 
 
+def test_live_quest_navigator_uses_generic_navigator_only_for_missing_quest_link(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None) -> InjectorResult:
+            calls.append(command)
+            if command == "open_quest_navigator":
+                return InjectorResult(False, '{"ok":false,"message":"quest_navigator_link_missing"}', client_id)
+            if command == "open_location_navigator":
+                return InjectorResult(True, '{"ok":true,"message":"location_navigator_opened"}', client_id)
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest(
+            "open_quest_navigator",
+            metadata={"target": "Гигантская оса [2]", "quest_id": "31"},
+            dry_run=False,
+        )
+    )
+
+    assert calls == ["open_quest_navigator", "open_location_navigator"]
+    assert logger.events[-1]["event_type"] == "quest_navigator_opened"
+    assert logger.events[-1]["navigator_fallback"] == "location_navigator"
+
+
 def test_live_open_quest_catalog_forwards_only_bounded_integer_page(monkeypatch) -> None:
     calls: list[tuple[str, dict[str, object], float, str | None]] = []
 

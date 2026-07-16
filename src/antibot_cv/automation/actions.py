@@ -9,6 +9,7 @@ from src.antibot_cv.automation.action_route_helpers import (
     route_confirmation_reason as _route_confirmation_reason,
 )
 from src.antibot_cv.automation.browser_injector import global_browser_injector
+from src.antibot_cv.automation.navigator_action_runtime import open_location_navigator_fallback
 from src.antibot_cv.automation.resource_action_helpers import (
     refresh_resource_source_after_use,
     resource_percent_from_open_result,
@@ -728,8 +729,9 @@ class LiveMacActionSink:
 
         if request.action_type == "open_quest_navigator":
             metadata = dict(request.metadata or {})
+            injector = global_browser_injector()
             result = self._execute_injector(
-                global_browser_injector(),
+                injector,
                 "open_quest_navigator",
                 {
                     "target": metadata.get("target", ""),
@@ -755,6 +757,19 @@ class LiveMacActionSink:
             if result.ok:
                 _log_action(self.logger, "quest_navigator_opened", logged_request, dry_run=False)
                 return True
+            fallback = open_location_navigator_fallback(
+                result,
+                metadata=result_metadata,
+                execute=lambda: self._execute_injector(injector, "open_location_navigator", {}, timeout_s=2.5),
+                compact_message=_compact_injector_message,
+            )
+            if fallback is not None:
+                fallback_request = _copy_request(request, metadata=fallback.metadata)
+                if fallback.ok:
+                    _log_action(self.logger, "quest_navigator_opened", fallback_request, dry_run=False)
+                else:
+                    _log_action(self.logger, "action_blocked", fallback_request, block_reason=fallback.block_reason)
+                return fallback.ok
             _log_action(
                 self.logger,
                 "action_blocked",

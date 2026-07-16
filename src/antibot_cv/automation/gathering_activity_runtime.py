@@ -109,11 +109,16 @@ def gathering_progress(plan: GatheringPlan, inventory_items: Sequence[Mapping[st
             resolved_totals[requirement_key] = exact
             continue
         candidates = [
-            count
+            (inventory_name, count)
             for inventory_name, count in totals.items()
-            if _same_resource_lexeme(requirement_key, inventory_name)
+            if _could_reference_resource(requirement_key, inventory_name)
         ]
-        resolved_totals[requirement_key] = candidates[0] if len(candidates) == 1 else 0
+        resolved_totals[requirement_key] = (
+            candidates[0][1]
+            if len(candidates) == 1
+            and _same_resource_lexeme(requirement_key, candidates[0][0])
+            else 0
+        )
     collected = tuple((requirement.name, resolved_totals[_normalized(requirement.name)]) for requirement in plan.requirements)
     missing = tuple(
         GatheringRequirement(requirement.name, requirement.required - resolved_totals[_normalized(requirement.name)])
@@ -151,6 +156,18 @@ def _same_resource_lexeme(requirement: str, inventory_name: str) -> bool:
         _same_word_lexeme(expected, observed)
         for expected, observed in zip(requirement_words, inventory_words)
     )
+
+
+def _could_reference_resource(requirement: str, inventory_name: str) -> bool:
+    """Include derived item names when deciding whether a match is ambiguous."""
+
+    requirement_words = requirement.split()
+    inventory_words = inventory_name.split()
+    if not requirement_words or not inventory_words:
+        return False
+    if _same_resource_lexeme(requirement, inventory_name):
+        return True
+    return _same_word_lexeme(requirement_words[0], inventory_words[0])
 
 
 def _same_word_lexeme(expected: str, observed: str) -> bool:
