@@ -720,6 +720,17 @@
         send(data.token, Boolean(result.ok), result);
         return;
       }
+      if (data.command.type === "area_object_snapshot") {
+        const result = areaObjectSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "inspect_area_object") {
+        inspectAreaObject(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `inspect_area_object_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
       if (data.command.type === "location_route_step") {
         locationRouteStep(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))

@@ -158,33 +158,58 @@ class QuestTurnInRuntime:
             raise QuestTurnInError("turn_in_dialog_snapshot_invalid", "NPC dialogue identity is missing")
         common = dict(expected_snapshot_id=snapshot_id, npc_id=pending.npc_id,
                       quest_id=pending.objective.quest_id, expected_title=pending.objective.quest_title)
-        if not pending.quest_opened:
-            opens = _actions(snapshot.get("questActions"), quest_id=pending.objective.quest_id, action="open")
-            if len(opens) != 1:
-                raise QuestTurnInError("turn_in_open_missing_or_ambiguous", "quest open action is missing or ambiguous")
-            title = _text(opens[0].get("title"), 220)
-            if not title:
-                raise QuestTurnInError("turn_in_open_invalid", "quest open title is missing")
-            return self._remember(QuestTurnInDecision(
-                QuestTurnInIntent.OPEN_QUEST, "npc_quest_action",
-                _metadata(**{**common, "expected_title": title}, action="open"),
-                "quest_turn_in_open_failed", pending.objective.quest_id, snapshot_id,
-            ))
         answers = _actions(snapshot.get("dialogActions"), quest_id=pending.objective.quest_id,
                            action="answer", npc_id=pending.npc_id)
         completions = _actions(snapshot.get("doneActions"), quest_id=pending.objective.quest_id,
                                action="done", npc_id=pending.npc_id)
+        effective_pending = pending
+        inferred_already_open = False
+        if not pending.quest_opened:
+            opens = _actions(snapshot.get("questActions"), quest_id=pending.objective.quest_id, action="open")
+            if len(opens) == 1:
+                if answers or completions:
+                    raise QuestTurnInError(
+                        "turn_in_action_ambiguous",
+                        "dialogue exposes open and progression actions together",
+                    )
+                title = _text(opens[0].get("title"), 220)
+                if not title:
+                    raise QuestTurnInError("turn_in_open_invalid", "quest open title is missing")
+                return self._remember(QuestTurnInDecision(
+                    QuestTurnInIntent.OPEN_QUEST, "npc_quest_action",
+                    _metadata(**{**common, "expected_title": title}, action="open"),
+                    "quest_turn_in_open_failed", pending.objective.quest_id, snapshot_id,
+                ))
+            if len(opens) > 1 or len(answers) > 1 or len(completions) > 1 or (answers and completions):
+                raise QuestTurnInError("turn_in_open_missing_or_ambiguous", "quest open action is missing or ambiguous")
+            if len(answers) + len(completions) != 1:
+                raise QuestTurnInError("turn_in_open_missing_or_ambiguous", "quest open action is missing or ambiguous")
+            # The NPC can open a dialogue directly after the area click.  A
+            # single snapshot-bound continuation is stronger evidence than a
+            # missing intermediate "Далее" card, so continue without ever
+            # mutating persisted pending state until the action is accepted.
+            effective_pending = replace(pending, quest_opened=True)
+            inferred_already_open = True
         if len(answers) > 1 or len(completions) > 1 or (answers and completions):
             raise QuestTurnInError("turn_in_action_ambiguous", "dialogue exposes ambiguous turn-in actions")
-        if pending.dialog_steps >= max_steps:
+        if effective_pending.dialog_steps >= max_steps:
             raise QuestTurnInError("turn_in_step_limit_exceeded", "turn-in dialogue step limit exceeded")
         if answers:
             ref, text = _text(answers[0].get("ref"), 80), _text(answers[0].get("text"), 1200)
-            if not ref.isdecimal() or int(ref) <= 0 or not text or ref == pending.last_answer_ref:
+            if ref == effective_pending.last_answer_ref:
+                # The browser can expose the just-submitted reply during the
+                # next controller pass before it renders the final `done`.
+                # This is a causal-settle wait, not an invalid reply.
+                raise QuestTurnInError(
+                    "turn_in_action_not_advanced",
+                    "dialogue still exposes the previously submitted answer",
+                )
+            if not ref.isdecimal() or int(ref) <= 0 or not text:
                 raise QuestTurnInError("turn_in_answer_invalid", "dialogue answer identity is invalid or stale")
             return self._remember(QuestTurnInDecision(
                 QuestTurnInIntent.ANSWER_DIALOG, "npc_quest_action",
-                _metadata(**common, action="answer", expected_ref=ref, expected_text=text),
+                _metadata(**common, action="answer", expected_ref=ref, expected_text=text,
+                          inferred_already_open=inferred_already_open),
                 "quest_turn_in_answer_failed", pending.objective.quest_id, snapshot_id,
             ))
         if completions:
@@ -193,7 +218,8 @@ class QuestTurnInRuntime:
                 raise QuestTurnInError("turn_in_completion_invalid", "completion identity is invalid")
             return self._remember(QuestTurnInDecision(
                 QuestTurnInIntent.COMPLETE_QUEST, "npc_quest_action",
-                _metadata(**common, action="done", expected_point_id=point_id, expected_text=text),
+                _metadata(**common, action="done", expected_point_id=point_id, expected_text=text,
+                          inferred_already_open=inferred_already_open),
                 "quest_turn_in_completion_failed", pending.objective.quest_id, snapshot_id,
             ))
         raise QuestTurnInError("turn_in_action_missing", "turn-in progression action is missing")
@@ -213,7 +239,8 @@ class QuestTurnInRuntime:
             updated = replace(pending, quest_opened=True)
         elif decision.intent is QuestTurnInIntent.ANSWER_DIALOG:
             updated = replace(pending, dialog_steps=pending.dialog_steps + 1,
-                              last_answer_ref=str(decision.action_metadata["expected_ref"]))
+                              last_answer_ref=str(decision.action_metadata["expected_ref"]),
+                              quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened)
         elif decision.intent is QuestTurnInIntent.COMPLETE_QUEST:
             if (
                 not isinstance(active_catalog_revision, int)
@@ -223,7 +250,8 @@ class QuestTurnInRuntime:
                 raise ValueError("completion acknowledgement requires a non-negative active catalogue revision")
             updated = replace(pending, phase=QuestTurnInPhase.VERIFY_ACTIVE,
                               dialog_steps=pending.dialog_steps + 1,
-                              completion_after_revision=active_catalog_revision)
+                              completion_after_revision=active_catalog_revision,
+                              quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened)
         else:  # pragma: no cover
             raise RuntimeError("unsupported quest turn-in decision")
         self.pending, self._pending_decision = updated, None

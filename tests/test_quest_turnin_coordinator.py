@@ -238,6 +238,69 @@ def test_confirmed_acceptance_to_completed_turn_in_releases_after_fresh_absence(
     assert any(event["event_type"] == "quest_turn_in_completed" for event in result.logger.events)
 
 
+def test_turn_in_waits_for_npc_dialogue_to_settle_after_confirmed_open(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    result, sink = controller(test_config)
+    director = result._quest_director
+    assert director is not None and director.chain.lease is not None
+    director.chain.bind_accepted_ref(
+        QuestRef("246", "Охота на волка", location="Южная застава", giver_names=("Воевода Ратмир",))
+    )
+    snapshots = iter([
+        {
+            "ok": True, "truncated": False, "snapshotId": "area-npcs-turn-in-1",
+            "location": {"id": "77", "name": "Южная застава"},
+            "items": [{"dataId": "12", "name": "Воевода Ратмир", "actionable": True}],
+        },
+        # The UI has accepted the NPC click but has not rendered quest
+        # controls yet.  This used to stop the whole quest loop.
+        {
+            "ok": True, "truncated": False, "identityMatches": True,
+            "snapshotId": "npc-dialog-loading", "questActions": [],
+            "dialogActions": [], "doneActions": [],
+        },
+        {
+            "ok": True, "truncated": False, "identityMatches": True,
+            "snapshotId": "npc-dialog-open", "questActions": [{
+                "questId": "246", "title": "Разговор с Ратмиром о волках",
+                "action": "open", "visible": True, "disabled": False,
+            }], "dialogActions": [], "doneActions": [],
+        },
+    ])
+
+    class FakeInjector:
+        def execute(self, command, payload=None, **kwargs):
+            return InjectorResult(True, json.dumps(next(snapshots), ensure_ascii=False), "client")
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.browser_injector.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+
+    result._handle_quest_refresh()  # begin turn-in -> open area
+    result.current_page_kind = "area"
+    result._handle_quest_refresh()  # area snapshot -> open NPC
+    result._handle_quest_refresh()  # stale landing snapshot -> bounded wait
+    assert result.state_machine.state is not GameState.STOPPED
+    result._handle_quest_refresh()  # rendered open action -> click it
+
+    assert result.state_machine.state is not GameState.STOPPED
+    assert [request.action_type for request in sink.requests] == [
+        "open_area", "open_exact_npc", "npc_quest_action",
+    ]
+
+
+def test_turn_in_waits_when_the_submitted_answer_is_still_visible(
+    test_config: AutomationConfig,
+) -> None:
+    result, _ = controller(test_config)
+    result._quest_turn_in_started_monotonic = time.monotonic()
+
+    assert result._quest_turn_in_snapshot_pending("turn_in_action_not_advanced") is True
+
+
 def test_turn_in_route_arrival_reenters_quest_refresh_and_opens_area(
     test_config: AutomationConfig,
 ) -> None:

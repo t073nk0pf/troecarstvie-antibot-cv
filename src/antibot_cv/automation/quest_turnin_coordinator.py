@@ -166,7 +166,13 @@ class QuestTurnInCoordinatorMixin:
         if unsafe_reason not in {
             "turn_in_npc_snapshot_invalid",
             "turn_in_dialog_snapshot_invalid",
+            # `open_exact_npc` is asynchronous in the game UI.  The first
+            # post-click snapshot can still be the NPC landing page, with no
+            # quest open action yet.  Treat that as an observation pending
+            # within the bounded turn-in deadline, not as a terminal error.
+            "turn_in_open_missing_or_ambiguous",
             "turn_in_action_missing",
+            "turn_in_action_not_advanced",
             "turn_in_area_page_pending",
             "turn_in_step_not_advanced",
         }:
@@ -353,6 +359,10 @@ class QuestTurnInCoordinatorMixin:
             )
         except (RuntimeError, ValueError) as exc:
             return self._stop_leveling_unsafe(f"quest_turn_in_ack:{exc}")
+        if decision.intent is QuestTurnInIntent.OPEN_NPC:
+            # Start the bounded dialogue-observation window at the mutation
+            # that actually opens the NPC, rather than at area-page arrival.
+            self._quest_turn_in_started_monotonic = time.monotonic()
         self._invalidate_quest_snapshot_cache()
         self._quest_refresh_requested_monotonic = time.monotonic()
         if updated.phase is QuestTurnInPhase.VERIFY_ACTIVE:

@@ -179,6 +179,42 @@ def test_dialogue_emits_existing_guarded_actions_and_requires_terminal_refresh()
     assert runtime.pending is None
 
 
+def test_turn_in_infers_directly_opened_dialogue_from_one_safe_answer() -> None:
+    runtime = begun()
+
+    answer = runtime.decide_dialog(dialog(dialogActions=[{
+        "questId": "246", "npcId": "12", "action": "answer", "ref": "81",
+        "text": "Вот добытые трофеи.", "visible": True, "disabled": False,
+    }]))
+
+    assert answer.intent is QuestTurnInIntent.ANSWER_DIALOG
+    assert answer.action_metadata["inferred_already_open"] is True
+    updated = runtime.acknowledge(answer)
+    assert updated.quest_opened is True
+    assert updated.last_answer_ref == "81"
+
+
+def test_turn_in_treats_the_just_submitted_answer_as_pending_settle() -> None:
+    runtime = begun()
+    opened = runtime.decide_dialog(dialog(questActions=[{
+        "questId": "246", "title": "Разговор с Ратмиром", "action": "open",
+        "visible": True, "disabled": False,
+    }]))
+    runtime.acknowledge(opened)
+    answered = runtime.decide_dialog(dialog(dialogActions=[{
+        "questId": "246", "npcId": "12", "action": "answer", "ref": "81",
+        "text": "Трофеи доставлены.", "visible": True, "disabled": False,
+    }]))
+    runtime.acknowledge(answered)
+
+    with pytest.raises(QuestTurnInError, match="previously submitted") as error:
+        runtime.decide_dialog(dialog(dialogActions=[{
+            "questId": "246", "npcId": "12", "action": "answer", "ref": "81",
+            "text": "Трофеи доставлены.", "visible": True, "disabled": False,
+        }]))
+    assert error.value.unsafe_reason == "turn_in_action_not_advanced"
+
+
 def test_open_action_is_selected_by_quest_id_when_dialogue_title_differs() -> None:
     runtime = begun()
 

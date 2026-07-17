@@ -1310,7 +1310,9 @@ const answerAction = {
   textContent: longAnswerText,
   disabled: false,
   getAttribute(name) {
-    if (name === "onclick") return "location.href='npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401&secret'";
+    // Live NPC replies can omit action=answer and identify the reply by its
+    // quest id plus ref alone.
+    if (name === "onclick") return "location.href='npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&ref=401&secret'";
     return null;
   },
   getClientRects() { return [{ width: 100, height: 30 }]; },
@@ -1451,6 +1453,14 @@ async function command(type, payload = {}) {
   assert.strictEqual(detail.message.dialogActions[0].ref, "401");
   assert.strictEqual(detail.message.dialogActions[0].text, longAnswerText);
   assert.ok(detail.message.dialogActions[0].text.length > 180);
+  header.innerText = "КУЯВСКИЙ ПОСОЛ ЩАЖАРД";
+  header.textContent = "КУЯВСКИЙ ПОСОЛ ЩАЖАРД";
+  const declinedRole = await command("npc_dialog_snapshot", {
+    expectedName: "куявскому послу Щажарду", expectedNpcId: "0",
+  });
+  assert.strictEqual(declinedRole.message.identityMatches, true);
+  header.innerText = "Моряк Кентур";
+  header.textContent = "Моряк Кентур";
   const wrongName = await command("npc_dialog_snapshot", { expectedName: "Другой NPC", expectedNpcId: "0" });
   assert.strictEqual(wrongName.message.npcId, "0");
   assert.strictEqual(wrongName.message.identityMatches, false);
@@ -3936,6 +3946,7 @@ const image = {
     if (name === "src") return "/images/items/burdjuk_udal.png";
     if (name === "style") return "left: 10px; top: 20px;";
     if (name === "data-artikul") return "555";
+    if (name === "cnt") return "10";
     return null;
   },
   closest() { return this; },
@@ -4060,6 +4071,7 @@ function command(type, payload = {}) {
   assert.strictEqual(questResult.message.itemCount, 1);
   assert.strictEqual(questResult.message.truncated, false);
   assert.strictEqual(questResult.message.items.length, 1);
+  assert.strictEqual(questResult.message.items[0].count, 10);
   assert.strictEqual(questResult.message.items[0].artAltTitle, "Пояс Кентавра-ветерана");
   assert.strictEqual(questResult.message.sample[0].artAltTitle, "Пояс Кентавра-ветерана");
   assert.strictEqual(questResult.message.sample[0].artAltKind, "Квестовые предметы");

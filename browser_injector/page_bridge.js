@@ -1362,219 +1362,6 @@
     return output;
   };
 
-  const resourceKeyword = (text) =>
-    /жизн|здоров|удал|удаль|health|life|hp|mana|mp|prowess|bravery|stamina|vigor|energy/i.test(text);
-
-  const parseResourcePercent = (text, kind) => {
-    const value = safeString(text, 500).replace(",", ".");
-    const patterns = kind === "health"
-      ? [
-          /(?:жизн(?:ь|и)?|здоров(?:ье|ья)?|health|life|hp)[^0-9]{0,40}([0-9]+(?:\.[0-9]+)?)\s*%/i,
-          /(?:жизн(?:ь|и)?|здоров(?:ье|ья)?|health|life|hp)[^0-9]{0,40}([0-9]+)\s*\/\s*([0-9]+)/i,
-        ]
-      : [
-          /(?:удал(?:ь|и)?|mana|mp|prowess|bravery|stamina|vigor|energy)[^0-9]{0,40}([0-9]+(?:\.[0-9]+)?)\s*%/i,
-          /(?:удал(?:ь|и)?|mana|mp|prowess|bravery|stamina|vigor|energy)[^0-9]{0,40}([0-9]+)\s*\/\s*([0-9]+)/i,
-        ];
-    for (const pattern of patterns) {
-      const match = value.match(pattern);
-      if (!match) {
-        continue;
-      }
-      if (match[2]) {
-        const current = Number(match[1]);
-        const max = Number(match[2]);
-        if (Number.isFinite(current) && Number.isFinite(max) && max > 0) {
-          return Math.max(0, Math.min(100, (current / max) * 100));
-        }
-      }
-      const percent = Number(match[1]);
-      if (Number.isFinite(percent)) {
-        return Math.max(0, Math.min(100, percent));
-      }
-    }
-    return null;
-  };
-
-  const resourcePercentFromCandidate = (candidate, kind) => {
-    const text = `${candidate.path || ""} ${candidate.name || ""} ${candidate.value == null ? "" : candidate.value}`;
-    const parsed = parseResourcePercent(text, kind);
-    if (parsed != null) {
-      return parsed;
-    }
-    const path = `${candidate.path || ""}.${candidate.name || ""}`;
-    const lowerPath = path.toLowerCase();
-    const number = Number(candidate.value);
-    if (!Number.isFinite(number)) {
-      return null;
-    }
-    const looksPercent = number >= 0 && number <= 100 && /percent|pct|proc|rate|ratio|prc|%/.test(lowerPath);
-    const healthName = /жизн|здоров|health|life|hp/.test(lowerPath);
-    const prowessName = /удал|mana|mp|prowess|bravery|stamina|vigor|energy/.test(lowerPath);
-    if (kind === "health" && healthName && looksPercent) {
-      return number;
-    }
-    if (kind === "prowess" && prowessName && looksPercent) {
-      return number;
-    }
-    return null;
-  };
-
-  const collectResourceCandidatesFromObject = (rootValue, rootPath, output) => {
-    const seen = new Set();
-    const walk = (value, path, depth) => {
-      if (output.length >= 200 || depth < 0 || shouldSkipObject(value) || seen.has(value)) {
-        return;
-      }
-      seen.add(value);
-      for (const name of propertyNames(value).slice(0, 100)) {
-        let current;
-        try {
-          current = value[name];
-        } catch (_) {
-          continue;
-        }
-        const currentPath = `${path}.${name}`;
-        const primitive = previewValue(current);
-        if (primitive !== undefined || current == null) {
-          if (resourceKeyword(`${currentPath} ${primitive == null ? "" : primitive}`)) {
-            output.push({
-              source: "object",
-              path,
-              name: safeString(name, 100),
-              value: primitive,
-            });
-          }
-          continue;
-        }
-        if (current && typeof current === "object" && !shouldSkipObject(current)) {
-          walk(current, currentPath, depth - 1);
-        }
-      }
-    };
-    walk(rootValue, rootPath, 4);
-  };
-
-  const collectResourceDomCandidates = (win, path, output) => {
-    try {
-      const doc = win.document;
-      const text = safeString(doc && doc.body && doc.body.innerText, 2000);
-      if (resourceKeyword(text)) {
-        output.push({ source: "dom_text", path, name: "body.innerText", value: text });
-      }
-      const html = safeString(doc && doc.documentElement && doc.documentElement.innerHTML, 500);
-      if (resourceKeyword(html)) {
-        output.push({ source: "dom_html", path, name: "documentElement.innerHTML", value: html });
-      }
-      const elements = doc ? Array.from(doc.querySelectorAll("*")).slice(0, 1200) : [];
-      for (const el of elements) {
-        const value = safeString(
-          [
-            el.id,
-            el.className,
-            el.getAttribute && el.getAttribute("title"),
-            el.getAttribute && el.getAttribute("alt"),
-            el.getAttribute && el.getAttribute("style"),
-            el.textContent,
-          ].join(" "),
-          500
-        );
-        if (resourceKeyword(value)) {
-          output.push({ source: "dom_element", path, name: safeString(el.tagName, 30), value });
-          if (output.length >= 200) {
-            return;
-          }
-        }
-      }
-    } catch (_) {}
-  };
-
-  const resourceSnapshot = () => {
-    const root = window.top || window;
-    const candidates = [];
-    walkWindows(root, "top", 4, new Set(), (win, path) => {
-      collectResourceDomCandidates(win, path, candidates);
-      collectResourceCandidatesFromObject(win, path, candidates);
-    });
-    let healthPercent = null;
-    let prowessPercent = null;
-    let healthCandidate = null;
-    let prowessCandidate = null;
-    for (const candidate of candidates) {
-      if (healthPercent == null) {
-        const percent = resourcePercentFromCandidate(candidate, "health");
-        if (percent != null) {
-          healthPercent = percent;
-          healthCandidate = candidate;
-        }
-      }
-      if (prowessPercent == null) {
-        const percent = resourcePercentFromCandidate(candidate, "prowess");
-        if (percent != null) {
-          prowessPercent = percent;
-          prowessCandidate = candidate;
-        }
-      }
-      if (healthPercent != null && prowessPercent != null) {
-        break;
-      }
-    }
-    return {
-      bridgeVersion: BRIDGE_VERSION,
-      generatedAt: new Date().toISOString(),
-      ok: healthPercent != null && prowessPercent != null,
-      healthPercent,
-      prowessPercent,
-      healthCandidate,
-      prowessCandidate,
-      candidateCount: candidates.length,
-      candidates: candidates.slice(0, 20),
-    };
-  };
-
-  const compactResourceSnapshot = (snapshot) => ({
-    ok: Boolean(snapshot && snapshot.ok),
-    healthPercent: snapshot && snapshot.healthPercent != null ? snapshot.healthPercent : null,
-    prowessPercent: snapshot && snapshot.prowessPercent != null ? snapshot.prowessPercent : null,
-  });
-
-  const refreshResourceSource = () => {
-    const root = window.top || window;
-    try {
-      const mainFrame = root.frames && root.frames["main_frame"];
-      if (mainFrame && mainFrame.location) {
-        const href = safeString(mainFrame.location.href, 240);
-        root.setTimeout(() => {
-          try {
-            mainFrame.location.reload();
-          } catch (_) {}
-        }, 50);
-        return {
-          ok: true,
-          message: "main_frame_reload_scheduled",
-          href,
-        };
-      }
-    } catch (error) {
-      return { ok: false, message: `main_frame_reload_error:${safeString(error && error.message ? error.message : error, 200)}` };
-    }
-    try {
-      const href = safeString(root.location && root.location.href, 240);
-      root.setTimeout(() => {
-        try {
-          root.location.reload();
-        } catch (_) {}
-      }, 50);
-      return {
-        ok: true,
-        message: "top_reload_scheduled",
-        href,
-      };
-    } catch (error) {
-      return { ok: false, message: `top_reload_error:${safeString(error && error.message ? error.message : error, 200)}` };
-    }
-  };
-
   const normalizeNeedleList = (value) => {
     const raw = Array.isArray(value) ? value : value == null ? [] : [value];
     return raw
@@ -1734,7 +1521,13 @@
         artikulId = candidate.split("_").pop();
       }
     }
-    const count = parseInt(attr(el, "data-cnt") || attr(el, "data-count") || attr(el, "count") || "1", 10);
+    // Quest inventory cells use the legacy `cnt` attribute (rather than a
+    // data-* attribute).  Missing it turns a visible stack of 10 trophies
+    // into one item and keeps the gathering loop running.
+    const count = parseInt(
+      attr(el, "data-cnt") || attr(el, "data-count") || attr(el, "cnt") || attr(el, "count") || "1",
+      10
+    );
     let artAlt = null;
     try {
       const artAltKey = divId || (artikulId ? `AA_${artikulId}` : "");
@@ -2379,11 +2172,15 @@
       // and the Python guard correctly-but-unhelpfully treats the binding as
       // ambiguous.
       const identity = safeString(
-        item.artAltSlot || item.divId || item.cellAid || item.aid || item.id || item.artikulId,
+        item.artAltSlot || `title:${safeString(item.artAltTitle, 220).toLocaleLowerCase("ru-RU")}`,
         120
       );
-      if (!identity || unique.has(identity)) return;
-      unique.set(identity, item);
+      if (!identity) return;
+      const existing = unique.get(identity);
+      // The same visible slot is observed through its cell and child node.
+      // Keep the most informative representation; crucially, never sum
+      // duplicate DOM observations into a false inventory quantity.
+      if (!existing || Number(item.count) > Number(existing.count)) unique.set(identity, item);
     });
     return Array.from(unique.values());
   };
@@ -2921,6 +2718,108 @@
       limits: { windows: MAX_WINDOWS, paths: MAX_PATHS },
       roots,
     };
+  };
+  // source: page_bridge_modules/12_resource_snapshot.js
+  // Read-only resource discovery is kept separate from hunt/inventory actions.
+  const resourceKeyword = (text) =>
+    /жизн|здоров|удал|удаль|health|life|hp|mana|mp|prowess|bravery|stamina|vigor|energy/i.test(text);
+
+  const parseResourcePercent = (text, kind) => {
+    const value = safeString(text, 500).replace(",", ".");
+    const patterns = kind === "health"
+      ? [/(?:жизн(?:ь|и)?|здоров(?:ье|ья)?|health|life|hp)[^0-9]{0,40}([0-9]+(?:\.[0-9]+)?)\s*%/i, /(?:жизн(?:ь|и)?|здоров(?:ье|ья)?|health|life|hp)[^0-9]{0,40}([0-9]+)\s*\/\s*([0-9]+)/i]
+      : [/(?:удал(?:ь|и)?|mana|mp|prowess|bravery|stamina|vigor|energy)[^0-9]{0,40}([0-9]+(?:\.[0-9]+)?)\s*%/i, /(?:удал(?:ь|и)?|mana|mp|prowess|bravery|stamina|vigor|energy)[^0-9]{0,40}([0-9]+)\s*\/\s*([0-9]+)/i];
+    for (const pattern of patterns) {
+      const match = value.match(pattern);
+      if (!match) continue;
+      if (match[2]) {
+        const current = Number(match[1]); const max = Number(match[2]);
+        if (Number.isFinite(current) && Number.isFinite(max) && max > 0) return Math.max(0, Math.min(100, (current / max) * 100));
+      }
+      const percent = Number(match[1]);
+      if (Number.isFinite(percent)) return Math.max(0, Math.min(100, percent));
+    }
+    return null;
+  };
+
+  const resourcePercentFromCandidate = (candidate, kind) => {
+    const text = `${candidate.path || ""} ${candidate.name || ""} ${candidate.value == null ? "" : candidate.value}`;
+    const parsed = parseResourcePercent(text, kind);
+    if (parsed != null) return parsed;
+    const lowerPath = `${candidate.path || ""}.${candidate.name || ""}`.toLowerCase();
+    const number = Number(candidate.value);
+    if (!Number.isFinite(number)) return null;
+    const looksPercent = number >= 0 && number <= 100 && /percent|pct|proc|rate|ratio|prc|%/.test(lowerPath);
+    const healthName = /жизн|здоров|health|life|hp/.test(lowerPath);
+    const prowessName = /удал|mana|mp|prowess|bravery|stamina|vigor|energy/.test(lowerPath);
+    return kind === "health" && healthName && looksPercent ? number : kind === "prowess" && prowessName && looksPercent ? number : null;
+  };
+
+  const collectResourceCandidatesFromObject = (rootValue, rootPath, output) => {
+    const seen = new Set();
+    const walk = (value, path, depth) => {
+      if (output.length >= 200 || depth < 0 || shouldSkipObject(value) || seen.has(value)) return;
+      seen.add(value);
+      for (const name of propertyNames(value).slice(0, 100)) {
+        let current; try { current = value[name]; } catch (_) { continue; }
+        const currentPath = `${path}.${name}`;
+        const primitive = previewValue(current);
+        if (primitive !== undefined || current == null) {
+          if (resourceKeyword(`${currentPath} ${primitive == null ? "" : primitive}`)) output.push({ source: "object", path, name: safeString(name, 100), value: primitive });
+        } else if (current && typeof current === "object" && !shouldSkipObject(current)) walk(current, currentPath, depth - 1);
+      }
+    };
+    walk(rootValue, rootPath, 4);
+  };
+
+  const collectResourceDomCandidates = (win, path, output) => {
+    try {
+      const doc = win.document;
+      const text = safeString(doc && doc.body && doc.body.innerText, 2000);
+      if (resourceKeyword(text)) output.push({ source: "dom_text", path, name: "body.innerText", value: text });
+      const html = safeString(doc && doc.documentElement && doc.documentElement.innerHTML, 500);
+      if (resourceKeyword(html)) output.push({ source: "dom_html", path, name: "documentElement.innerHTML", value: html });
+      const elements = doc ? Array.from(doc.querySelectorAll("*")).slice(0, 1200) : [];
+      for (const el of elements) {
+        const value = safeString([el.id, el.className, el.getAttribute && el.getAttribute("title"), el.getAttribute && el.getAttribute("alt"), el.getAttribute && el.getAttribute("style"), el.textContent].join(" "), 500);
+        if (resourceKeyword(value)) {
+          output.push({ source: "dom_element", path, name: safeString(el.tagName, 30), value });
+          if (output.length >= 200) return;
+        }
+      }
+    } catch (_) {}
+  };
+
+  const resourceSnapshot = () => {
+    const root = window.top || window;
+    const candidates = [];
+    walkWindows(root, "top", 4, new Set(), (win, path) => { collectResourceDomCandidates(win, path, candidates); collectResourceCandidatesFromObject(win, path, candidates); });
+    let healthPercent = null; let prowessPercent = null; let healthCandidate = null; let prowessCandidate = null;
+    for (const candidate of candidates) {
+      if (healthPercent == null) { const percent = resourcePercentFromCandidate(candidate, "health"); if (percent != null) { healthPercent = percent; healthCandidate = candidate; } }
+      if (prowessPercent == null) { const percent = resourcePercentFromCandidate(candidate, "prowess"); if (percent != null) { prowessPercent = percent; prowessCandidate = candidate; } }
+      if (healthPercent != null && prowessPercent != null) break;
+    }
+    return { bridgeVersion: BRIDGE_VERSION, generatedAt: new Date().toISOString(), ok: healthPercent != null && prowessPercent != null, healthPercent, prowessPercent, healthCandidate, prowessCandidate, candidateCount: candidates.length, candidates: candidates.slice(0, 20) };
+  };
+
+  const compactResourceSnapshot = (snapshot) => ({ ok: Boolean(snapshot && snapshot.ok), healthPercent: snapshot && snapshot.healthPercent != null ? snapshot.healthPercent : null, prowessPercent: snapshot && snapshot.prowessPercent != null ? snapshot.prowessPercent : null });
+
+  const refreshResourceSource = () => {
+    const root = window.top || window;
+    try {
+      const mainFrame = root.frames && root.frames["main_frame"];
+      if (mainFrame && mainFrame.location) {
+        const href = safeString(mainFrame.location.href, 240);
+        root.setTimeout(() => { try { mainFrame.location.reload(); } catch (_) {} }, 50);
+        return { ok: true, message: "main_frame_reload_scheduled", href };
+      }
+    } catch (error) { return { ok: false, message: `main_frame_reload_error:${safeString(error && error.message ? error.message : error, 200)}` }; }
+    try {
+      const href = safeString(root.location && root.location.href, 240);
+      root.setTimeout(() => { try { root.location.reload(); } catch (_) {} }, 50);
+      return { ok: true, message: "top_reload_scheduled", href };
+    } catch (error) { return { ok: false, message: `top_reload_error:${safeString(error && error.message ? error.message : error, 200)}` }; }
   };
   // source: page_bridge_modules/20_hunt_actions.js
   // Created once per injected document.  It is stable across snapshots and
@@ -5651,6 +5550,179 @@
       after,
     };
   };
+  // source: page_bridge_modules/31_area_objects.js
+  // Bounded discovery and exact interaction for the illustrated objects on an
+  // area page.  These objects are usually empty image/onclick elements, so a
+  // text-only DOM collector cannot see them.
+  let areaObjectSnapshotSequence = 0;
+  const areaObjectSnapshots = new Map();
+
+  const areaObjectDocumentRevision = (context) => {
+    const doc = context && context.doc;
+    const root = doc && doc.documentElement;
+    const marker = safeString(
+      [
+        context && context.href,
+        root && root.childElementCount,
+        doc && doc.body && doc.body.childElementCount,
+        doc && doc.body && (doc.body.innerText || doc.body.textContent || "").length,
+      ].join("|"),
+      300,
+    );
+    return `area-${marker}`;
+  };
+
+  const areaObjectRect = (element) => {
+    try {
+      const rect = element && element.getBoundingClientRect ? element.getBoundingClientRect() : null;
+      if (!rect) return null;
+      const width = Math.round(Number(rect.width) || 0);
+      const height = Math.round(Number(rect.height) || 0);
+      const x = Math.round(Number(rect.left) || 0);
+      const y = Math.round(Number(rect.top) || 0);
+      if (width < 8 || height < 8 || width > 900 || height > 700) return null;
+      return { x, y, width, height };
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const areaObjectDescriptor = (context, element, index) => {
+    if (!element || !elementIsVisible(context.win, element)) return null;
+    const rect = areaObjectRect(element);
+    if (!rect) return null;
+    const tag = safeString(element.tagName, 24).toLowerCase();
+    const onclick = safeString(attr(element, "onclick"), 600);
+    const href = safeString(attr(element, "href"), 500);
+    const style = safeString(attr(element, "style"), 600);
+    const title = safeString(
+      [attr(element, "title"), attr(element, "alt"), elementText(element)].join(" "),
+      220,
+    );
+    const image = tag === "img" ? element : element.querySelector && element.querySelector("img");
+    const imageSrc = safeString(image && attr(image, "src"), 300);
+    const marker = `${onclick} ${href} ${style} ${title} ${imageSrc}`.toLowerCase();
+    // Navigator and ordinary area links may also be image based.  They are
+    // never part of a bounded object-search pass.
+    if (!onclick && !href) return null;
+    if (/navigator\.php|showmsg\s*\(\s*['\"]navigator|area\.php|location_id=|compass/i.test(marker)) {
+      return null;
+    }
+    if (/проложить\s+путь|куда\s+хотите\s+перейти|время\s+до\s+перехода/i.test(marker)) {
+      return null;
+    }
+    const fingerprint = safeString(
+      `${tag}|${attr(element, "id") || ""}|${attr(element, "class") || ""}|${onclick}|${href}|${imageSrc}|${rect.x},${rect.y},${rect.width},${rect.height}`,
+      1400,
+    );
+    return {
+      candidateId: `area-object-${index}`,
+      fingerprint,
+      tag,
+      id: safeString(attr(element, "id"), 120) || null,
+      className: safeString(attr(element, "class"), 180) || null,
+      title: title || null,
+      onclick: onclick || null,
+      href: href || null,
+      imageSrc: imageSrc || null,
+      rect,
+      requiresConfirmation: /confirm\s*\(|\bconfirm\b/i.test(marker),
+    };
+  };
+
+  const areaObjectSnapshot = () => {
+    const context = mainContentContext();
+    const generatedAt = new Date().toISOString();
+    areaObjectSnapshotSequence = (areaObjectSnapshotSequence + 1) % 1000000;
+    if (context.pageKind !== "area" || !context.doc) {
+      return { ok: false, message: "area_object_page_missing", generatedAt, href: context.href };
+    }
+    const candidates = [];
+    const seen = new Set();
+    const elements = Array.from(
+      context.doc.querySelectorAll("[onclick],a[href],area[href],img[onclick],input[onclick]")
+    ).slice(0, 1000);
+    for (const element of elements) {
+      const descriptor = areaObjectDescriptor(context, element, candidates.length);
+      if (!descriptor || seen.has(descriptor.fingerprint)) continue;
+      seen.add(descriptor.fingerprint);
+      candidates.push({ descriptor, element });
+      if (candidates.length >= 24) break;
+    }
+    const revision = areaObjectDocumentRevision(context);
+    const snapshotId = `area-objects-${Date.now().toString(36)}-${areaObjectSnapshotSequence.toString(36)}`;
+    areaObjectSnapshots.set(snapshotId, {
+      href: context.href,
+      documentRevision: revision,
+      candidates,
+      expiresAt: Date.now() + 15000,
+    });
+    if (areaObjectSnapshots.size > 12) {
+      for (const [key, value] of areaObjectSnapshots) {
+        if (key !== snapshotId && (!value || value.expiresAt <= Date.now())) areaObjectSnapshots.delete(key);
+      }
+    }
+    return {
+      ok: true,
+      message: "area_objects_observed",
+      snapshotId,
+      generatedAt,
+      href: context.href,
+      documentRevision: revision,
+      candidates: candidates.map((item) => item.descriptor),
+      truncated: elements.length >= 1000,
+    };
+  };
+
+  const inspectAreaObject = async (payload = {}) => {
+    const expectedSnapshotId = safeString(payload.expectedSnapshotId, 160);
+    const candidateId = safeString(payload.candidateId, 80);
+    const expectedFingerprint = safeString(payload.expectedFingerprint, 1400);
+    const cached = areaObjectSnapshots.get(expectedSnapshotId);
+    if (!expectedSnapshotId || !candidateId || !expectedFingerprint || !cached) {
+      return { ok: false, message: "area_object_snapshot_missing" };
+    }
+    const context = mainContentContext();
+    if (context.pageKind !== "area" || !context.doc || cached.expiresAt <= Date.now()) {
+      return { ok: false, message: "area_object_snapshot_stale" };
+    }
+    if (cached.href !== context.href || cached.documentRevision !== areaObjectDocumentRevision(context)) {
+      return { ok: false, message: "area_object_snapshot_context_changed" };
+    }
+    const candidate = cached.candidates.find((item) =>
+      item.descriptor.candidateId === candidateId && item.descriptor.fingerprint === expectedFingerprint
+    );
+    if (!candidate || !candidate.element || !candidate.element.isConnected) {
+      return { ok: false, message: "area_object_candidate_missing" };
+    }
+    if (candidate.descriptor.requiresConfirmation) {
+      return { ok: false, message: "area_object_confirmation_required", candidate: candidate.descriptor };
+    }
+    const rect = candidate.descriptor.rect;
+    const center = { x: rect.x + Math.max(1, Math.floor(rect.width / 2)), y: rect.y + Math.max(1, Math.floor(rect.height / 2)) };
+    try {
+      for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+        candidate.element.dispatchEvent(new MouseEvent(type, {
+          bubbles: true, cancelable: true, view: context.win,
+          clientX: center.x, clientY: center.y, screenX: center.x, screenY: center.y,
+        }));
+      }
+    } catch (error) {
+      return { ok: false, message: `area_object_click_error:${safeString(error && error.message ? error.message : error, 180)}` };
+    }
+    return new Promise((resolve) => setTimeout(() => {
+      const after = mainContentContext();
+      const text = safeString(after.doc && after.doc.body && (after.doc.body.innerText || after.doc.body.textContent), 1800);
+      resolve({
+        ok: true,
+        message: "area_object_click_dispatched",
+        candidate: candidate.descriptor,
+        href: after.href,
+        pageKind: after.pageKind,
+        visibleText: text || null,
+      });
+    }, 180));
+  };
   // source: page_bridge_modules/32_instance_actions.js
   const instancePrimitiveFields = (value) => {
     const result = {};
@@ -5804,6 +5876,11 @@
     let token = safeString(value, 80).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
     if (token.length < 4) return token;
     token = token.replace(/(?:иями|ями|ами|ого|его|ому|ему|иях|ах|ях|ам|ям|ов|ев|ой|ый|ий|ая|яя|ую|юю|ом|ем|ым|им|а|я|у|ю|ы|и|е|о)$/u, "");
+    // "посол" -> "послу" is an irregular-looking declension for the
+    // generic role token: removing the usual dative ending leaves `посл`,
+    // while nominative `посол` keeps its epenthetic о.  Canonicalize this
+    // role only; IDs and the full ordered NPC signature still bind identity.
+    if (token === "посол") token = "посл";
     return token.length >= 3 ? token.replace(/[ьй]$/u, "") : normalizeNpcName(value);
   };
 
@@ -6073,7 +6150,11 @@
         const questId = params ? positiveIntegerString(params.quest_id) : null;
         const npcAction = params ? safeString(params.action, 24).toLowerCase() : "";
         const ref = params ? positiveIntegerString(params.ref) : null;
-        if (!questId || npcAction !== "answer" || !ref || !candidate.text) return null;
+        // Some NPC dialogue links encode an answer solely by quest_id + ref;
+        // they do not include `action=answer`.  Treat that form as an answer
+        // only when the positive ref is present, so a bare quest "Далее"
+        // link remains an open action.
+        if (!questId || !(npcAction === "answer" || (!npcAction && ref)) || !ref || !candidate.text) return null;
         return {
           questId,
           action: "answer",
@@ -6229,7 +6310,8 @@
       const text = safeString(npcActionText(element), 180);
       if (action === "answer") {
         return (
-          safeString(query.params.action, 24).toLowerCase() === "answer" &&
+          (safeString(query.params.action, 24).toLowerCase() === "answer" ||
+            (!safeString(query.params.action, 24) && positiveIntegerString(query.params.ref))) &&
           positiveIntegerString(query.params.ref) === expectedRef &&
           normalizeNpcName(text) === normalizeNpcName(expectedText)
         );
@@ -7493,6 +7575,17 @@
       if (data.command.type === "location_route_debug_snapshot") {
         const result = locationRouteDebugSnapshot();
         send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "area_object_snapshot") {
+        const result = areaObjectSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "inspect_area_object") {
+        inspectAreaObject(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `inspect_area_object_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "location_route_step") {

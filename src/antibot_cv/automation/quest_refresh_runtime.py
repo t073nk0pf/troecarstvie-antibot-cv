@@ -732,6 +732,11 @@ class QuestRefreshRuntimeMixin:
             "dialogue_snapshot_invalid",
             "dialogue_action_missing",
             "dialogue_action_not_advanced",
+            # The confirmed NPC click may be observed one controller pass
+            # before the game's quest controls render.  Use the same bounded
+            # causal settle window as turn-in instead of stopping on that
+            # transient empty dialogue page.
+            "dialogue_open_missing_or_ambiguous",
             # Immediately after an NPC mutation the old and new dialogue
             # controls can briefly coexist in the DOM.  Re-observe that
             # frame inside the existing bounded settle window; a persistent

@@ -10,6 +10,11 @@
     let token = safeString(value, 80).toLocaleLowerCase("ru-RU").replace(/ё/g, "е");
     if (token.length < 4) return token;
     token = token.replace(/(?:иями|ями|ами|ого|его|ому|ему|иях|ах|ях|ам|ям|ов|ев|ой|ый|ий|ая|яя|ую|юю|ом|ем|ым|им|а|я|у|ю|ы|и|е|о)$/u, "");
+    // "посол" -> "послу" is an irregular-looking declension for the
+    // generic role token: removing the usual dative ending leaves `посл`,
+    // while nominative `посол` keeps its epenthetic о.  Canonicalize this
+    // role only; IDs and the full ordered NPC signature still bind identity.
+    if (token === "посол") token = "посл";
     return token.length >= 3 ? token.replace(/[ьй]$/u, "") : normalizeNpcName(value);
   };
 
@@ -279,7 +284,11 @@
         const questId = params ? positiveIntegerString(params.quest_id) : null;
         const npcAction = params ? safeString(params.action, 24).toLowerCase() : "";
         const ref = params ? positiveIntegerString(params.ref) : null;
-        if (!questId || npcAction !== "answer" || !ref || !candidate.text) return null;
+        // Some NPC dialogue links encode an answer solely by quest_id + ref;
+        // they do not include `action=answer`.  Treat that form as an answer
+        // only when the positive ref is present, so a bare quest "Далее"
+        // link remains an open action.
+        if (!questId || !(npcAction === "answer" || (!npcAction && ref)) || !ref || !candidate.text) return null;
         return {
           questId,
           action: "answer",
@@ -435,7 +444,8 @@
       const text = safeString(npcActionText(element), 180);
       if (action === "answer") {
         return (
-          safeString(query.params.action, 24).toLowerCase() === "answer" &&
+          (safeString(query.params.action, 24).toLowerCase() === "answer" ||
+            (!safeString(query.params.action, 24) && positiveIntegerString(query.params.ref))) &&
           positiveIntegerString(query.params.ref) === expectedRef &&
           normalizeNpcName(text) === normalizeNpcName(expectedText)
         );
