@@ -1340,6 +1340,7 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
     valid = {
         "expected_snapshot_id": "npc-dialog-mrj-1",
         "npc_id": "13",
+        "expected_name": "Марилио",
         "quest_id": "246",
         "expected_title": "Хворь скакунов",
         "action": "open",
@@ -1364,6 +1365,7 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
             {
                 "expectedSnapshotId": "npc-dialog-mrj-1",
                 "npcId": "13",
+                "expectedName": "Марилио",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
                     "action": "open",
@@ -1379,6 +1381,7 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
             {
                 "expectedSnapshotId": "npc-dialog-mrj-1",
                 "npcId": "13",
+                "expectedName": "Марилио",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
                     "action": "answer",
@@ -1394,6 +1397,7 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
             {
                 "expectedSnapshotId": "npc-dialog-mrj-1",
                 "npcId": "13",
+                "expectedName": "Марилио",
                 "questId": "246",
                 "expectedTitle": "Хворь скакунов",
                     "action": "accept",

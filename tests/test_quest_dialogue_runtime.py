@@ -104,6 +104,20 @@ def test_parse_dialogue_objective_with_location_before_inflected_npc() -> None:
     assert parsed.location == "Прокалённое плато"
 
 
+def test_parse_talk_to_npc_objective_with_s_preposition() -> None:
+    parsed = parse_dialogue_objective(
+        entry(
+            objective="Поговорите с Франком в Доме Франка.",
+            navigation=(
+                MappingProxyType({"text": "Дом Франка", "target": "Дом Франка"}),
+            ),
+        )
+    )
+
+    assert parsed.npc_query == "Франком"
+    assert parsed.location == "Дом Франка"
+
+
 @pytest.mark.parametrize(
     "bad_entry",
     [

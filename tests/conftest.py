@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+
 import cv2
 import numpy as np
 import pytest
@@ -7,8 +9,38 @@ import pytest
 from src.antibot_cv.automation.config import AutomationConfig
 
 
+def pytest_collection_modifyitems(items) -> None:
+    """Give the established suite stable execution lanes without moving tests."""
+
+    for item in items:
+        path = item.path.name
+        lower = path.casefold()
+        if "browser_injector" in lower or "control_server" in lower:
+            item.add_marker(pytest.mark.transport)
+        elif "page_bridge" in lower or lower.endswith("_js.py"):
+            item.add_marker(pytest.mark.integration)
+            item.add_marker(pytest.mark.slow)
+        elif any(term in lower for term in ("quest", "controller", "navigator", "recovery", "resource")):
+            item.add_marker(pytest.mark.domain)
+        else:
+            item.add_marker(pytest.mark.unit)
+
+
+@pytest.fixture(autouse=True)
+def bounded_test_subprocess(monkeypatch):
+    """Prevent a broken helper process from hanging a test lane forever."""
+
+    original_run = subprocess.run
+
+    def run_with_timeout(*args, **kwargs):
+        kwargs.setdefault("timeout", 30)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_with_timeout)
+
+
 @pytest.fixture
-def test_config() -> AutomationConfig:
+def test_config(tmp_path) -> AutomationConfig:
     return AutomationConfig.from_dict(
         {
             "dry_run": True,
@@ -38,6 +70,7 @@ def test_config() -> AutomationConfig:
             "viewport": {"max_moves_per_search": 3, "settle_ms": 0},
             "safety": {"max_actions_per_minute": 30, "max_viewport_moves_per_search": 3, "max_consecutive_errors": 3},
             "templates_path": "tests/fixtures/no-templates.json",
+            "runs_dir": str(tmp_path / "runs"),
         }
     )
 

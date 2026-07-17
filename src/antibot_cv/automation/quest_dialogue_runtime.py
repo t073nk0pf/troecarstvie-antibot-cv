@@ -117,24 +117,25 @@ def parse_dialogue_objective(entry: ActiveQuestEntry) -> QuestDialogueObjective:
         )
 
     # The active page uses two evidenced, unambiguous Russian word orders:
-    # ``к NPC в Location`` and ``в/на Location к NPC и <next instruction>``.
+    # ``к/с NPC в Location`` and ``в/на Location к NPC и <next instruction>``.
     # Both bind the NPC phrase directly to the sole navigable location.  This
     # deliberately rejects building targets and free-form prose.
+    location_pattern = _inflected_location_pattern(label)
     npc_match = re.search(
-        rf"(?:^|\s)к\s+(.+?)\s+в\s+{re.escape(label)}(?=\s|[.,!?;:]|$)",
+        rf"(?:^|\s)(?:к|с)\s+(.+?)\s+в\s+{location_pattern}(?=\s|[.,!?;:]|$)",
         raw_objective,
         flags=re.IGNORECASE,
     )
     if npc_match is None:
         npc_match = re.search(
-            rf"(?:^|\s)(?:в|на)\s+{re.escape(label)}\s+к\s+(.+?)(?=\s+и\s+|[.,!?;:]|$)",
+            rf"(?:^|\s)(?:в|на)\s+{location_pattern}\s+к\s+(.+?)(?=\s+и\s+|[.,!?;:]|$)",
             raw_objective,
             flags=re.IGNORECASE,
         )
     if npc_match is None:
         npc_match = re.search(
             rf"^\s*(?:отправляйтесь|отправиться)\s+(?:к\s+)?(.+?)\s+"
-            rf"(?:в|на)\s+{re.escape(label)}(?=\s|[.,!?;:]|$)",
+            rf"(?:в|на)\s+{location_pattern}(?=\s|[.,!?;:]|$)",
             raw_objective,
             flags=re.IGNORECASE,
         )
@@ -154,6 +155,33 @@ def parse_dialogue_objective(entry: ActiveQuestEntry) -> QuestDialogueObjective:
         location=label,
         fingerprint=fingerprint,
     )
+
+
+def _inflected_location_pattern(label: str) -> str:
+    """Match the exact location words in common Russian case forms.
+
+    The navigation label remains the authoritative route target.  This only
+    binds the prose objective to that one target, so accepting its regular
+    grammatical endings does not widen the destination choice.
+    """
+
+    words = label.split()
+    if not words:
+        return re.escape(label)
+    return r"\s+".join(_inflected_location_word_pattern(word) for word in words)
+
+
+def _inflected_location_word_pattern(word: str) -> str:
+    if not re.fullmatch(r"[А-Яа-яЁё-]+", word):
+        return re.escape(word)
+    match = re.fullmatch(r"(.{3,}?)([аяоеыиьй])", word, flags=re.IGNORECASE)
+    if match is not None:
+        stem, ending = match.groups()
+        endings = (ending, "а", "я", "у", "ю", "е", "и", "ы", "ой", "ою", "ом", "ем", "ах", "ях")
+        return re.escape(stem) + "(?:" + "|".join(re.escape(value) for value in endings) + ")"
+    if len(word) >= 3:
+        return re.escape(word) + r"(?:а|я|у|ю|е|ом|ем|ах|ях)?"
+    return re.escape(word)
 
 
 class QuestDialogueRuntime:

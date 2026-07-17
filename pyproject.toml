@@ -7,4 +7,11 @@ description = "Local bounded CV automation harness for controlled anti-bot resea
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-q"
+addopts = "-q -m 'not slow and not transport'"
+markers = [
+  "unit: isolated unit test",
+  "domain: domain-runtime or policy test",
+  "integration: cross-module integration test",
+  "transport: test that starts or exercises a transport boundary",
+  "slow: comparatively expensive test; excluded from the fast command",
+]

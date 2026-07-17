@@ -103,6 +103,41 @@ def test_control_api_state_snapshot_uses_existing_injector_client() -> None:
     ]
 
 
+def test_control_api_battle_debug_uses_action_service_boundary() -> None:
+    class FakeInjector:
+        def client_snapshot(self, client_id):
+            return {"client_id": client_id, "client_seen": True, "version_ok": True}
+
+    class FakeLiveActions:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def execute(self, client_id, request):
+            self.requests.append((client_id, request))
+            return True
+
+        def battle_debug_result(self, client_id):
+            assert client_id == "client-a"
+            return {"hasFight": True}
+
+    api = AutomationControlApi(FakeInjector())  # type: ignore[arg-type]
+    actions = FakeLiveActions()
+    api.live_actions = actions  # type: ignore[assignment]
+
+    status, payload = api.battle_debug("client-a")
+
+    assert status == 200
+    assert payload == {
+        "ok": True,
+        "client_id": "client-a",
+        "debug": {"hasFight": True},
+        "message": "battle_debug",
+    }
+    assert len(actions.requests) == 1
+    assert actions.requests[0][0] == "client-a"
+    assert actions.requests[0][1].action_type == "battle_debug"
+
+
 def test_control_api_treats_new_document_client_as_same_running_tab() -> None:
     injector = BrowserInjectorServer(port=0)
     with injector._lock:  # noqa: SLF001 - focused logical-tab regression test.

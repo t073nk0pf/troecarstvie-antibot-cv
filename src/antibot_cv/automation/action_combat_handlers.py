@@ -2,7 +2,7 @@
 
 from src.antibot_cv.automation import action_live_sink as live
 
-ACTION_TYPES = frozenset({"attack_visible_target", "click_ability_4", "click_combat_slot", "use_battle_item", "revive_free", "close_resurrection_notice", "click_exit", "click_hunt", "open_hunt"})
+ACTION_TYPES = frozenset({"attack_visible_target", "battle_debug", "click_ability_4", "click_combat_slot", "use_battle_item", "revive_free", "close_resurrection_notice", "click_exit", "click_hunt", "open_hunt"})
 
 json = live.json
 time = live.time
@@ -26,6 +26,23 @@ def global_browser_injector():
 
 
 def handle_action(self, request):
+    if request.action_type == "battle_debug":
+        self.last_battle_debug = None
+        result = self._execute_injector(
+            global_browser_injector(), "battle_debug", {}, timeout_s=5.0
+        )
+        parsed = _parse_injector_dict(result.message)
+        if result.ok and isinstance(parsed, dict):
+            self.last_battle_debug = parsed
+        _log_action(
+            self.logger,
+            "battle_debug_observed",
+            request,
+            battle_debug_ok=bool(result.ok and isinstance(parsed, dict)),
+            injector_client_id=result.client_id,
+            injector_message=_compact_injector_message(result.message),
+        )
+        return bool(result.ok and isinstance(parsed, dict))
     if request.action_type == 'attack_visible_target':
         injector = global_browser_injector()
         metadata = dict(request.metadata or {})

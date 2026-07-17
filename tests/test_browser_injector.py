@@ -146,9 +146,18 @@ vm.runInNewContext(source, {
   assert.strictEqual(pageCommands[0].payload.metadata.clientId, "client-tab-a");
   assert.deepStrictEqual(Object.keys(pageCommands[1].payload), ["transport"]);
   assert.strictEqual(pageCommands[1].payload.transport.clientId, "client-tab-b");
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+})().then(
+  () => process.exit(0),
+  (error) => { console.error(error); process.exit(1); },
+);
 '''
-    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=False)
+    completed = subprocess.run(
+        ["node", "-e", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 

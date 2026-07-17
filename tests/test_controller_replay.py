@@ -3883,7 +3883,7 @@ def test_same_combat_quest_step_after_victory_returns_to_hunt(
     controller._handle_pending_quest_turn_in = lambda: False
     controller._handle_pending_quest_dialogue = lambda: False
     controller._handle_pending_quest_acceptance = lambda: False
-    controller._handle_pending_quest_chat_refresh = lambda: False
+    controller._handle_pending_quest_chat_refresh = lambda **_: False
     controller._maybe_begin_quest_turn_in = lambda: False
     reasons: list[str] = []
     controller._finish_quest_refresh_to_hunt = lambda reason: reasons.append(reason) or True
@@ -4527,8 +4527,8 @@ def test_autonomous_director_preserves_catalogue_order_before_later_monster(
             "id": "1",
             "title": "Разговор",
             "status": "active",
-            "objective": "Поговорите с Франком",
-            "navigation": [{"text": "Франк", "target": "Дом Франка"}],
+            "objective": "Поговорите с Франком в Доме Франка",
+            "navigation": [{"text": "Дом Франка", "target": "Дом Франка"}],
             "progress": None,
         },
         {

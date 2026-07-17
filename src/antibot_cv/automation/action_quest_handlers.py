@@ -104,7 +104,7 @@ def handle_action(self, request):
         expected_ref = str(metadata.get('expected_ref') or '').strip()
         expected_point_id = str(metadata.get('expected_point_id') or '').strip()
         expected_text = str(metadata.get('expected_text') or '').strip()
-        valid = expected_snapshot_id.startswith('npc-dialog-') and 0 < len(expected_snapshot_id) <= 120 and npc_id.isdecimal() and (int(npc_id) >= 0) and len(expected_npc_name) <= 180 and quest_id.isdecimal() and (int(quest_id) > 0) and (action == 'done' or 0 < len(expected_title) <= 220) and (action in {'open', 'answer', 'accept', 'done'}) and (action == 'open' or (0 < len(expected_text) <= 1200 and (action == 'accept' or (action == 'done' and expected_point_id.isdecimal() and (int(expected_point_id) > 0)) or (expected_ref.isdecimal() and int(expected_ref) > 0))))
+        valid = expected_snapshot_id.startswith('npc-dialog-') and 0 < len(expected_snapshot_id) <= 120 and npc_id.isdecimal() and (int(npc_id) >= 0) and 0 < len(expected_npc_name) <= 180 and quest_id.isdecimal() and (int(quest_id) > 0) and (action == 'done' or 0 < len(expected_title) <= 220) and (action in {'open', 'answer', 'accept', 'done'}) and (action == 'open' or (0 < len(expected_text) <= 1200 and (action == 'accept' or (action == 'done' and expected_point_id.isdecimal() and (int(expected_point_id) > 0)) or (expected_ref.isdecimal() and int(expected_ref) > 0))))
         if not valid:
             _log_action(self.logger, 'action_blocked', request, block_reason='npc_quest_action_invalid')
             return False

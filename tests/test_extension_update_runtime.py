@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from src.antibot_cv.automation.browser_injector import CURRENT_BRIDGE_VERSION
+
 
 def test_extension_update_runtime_is_wired_without_new_permissions() -> None:
     manifest = json.loads(Path("browser_injector/manifest.json").read_text(encoding="utf-8"))
@@ -20,8 +22,8 @@ def test_extension_update_runtime_is_wired_without_new_permissions() -> None:
     assert "ready: extensionUpdateLifecycle.startup" in background
     assert "const extensionUpdateMonitor" in background
     assert "void extensionUpdateMonitor.checkNow()" not in background
-    assert 'const bridgeVersion = "2026-07-17-fight-owner-first-v68"' in Path("browser_injector/content.js").read_text(encoding="utf-8")
-    assert 'const BRIDGE_VERSION = "2026-07-17-fight-owner-first-v67"' in background
+    assert f'const bridgeVersion = "{CURRENT_BRIDGE_VERSION}"' in Path("browser_injector/content.js").read_text(encoding="utf-8")
+    assert f'const BRIDGE_VERSION = "{CURRENT_BRIDGE_VERSION}"' in background
     assert 'const status = await api("/status")' in popup
     assert "currentClient?.version" in popup
     assert "unknown-pre-updater" in popup

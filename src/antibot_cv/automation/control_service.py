@@ -130,16 +130,20 @@ class AutomationControlService:
         resolved_client_id, error = self._resolve_client_id(client_id)
         if error is not None:
             return 409, error
-        result = self.injector.execute("battle_debug", timeout_s=5.0, client_id=resolved_client_id)
-        try:
-            debug = json.loads(result.message)
-        except json.JSONDecodeError:
-            debug = None
+        request = ActionRequest(
+            "battle_debug",
+            cycle_id=0,
+            battle_id=None,
+            dry_run=False,
+            metadata={"reason": "control_api_battle_debug"},
+        )
+        dispatched = self.live_actions.execute(resolved_client_id, request)
+        debug = self.live_actions.battle_debug_result(resolved_client_id)
         payload = {
-            "ok": bool(result.ok and isinstance(debug, dict)),
-            "client_id": result.client_id or resolved_client_id,
-            "debug": debug if isinstance(debug, dict) else None,
-            "message": "battle_debug" if isinstance(debug, dict) else result.message,
+            "ok": bool(dispatched and isinstance(debug, dict)),
+            "client_id": resolved_client_id,
+            "debug": debug,
+            "message": "battle_debug" if isinstance(debug, dict) else "battle_debug_unavailable",
         }
         return (200 if payload["ok"] else 502), payload
 

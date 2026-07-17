@@ -82,6 +82,14 @@ class LiveActionService:
                 "consecutive_errors": context.guard.consecutive_errors,
             }
 
+    def battle_debug_result(self, client_id: str) -> dict[str, object] | None:
+        """Return the last sink-owned battle diagnostic for this client."""
+
+        with self._lock:
+            sink = self._context_locked(_client_id(client_id)).sink
+            value = getattr(sink, "last_battle_debug", None)
+            return dict(value) if isinstance(value, dict) else None
+
     def _context_locked(self, client_id: str) -> LiveClientActionContext:
         identity = None if self._identity_factory is None else self._identity_factory(client_id)
         context_key: Hashable = ("logical", identity) if identity is not None else ("transport", client_id)
