@@ -190,6 +190,9 @@ class QuestRuntimeMixin(
         self._quest_inventory_checked_fingerprint: str | None = None
         self._quest_inventory_checked_cycle: int | None = None
         self._quest_inventory_terminal_completion_evidence = None
+        from src.antibot_cv.automation.quest_area_object_runtime import QuestAreaObjectRuntime
+
+        self._quest_area_objects = QuestAreaObjectRuntime()
 
     def _validate_route_coordinator_binding(
         self,

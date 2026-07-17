@@ -56,6 +56,11 @@ from src.antibot_cv.automation.gathering_activity_runtime import (
     GatheringPlanStatus,
     parse_gathering_plan,
 )
+from src.antibot_cv.automation.area_object_activity import (
+    AreaObjectPlanStatus,
+    parse_area_object_plan,
+)
+from src.antibot_cv.automation.quest_area_object_runtime import AreaObjectPhase
 from src.antibot_cv.automation.quest_policy import (
     Quest as PolicyQuest,
     QuestDecision as PolicyQuestDecision,
@@ -84,6 +89,8 @@ class QuestRefreshRuntimeMixin:
         config = self.config.leveling
         if not config.enabled or self.state_machine.state is GameState.RESTING:
             return False
+        if getattr(self, "_quest_area_objects", None) is not None and self._quest_area_objects.pending is not None:
+            return self._continue_quest_area_object_executor()
         if self._quest_director is not None:
             pending_active_navigation = self._quest_director.chain.pending_active_catalog_navigation
             if pending_active_navigation is not None:
@@ -142,11 +149,21 @@ class QuestRefreshRuntimeMixin:
                 return False
             if decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE:
                 if self.current_page_kind == "quests":
-                    if (
-                        self._quest_director.active_objective is None
-                        and decision.quest is not None
-                    ):
-                        return self._begin_non_combat_quest_executor(decision.quest.id)
+                    if decision.quest is not None:
+                        # Composite cards can retain a combat objective even
+                        # after its trophy has already been collected.  The
+                        # authoritative quest card, not that stale combat
+                        # projection, decides whether illustrated area
+                        # resources are the next executable step.
+                        active_entry = next(
+                            (item for item in self._quest_director.active_catalog.result if item.id == decision.quest.id),
+                            None,
+                        )
+                        if self._quest_director.active_objective is None or (
+                            active_entry is not None
+                            and parse_area_object_plan(active_entry).status is AreaObjectPlanStatus.READY
+                        ):
+                            return self._begin_non_combat_quest_executor(decision.quest.id)
                     if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
                         self._quest_refresh_requested_monotonic = time.monotonic()
                         self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="quest_active_execution_ready")
@@ -561,6 +578,9 @@ class QuestRefreshRuntimeMixin:
         )
         if entry is None:
             return self._stop_leveling_unsafe("quest_executor_entry_missing")
+        area_plan = parse_area_object_plan(entry)
+        if area_plan.status is AreaObjectPlanStatus.READY:
+            return self._begin_quest_area_object_executor(area_plan)
         route_plan = director.active_route_plan
         if route_plan is None or route_plan.quest_id != quest_id:
             route_plan = classify_objective(entry)
@@ -623,6 +643,114 @@ class QuestRefreshRuntimeMixin:
         if plan.status is GatheringPlanStatus.READY:
             return self._defer_active_quest(quest_id, "gathering_node_discovery_required")
         return self._defer_active_quest(quest_id, f"gathering_plan:{plan.reason}")
+
+    def _quest_area_inventory_items(self) -> list[dict[str, object]] | None:
+        sink = self.action_executor.sink
+        snapshot = getattr(sink, "last_quest_inventory_snapshot", None)
+        if not isinstance(snapshot, dict) or snapshot.get("ok") is not True:
+            return None
+        if snapshot.get("category") != "quest" or snapshot.get("categoryConfirmed") is not True:
+            return None
+        items = snapshot.get("items")
+        return list(items) if isinstance(items, list) else None
+
+    def _inspect_quest_area_inventory(self, plan) -> list[dict[str, object]] | None:
+        request = ActionRequest(
+            "inspect_quest_inventory",
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run,
+            metadata={
+                "quest_id": plan.quest_id,
+                "quest_title": plan.quest_title,
+                "names": [item.resource_name for item in plan.requirements],
+                "inventory_open_delay_ms": self.config.item_recovery.inventory_open_delay_ms,
+                "quest_category_load_delay_ms": 1500,
+                "reason": "quest_area_object_inventory_guard",
+            },
+        )
+        if not self.action_executor.execute(request):
+            return None
+        return self._quest_area_inventory_items()
+
+    def _begin_quest_area_object_executor(self, plan) -> bool:
+        items = self._inspect_quest_area_inventory(plan)
+        if items is None:
+            return self._stop_leveling_unsafe("quest_area_object_inventory_unconfirmed")
+        pending = self._quest_area_objects.begin(plan, items)
+        if pending is None:
+            return self._request_active_quest_snapshot("quest_area_objects_already_collected")
+        self.logger.log_event(
+            "quest_area_object_started", state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id, quest_id=plan.quest_id,
+            quest_title=plan.quest_title, resource=pending.requirement.resource_name,
+            required=pending.requirement.required, location=pending.requirement.location,
+        )
+        if _same_location_name(self.current_location_name, pending.requirement.location):
+            return self._on_quest_area_object_route_arrived("quest_area_object_already_local")
+        return self._start_location_route(
+            pending.requirement.location,
+            kind="quest_area_object",
+            reason="quest_area_object_route",
+        )
+
+    def _on_quest_area_object_route_arrived(self, reason: str) -> bool:
+        try:
+            self._quest_area_objects.mark_route_arrived(self.current_location_name)
+        except RuntimeError as exc:
+            return self._stop_leveling_unsafe(str(exc))
+        request = ActionRequest(
+            "open_area", cycle_id=self.session.cycle_id, battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run, metadata={"reason": reason},
+        )
+        if not self.action_executor.execute(request):
+            return self._stop_leveling_unsafe("quest_area_object_area_open_failed")
+        self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
+        return True
+
+    def _continue_quest_area_object_executor(self) -> bool:
+        pending = self._quest_area_objects.pending
+        if pending is None:
+            return False
+        if pending.phase is AreaObjectPhase.ROUTE:
+            return True
+        if self.current_page_kind != "area":
+            return True
+        request = ActionRequest(
+            "area_object_snapshot", cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id, dry_run=self.config.dry_run,
+            metadata={"reason": "quest_area_object_discovery"},
+        )
+        if not self.action_executor.execute(request):
+            return self._stop_leveling_unsafe("quest_area_object_snapshot_failed")
+        snapshot = getattr(self.action_executor.sink, "last_area_object_result", None)
+        try:
+            self._quest_area_objects.accept_snapshot(snapshot)
+            payload = self._quest_area_objects.next_click_payload(snapshot.get("snapshotId"))
+        except (AttributeError, RuntimeError) as exc:
+            return self._stop_leveling_unsafe(str(exc))
+        request = ActionRequest(
+            "inspect_area_object", cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id, dry_run=self.config.dry_run, metadata=payload,
+        )
+        if not self.action_executor.execute(request):
+            return self._stop_leveling_unsafe("quest_area_object_click_failed")
+        items = self._inspect_quest_area_inventory(pending.plan)
+        if items is None:
+            return self._stop_leveling_unsafe("quest_area_object_inventory_unconfirmed")
+        try:
+            progress = self._quest_area_objects.reconcile_inventory(items)
+        except RuntimeError as exc:
+            return self._stop_leveling_unsafe(str(exc))
+        if progress.complete:
+            return self._request_active_quest_snapshot("quest_area_objects_collected")
+        next_pending = self._quest_area_objects.pending
+        if next_pending is not None and next_pending.phase is AreaObjectPhase.ROUTE:
+            return self._start_location_route(next_pending.requirement.location, kind="quest_area_object", reason="quest_area_object_next_route")
+        request = ActionRequest("open_area", cycle_id=self.session.cycle_id, battle_id=self.session.battle_id, dry_run=self.config.dry_run, metadata={"reason": "quest_area_object_next_candidate"})
+        if not self.action_executor.execute(request):
+            return self._stop_leveling_unsafe("quest_area_object_reopen_failed")
+        return True
 
     def _defer_active_quest(self, quest_id: str, detail: str) -> bool:
         """Persist a non-terminal executor wait without performing an action."""

@@ -2,7 +2,7 @@
 
 from src.antibot_cv.automation import action_live_sink as live
 
-ACTION_TYPES = frozenset({"inspect_quest_inventory", "use_recovery_items"})
+ACTION_TYPES = frozenset({"inspect_quest_inventory", "area_object_snapshot", "inspect_area_object", "use_recovery_items"})
 
 json = live.json
 time = live.time
@@ -26,6 +26,24 @@ def global_browser_injector():
 
 
 def handle_action(self, request):
+    if request.action_type in {"area_object_snapshot", "inspect_area_object"}:
+        self.last_area_object_result = None
+        command = request.action_type
+        result = self._execute_injector(
+            global_browser_injector(), command, dict(request.metadata or {}), timeout_s=5.0
+        )
+        parsed = _parse_injector_dict(result.message)
+        if result.ok and isinstance(parsed, dict):
+            self.last_area_object_result = parsed
+        _log_action(
+            self.logger,
+            command,
+            request,
+            area_object_ok=bool(result.ok and isinstance(parsed, dict)),
+            area_object_message=_compact_injector_message(result.message),
+            area_object_client_id=result.client_id,
+        )
+        return bool(result.ok and isinstance(parsed, dict))
     if request.action_type == "inspect_quest_inventory":
         metadata = dict(request.metadata or {})
         self.last_quest_inventory_snapshot = None

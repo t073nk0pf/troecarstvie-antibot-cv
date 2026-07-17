@@ -44,6 +44,7 @@ NAVIGATOR_AREA_HANDOFF_KINDS = {
     "quest_location",
     "quest_ordered_handoff",
     "quest_turn_in",
+    "quest_area_object",
 }
 
 
@@ -824,6 +825,8 @@ class NavigationRuntimeMixin:
             return self._on_quest_turn_in_route_arrived(reason)
         if recovery_kind == "quest_ordered_handoff":
             return self._on_ordered_handoff_route_arrived(reason)
+        if recovery_kind == "quest_area_object":
+            return self._on_quest_area_object_route_arrived(reason)
         if recovery_kind == "post_revive_location":
             self._log_recovery_phase(
                 "checkpoint_arrived",

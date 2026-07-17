@@ -197,8 +197,18 @@ def _lexeme_equal(left: str, right: str) -> bool:
     if left == right:
         return True
     # Russian declensions such as "бивней"/"бивень" and
-    # "корней"/"корень" differ by an epenthetic е after the stem.
-    return left.replace("ен", "н") == right.replace("ен", "н")
+    # "когтей"/"коготь" can drop one epenthetic vowel.  Compare a small,
+    # explicit set of stem variants; never fall back to a substring match.
+    return not _stem_variants(left).isdisjoint(_stem_variants(right))
+
+
+def _stem_variants(value: str) -> set[str]:
+    variants = {value}
+    if "ен" in value:
+        variants.add(value.replace("ен", "н"))
+    if value.endswith("от") and len(value) >= 4:
+        variants.add(value[:-2] + "т")
+    return variants
 
 
 def _lexemes(value: str) -> tuple[str, ...]:
@@ -235,7 +245,22 @@ def _description_binds_step(
 
 
 def _stem_word(value: str) -> str:
-    for ending in ("иями", "ями", "ами", "ого", "его", "ому", "ему", "ах", "ях", "ов", "ев", "ей", "ой", "ый", "ий", "ая", "яя", "ую", "юю", "ом", "ем", "а", "я", "у", "ю", "ы", "и", "е", "о", "ь", "й"):
-        if value.endswith(ending) and len(value) - len(ending) >= 3:
-            return value[: -len(ending)]
-    return value
+    """Return a conservative common stem for Russian trophy names.
+
+    Quest cards and inventory often use different forms of the same short
+    noun (``уха`` / ``Ухо рыси``).  Keeping at least two letters is enough for
+    those nouns while the caller still requires a *unique* full item match,
+    so an inflection never authorizes a choice between several trophies.
+    """
+
+    normalized = value.casefold().replace("ё", "е")
+    endings = (
+        "иями", "ями", "ами", "иями", "его", "ого", "ему", "ому", "ией", "ией",
+        "иях", "ах", "ях", "ов", "ев", "ей", "ия", "ие", "ию", "иям", "ием",
+        "ой", "ей", "ый", "ий", "ая", "яя", "ую", "юю", "ом", "ем", "ам", "ям",
+        "ы", "и", "а", "я", "у", "ю", "е", "о", "ь", "й",
+    )
+    for ending in endings:
+        if normalized.endswith(ending) and len(normalized) - len(ending) >= 2:
+            return normalized[: -len(ending)].rstrip("ьй")
+    return normalized.rstrip("ьй")

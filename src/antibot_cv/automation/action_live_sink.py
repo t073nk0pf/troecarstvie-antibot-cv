@@ -79,6 +79,7 @@ class LiveMacActionSink:
         self.last_npc_open_outcome: NpcOpenOutcome | None = None
         self.last_npc_quest_action_outcome: NpcQuestActionOutcome | None = None
         self.last_quest_inventory_snapshot: dict[str, object] | None = None
+        self.last_area_object_result: dict[str, object] | None = None
 
     def _execute_injector(
         self,
