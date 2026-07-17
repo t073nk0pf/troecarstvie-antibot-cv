@@ -38,6 +38,48 @@ class DelegatingDryRunSink(DryRunActionSink):
         return self.target.execute(request)
 
 
+def test_live_quest_inventory_inspection_does_not_reopen_hunt_before_validation(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            **kwargs: object,
+        ) -> InjectorResult:
+            calls.append(command)
+            if command != "inventory_snapshot":
+                raise AssertionError(command)
+            return InjectorResult(
+                True,
+                json.dumps(
+                    {
+                        "ok": True,
+                        "category": "quest",
+                        "categoryConfirmed": False,
+                        "truncated": False,
+                        "items": [],
+                    }
+                ),
+                "client",
+            )
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    logger = InMemoryEventLogger(dry_run=False)
+    sink = LiveMacActionSink(logger)
+
+    assert sink.execute(ActionRequest("inspect_quest_inventory", dry_run=False))
+    assert calls == ["inventory_snapshot"]
+    assert logger.events[-1]["event_type"] == "quest_inventory_inspected"
+    assert "open_hunt_ok" not in logger.events[-1]
+
+
 def test_dry_run_no_live_click(test_config: AutomationConfig) -> None:
     session = SessionState(requested_cycles=3)
     guard = SafetyGuard(test_config)

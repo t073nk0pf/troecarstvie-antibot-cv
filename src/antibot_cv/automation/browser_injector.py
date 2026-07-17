@@ -197,16 +197,19 @@ class BrowserInjectorServer:
 
             def _send_json(self, payload: dict[str, Any], *, status: int = 200) -> None:
                 body = json.dumps(payload).encode("utf-8")
-                self.send_response(status)
-                self.send_header("content-type", "application/json")
-                origin = self.headers.get("origin")
-                self.send_header("access-control-allow-origin", origin if origin and self._origin_allowed() else "*")
-                self.send_header("access-control-allow-methods", "GET,POST,OPTIONS")
-                self.send_header("access-control-allow-headers", "content-type")
-                self.send_header("access-control-allow-private-network", "true")
-                self.send_header("content-length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.send_response(status)
+                    self.send_header("content-type", "application/json")
+                    origin = self.headers.get("origin")
+                    self.send_header("access-control-allow-origin", origin if origin and self._origin_allowed() else "*")
+                    self.send_header("access-control-allow-methods", "GET,POST,OPTIONS")
+                    self.send_header("access-control-allow-headers", "content-type")
+                    self.send_header("access-control-allow-private-network", "true")
+                    self.send_header("content-length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    return
 
             def _origin_allowed(self, *, allow_pair: bool = False) -> bool:
                 origin = str(self.headers.get("origin") or "").strip().lower()

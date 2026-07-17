@@ -4233,6 +4233,60 @@ def test_autonomous_quest_director_wait_does_not_become_navigation_failure(
     assert sink.requests == []
 
 
+def test_quest_refresh_recovers_from_orphan_npc_page_without_timeout(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_director_policy import (
+        QuestDirectorDecision,
+        QuestDirectorIntent,
+    )
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+    }
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    controller.current_page_kind = "npc"
+    controller._quest_refresh_requested_monotonic = time.monotonic() - 60
+    controller._quest_policy_intent = QuestIntent.START_FARM
+    controller._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="test")
+    assert controller._quest_dialogue.pending is None
+    director = controller._quest_director
+    assert director is not None
+    director.begin_catalog_refresh()
+    director.ingest_catalog_page(
+        {
+            "loadStatus": "loaded",
+            "mode": "avail",
+            "currentPage": 0,
+            "pageCount": 1,
+            "hasNextPage": False,
+            "items": [],
+            "truncated": False,
+        }
+    )
+    monkeypatch.setattr(
+        controller,
+        "_quest_director_decision",
+        lambda: QuestDirectorDecision(QuestDirectorIntent.WAIT, "navigation_in_progress"),
+    )
+
+    controller._handle_quest_refresh()
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert controller.last_error_reason is None
+    assert [request.action_type for request in sink.requests] == ["open_quests"]
+    assert sink.requests[0].metadata["reason"] == "quest_refresh_recover_from_npc_page"
+
+
 def test_loaded_quest_snapshot_is_bound_to_tab_and_atomically_selects_route(
     test_config: AutomationConfig,
     monkeypatch,
@@ -5178,6 +5232,179 @@ def _bind_exact_quest_location_route(
     controller._quest_route_locations = (target,)
 
 
+def test_quest_policy_does_not_admit_other_supported_objectives_as_combat_targets(
+    test_config: AutomationConfig,
+) -> None:
+    from src.antibot_cv.automation.quest_director_runtime import QuestDirectorRuntime
+    from src.antibot_cv.automation.quest_objective_runtime import (
+        MonsterTarget,
+        ObjectiveKind,
+        QuestObjective,
+    )
+    from src.antibot_cv.automation.quest_policy import QuestDecision, QuestProgress
+
+    controller = AutomationController(
+        test_config, sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    director = QuestDirectorRuntime(chain_state_path=None)
+
+    def objective(quest_id: str, name: str, level: int, order: int) -> QuestObjective:
+        return QuestObjective(
+            kind=ObjectiveKind.MONSTER_HUNT,
+            quest_id=quest_id,
+            quest_title=f"Квест {quest_id}",
+            objective=f"Добудьте ресурс с {name}.",
+            fingerprint=f"fingerprint-{quest_id}",
+            monster=MonsterTarget(f"{name} [{level}]", name, level),
+            navigator_label="Кряж обречённости",
+            progress=None,
+            required=None,
+            complete=False,
+            source_order=order,
+        )
+
+    active = objective("280", "Свирепый кентавр", 5, 0)
+    stale_other = objective("281", "Кабан-секач", 5, 1)
+    director.active_objective = active
+    director.supported_objectives = (active, stale_other)
+    controller._quest_director = director
+
+    controller._apply_quest_policy_decision(
+        QuestDecision(
+            QuestIntent.NAVIGATE,
+            "quest_location_differs",
+            quest_id=active.quest_id,
+            quest_title=active.quest_title,
+            target_mobs=(active.monster.name,),
+            locations=(active.navigator_label,),
+            progress=QuestProgress(),
+            snapshot_id="snapshot-1",
+        )
+    )
+
+    assert controller._quest_target_names == ("Свирепый кентавр",)
+    assert controller._quest_target_levels == (5,)
+    assert controller._quest_target_specs == (("Свирепый кентавр", 5),)
+
+
+def test_quest_inventory_guard_checks_initially_then_after_each_completed_battle(
+    test_config: AutomationConfig,
+) -> None:
+    from types import SimpleNamespace
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_objective_runtime import (
+        MonsterTarget,
+        ObjectiveKind,
+        QuestObjective,
+    )
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    controller = AutomationController(
+        AutomationConfig.from_dict(data),
+        sink_mode="replay",
+        logger=InMemoryEventLogger(dry_run=False),
+    )
+    controller.session.requested_cycles = 10
+    active = QuestObjective(
+        ObjectiveKind.MONSTER_HUNT,
+        "280",
+        "Фамильная ступка",
+        "Убивая кентавров, добудьте Пояс Кентавра-ветерана и возвращайтесь к Аскорду.",
+        "fingerprint-280",
+        MonsterTarget("Свирепый кентавр [5]", "Свирепый кентавр", 5),
+        "Свирепых кентавров",
+        None,
+        None,
+        False,
+        0,
+    )
+    controller._quest_director = SimpleNamespace(
+        active_objective=active,
+        active_snapshot_fresh=True,
+        active_catalog=SimpleNamespace(complete=True),
+    )
+
+    class InventorySink:
+        def __init__(self) -> None:
+            self.requests = []
+            self.last_quest_inventory_snapshot = None
+
+        def execute(self, request) -> bool:
+            self.requests.append(request)
+            self.last_quest_inventory_snapshot = {
+                "ok": True,
+                "category": "quest",
+                "categoryConfirmed": True,
+                "truncated": False,
+                "sample": [],
+            }
+            return True
+
+    sink = InventorySink()
+    controller.action_executor.sink = sink
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert len(sink.requests) == 1
+    assert controller._quest_inventory_allows_attack() is True
+    controller.session.completed_cycles = 1
+    assert controller._quest_inventory_allows_attack() is False
+    assert len(sink.requests) == 2
+
+
+def test_quest_inventory_guard_blocks_attack_and_starts_refresh_when_item_exists(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_objective_runtime import (
+        MonsterTarget,
+        ObjectiveKind,
+        QuestObjective,
+    )
+
+    data = to_plain_dict(test_config)
+    data["dry_run"] = False
+    controller = AutomationController(
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger(dry_run=False)
+    )
+    controller.session.requested_cycles = 10
+    active = QuestObjective(
+        ObjectiveKind.MONSTER_HUNT, "280", "Фамильная ступка",
+        "Добудьте Пояс Кентавра-ветерана и возвращайтесь к Аскорду.",
+        "fingerprint-280", MonsterTarget("Свирепый кентавр [5]", "Свирепый кентавр", 5),
+        "Свирепых кентавров", None, None, False, 0,
+    )
+    controller._quest_director = SimpleNamespace(
+        active_objective=active, active_snapshot_fresh=True,
+        active_catalog=SimpleNamespace(complete=True),
+    )
+    controller._quest_target_names = (active.monster.name,)
+    controller._quest_target_levels = (5,)
+    controller._quest_target_specs = ((active.monster.name, 5),)
+
+    class InventorySink:
+        last_quest_inventory_snapshot = None
+
+        def execute(self, request) -> bool:
+            self.last_quest_inventory_snapshot = {
+                "ok": True, "category": "quest", "categoryConfirmed": True,
+                "truncated": False,
+                "sample": [{"artAltTitle": "Пояс Кентавра-ветерана", "count": 1}],
+            }
+            return True
+
+    controller.action_executor.sink = InventorySink()
+    refreshed = []
+    monkeypatch.setattr(controller, "_maybe_start_quest_refresh", lambda: refreshed.append(True) or True)
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_target_names == ()
+    assert controller._quest_inventory_terminal_completion_evidence.quest_id == "280"
+    assert refreshed == [True]
+
+
 def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(
     test_config: AutomationConfig,
 ) -> None:
@@ -5673,6 +5900,62 @@ def test_catalog_navigation_not_issued_rolls_back_and_stops(test_config) -> None
     assert controller.state_machine.state is GameState.STOPPED
     assert controller._quest_director.chain.pending_catalog_navigation is None
     assert len(sink.requests) == 1
+
+
+def test_active_catalog_navigation_expiry_clears_stage_and_stops(test_config) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_active_catalog_navigation import (
+        make_pending_active_catalog_navigation,
+    )
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {**data["leveling"], "enabled": True, "autonomous_quest_director": True}
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger())
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    director = controller._quest_director
+    assert director is not None
+    issued_at = time.time() - 2.0
+    pending = make_pending_active_catalog_navigation(
+        client_id="client-a",
+        profile_id="profile-a",
+        tab_id=42,
+        page=0,
+        current_href="https://3kingdoms.ru/main.php",
+        baseline_snapshot_id="before",
+        baseline_generated_at=issued_at - 0.1,
+        issued_at=issued_at,
+        settle_timeout_s=1.0,
+    )
+    director.chain.stage_active_catalog_navigation(pending)
+
+    assert controller._maybe_start_quest_refresh() is True
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "active_catalog_navigation_settle_expired"
+    assert director.chain.pending_active_catalog_navigation is None
+    assert sink.requests == []
+
+
+def test_active_catalog_not_issued_attempt_budget_stops_without_reissue(test_config) -> None:
+    from src.antibot_cv.automation.config import to_plain_dict
+
+    data = to_plain_dict(test_config)
+    data["leveling"] = {**data["leveling"], "enabled": True, "autonomous_quest_director": True}
+    controller = AutomationController(AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger())
+    sink = DryRunActionSink(controller.logger)
+    controller.action_executor.sink = sink
+    director = controller._quest_director
+    assert director is not None
+    director.begin_active_refresh()
+    controller._quest_active_snapshot_requested = True
+    controller._quest_active_navigation_attempts = 2
+
+    assert controller._request_active_quest_snapshot("test_not_issued_budget") is True
+
+    assert controller.state_machine.state is GameState.STOPPED
+    assert controller.last_error_reason == "active_catalog_navigation_not_issued_exhausted"
+    assert sink.requests == []
 
 
 def test_q360_ordered_handoff_controller_stages_once_then_restart_and_arrival_are_read_only(

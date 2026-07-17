@@ -2,7 +2,7 @@
 
 from src.antibot_cv.automation import action_live_sink as live
 
-ACTION_TYPES = frozenset({"use_recovery_items"})
+ACTION_TYPES = frozenset({"inspect_quest_inventory", "use_recovery_items"})
 
 json = live.json
 time = live.time
@@ -26,6 +26,59 @@ def global_browser_injector():
 
 
 def handle_action(self, request):
+    if request.action_type == "inspect_quest_inventory":
+        metadata = dict(request.metadata or {})
+        self.last_quest_inventory_snapshot = None
+        injector = global_browser_injector()
+        result = self._execute_injector(
+            injector,
+            "inventory_snapshot",
+            {
+                "open": True,
+                "category": "quest",
+                "categoryWaitMs": 3500,
+                "questCategoryLoadDelayMs": max(
+                    0, int(metadata.get("quest_category_load_delay_ms", 1500) or 1500)
+                ),
+                "names": metadata.get("names", []),
+                "inventoryOpenDelayMs": max(
+                    0, int(metadata.get("inventory_open_delay_ms", 1500) or 1500)
+                ),
+            },
+            timeout_s=max(10.0, float(metadata.get("timeout_s", 10.0) or 10.0)),
+        )
+        parsed = _parse_injector_dict(result.message)
+        if result.ok and parsed is not None:
+            self.last_quest_inventory_snapshot = parsed
+        inventory_observation = {}
+        if isinstance(parsed, dict):
+            raw_items = parsed.get("items")
+            if isinstance(raw_items, list):
+                inventory_observation = {
+                    "inventory_category": parsed.get("category"),
+                    "inventory_category_confirmed": parsed.get("categoryConfirmed"),
+                    "inventory_item_count": parsed.get("itemCount"),
+                    "inventory_items": [
+                        {
+                            "name": item.get("artAltTitle") or item.get("name"),
+                            "count": item.get("count"),
+                            "kind": item.get("artAltKind"),
+                            "path": item.get("path"),
+                        }
+                        for item in raw_items[:40]
+                        if isinstance(item, dict)
+                    ],
+                }
+        _log_action(
+            self.logger,
+            "quest_inventory_inspected",
+            request,
+            inventory_client_id=result.client_id,
+            inventory_ok=result.ok,
+            inventory_message=_compact_injector_message(result.message),
+            **inventory_observation,
+        )
+        return bool(result.ok and parsed is not None)
     if request.action_type == 'use_recovery_items':
         metadata = dict(request.metadata or {})
         timeout_s = float(metadata.get('timeout_s', 6.0) or 6.0)

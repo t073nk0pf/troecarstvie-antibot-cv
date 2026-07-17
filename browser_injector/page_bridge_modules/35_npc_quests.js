@@ -224,7 +224,10 @@
     ).slice(0, 150);
     for (let index = 0; index < elements.length; index += 1) {
       const element = elements[index];
-      const text = safeString(npcActionText(element), 180);
+      // Dialogue replies can be long prose.  Python binds answers with a
+      // 1200-character limit, so truncating here can remove the decisive
+      // continuation at the end and turn a safe sole reply into a refusal.
+      const text = safeString(npcActionText(element), 1200);
       const query = npcQuerySummary(npcActionHref(element, context.href), context.href);
       if (!text && !query) continue;
       const container = element.closest

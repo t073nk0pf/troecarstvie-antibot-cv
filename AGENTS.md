@@ -29,3 +29,18 @@ Architecture limits:
   -> policy/helper. Domain modules must not import the controller or CLI.
 - Add focused tests for a module's public behavior and keep the full regression
   suite passing after moves or boundary changes.
+
+Context and verification efficiency:
+- Start from `git status`, the current diff, and the smallest relevant source and
+  test files. Do not recursively load `runs/`, `.venv/`, caches, generated
+  `browser_injector/page_bridge.js`, or the full historical development log
+  unless the task explicitly requires them.
+- Treat `docs/DEVELOPMENT_LOG.md` as historical evidence, not startup context.
+  Read targeted sections found with `rg`; prefer `docs/CURRENT_STATE.md` and the
+  relevant architecture or plan section for current work.
+- During implementation, run the exact affected test file or test node first.
+  Run the relevant domain suite after a coherent change. Run the full regression
+  suite only before handoff, after cross-domain/boundary changes, or when the
+  focused suite is green. Do not repeatedly rerun an unchanged full suite.
+- Reuse completed code exploration and critic findings when the working tree has
+  not changed in that area. Re-audit only the changed paths and their consumers.

@@ -481,6 +481,11 @@ def test_quarantine_survives_restart_and_fingerprint_change_unblocks(tmp_path) -
         probe,
         capability_version="objective_router_v3",
     ) is False
+    assert [item.quest_id for item in restored.chain.quarantines] == ["71"]
+    restored.chain.expire_changed_quarantines(
+        (probe,),
+        capability_version="objective_router_v3",
+    )
     assert restored.chain.quarantines == ()
 
 

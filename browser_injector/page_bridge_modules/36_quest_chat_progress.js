@@ -7,13 +7,17 @@
 
   const questChatResource = (value) => {
     const raw = safeString(value, 500);
-    const marker = raw.search(/Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+/iu);
+    const marker = raw.search(/(?:Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество|Получено\s*:)/iu);
     if (marker < 0) return null;
     const prefix = raw.slice(Math.max(0, marker - 12), marker);
     const visibleTime = prefix.match(/(\d{1,2}:\d{2})\s*$/);
-    const match = raw.slice(marker).match(
+    const collectionMatch = raw.slice(marker).match(
       /^(Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+(.+?)\s*[.!])(?=\s|$)/iu
     );
+    const receiptMatch = raw.slice(marker).match(
+      /^(Получено\s*:\s*(.+?)\s+[1-9]\d*\s*шт\.?)(?=\s|$)/iu
+    );
+    const match = collectionMatch || receiptMatch;
     if (!match) return null;
     const text = safeString(match[1], 500);
     const resource = safeString(match[2], 220).replace(/[.!]+$/, "").trim();
@@ -24,7 +28,7 @@
 
   const questChatResources = (value) => {
     const raw = String(value || "");
-    const marker = /Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+/giu;
+    const marker = /(?:Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество|Получено\s*:)/giu;
     const parsed = [];
     let match;
     while ((match = marker.exec(raw)) !== null && parsed.length < 40) {

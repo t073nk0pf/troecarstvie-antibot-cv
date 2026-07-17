@@ -144,6 +144,13 @@ assert.strictEqual(joinedSystemRows.observations.length, 1);
 assert.strictEqual(joinedSystemRows.observations[0].text, "Вы набрали необходимое количество Гурум-корней!");
 assert.strictEqual(joinedSystemRows.observations[0].resource, "Гурум-корней");
 assert.strictEqual(joinedSystemRows.observations[0].isNew, true);
+
+chatBody.innerText = "18:59 Получено: Пояс Кентавра-ветерана 1 шт.";
+const itemReceipt = snapshot();
+assert.strictEqual(itemReceipt.observations.length, 1);
+assert.strictEqual(itemReceipt.observations[0].text, "Получено: Пояс Кентавра-ветерана 1 шт.");
+assert.strictEqual(itemReceipt.observations[0].resource, "Пояс Кентавра-ветерана");
+assert.strictEqual(itemReceipt.observations[0].isNew, true);
 '''
     subprocess.run(["node", "-e", script], check=True, cwd=".")
 

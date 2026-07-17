@@ -262,28 +262,6 @@ class QuestDialogueRuntime:
             "quest_id": pending.objective.quest_id,
             "expected_title": pending.objective.quest_title,
         }
-        if not pending.quest_opened:
-            opens = _actions(
-                snapshot.get("questActions"),
-                quest_id=pending.objective.quest_id,
-                action="open",
-            )
-            if len(opens) != 1:
-                raise QuestDialogueError("dialogue_open_missing_or_ambiguous", "quest open action is missing or ambiguous")
-            observed_title = _bounded_text(opens[0].get("title"), max_length=220)
-            if not observed_title:
-                raise QuestDialogueError("dialogue_open_invalid", "quest open title is missing")
-            return self._remember(
-                QuestDialogueDecision(
-                    QuestDialogueIntent.OPEN_QUEST,
-                    "npc_quest_action",
-                    _metadata(**{**common, "expected_title": observed_title}, action="open"),
-                    "quest_dialogue_open_failed",
-                    pending.objective.quest_id,
-                    snapshot_id,
-                )
-            )
-
         answers = _actions(
             snapshot.get("dialogActions"),
             quest_id=pending.objective.quest_id,
@@ -296,10 +274,51 @@ class QuestDialogueRuntime:
             npc_id=pending.npc_id,
             action="done",
         )
+        effective_pending = pending
+        inferred_already_open = False
+        if not pending.quest_opened:
+            opens = _actions(
+                snapshot.get("questActions"),
+                quest_id=pending.objective.quest_id,
+                action="open",
+            )
+            if len(opens) == 1:
+                if answers or completions:
+                    raise QuestDialogueError(
+                        "dialogue_action_ambiguous",
+                        "dialogue exposes open and progression actions together",
+                    )
+                observed_title = _bounded_text(opens[0].get("title"), max_length=220)
+                if not observed_title:
+                    raise QuestDialogueError("dialogue_open_invalid", "quest open title is missing")
+                return self._remember(
+                    QuestDialogueDecision(
+                        QuestDialogueIntent.OPEN_QUEST,
+                        "npc_quest_action",
+                        _metadata(**{**common, "expected_title": observed_title}, action="open"),
+                        "quest_dialogue_open_failed",
+                        pending.objective.quest_id,
+                        snapshot_id,
+                    )
+                )
+            if len(opens) > 1:
+                raise QuestDialogueError(
+                    "dialogue_open_missing_or_ambiguous",
+                    "quest open action is missing or ambiguous",
+                )
+            if not answers and not completions:
+                raise QuestDialogueError(
+                    "dialogue_open_missing_or_ambiguous",
+                    "quest open action is missing or ambiguous",
+                )
+            inferred_already_open = True
+            effective_pending = replace(pending, quest_opened=True)
+        if answers and completions:
+            raise QuestDialogueError("dialogue_action_ambiguous", "dialogue exposes ambiguous progression actions")
         choice_fingerprint = _dialog_choice_fingerprint(answers) if answers else None
         attempted_refs = (
-            pending.attempted_answer_refs
-            if choice_fingerprint == pending.dialog_choice_fingerprint
+            effective_pending.attempted_answer_refs
+            if choice_fingerprint == effective_pending.dialog_choice_fingerprint
             else ()
         )
         selected_answer = select_exploratory_dialogue_action(
@@ -307,10 +326,10 @@ class QuestDialogueRuntime:
             attempted_refs=attempted_refs,
         ) if answers else None
         puzzle_answer = select_verified_puzzle_action(
-            pending.objective.quest_id,
+            effective_pending.objective.quest_id,
             answers,
             href=str(snapshot.get("href") or ""),
-            completed_drums=pending.puzzle_completed_drums,
+            completed_drums=effective_pending.puzzle_completed_drums,
         ) if answers else None
         if puzzle_answer is not None:
             selected_answer = puzzle_answer
@@ -335,9 +354,9 @@ class QuestDialogueRuntime:
                 "dialogue_choices_exhausted",
                 "dialogue has no remaining safe untried progression action",
             )
-        if len(completions) > 1 or (answers and completions):
+        if len(completions) > 1:
             raise QuestDialogueError("dialogue_action_ambiguous", "dialogue exposes ambiguous progression actions")
-        if pending.dialog_steps >= max_steps:
+        if effective_pending.dialog_steps >= max_steps:
             raise QuestDialogueError("dialogue_step_limit_exceeded", "quest dialogue step limit exceeded")
         if selected_answer is not None:
             expected_ref = _bounded_text(selected_answer.get("ref"), max_length=80)
@@ -358,10 +377,11 @@ class QuestDialogueRuntime:
                         action="answer",
                         expected_ref=expected_ref,
                         expected_text=expected_text,
-                        verified_puzzle_step=(pending.puzzle_step if puzzle_answer is not None else None),
+                        verified_puzzle_step=(effective_pending.puzzle_step if puzzle_answer is not None else None),
                         puzzle_completed_drum=(puzzle_answer.get("puzzle_completed_drum") if puzzle_answer is not None else None),
                         puzzle_implicit_completed_drums=(puzzle_answer.get("puzzle_implicit_completed_drums") if puzzle_answer is not None else None),
                         dialog_choice_fingerprint=choice_fingerprint,
+                        inferred_already_open=inferred_already_open,
                     ),
                     "quest_dialogue_answer_failed",
                     pending.objective.quest_id,
@@ -377,7 +397,13 @@ class QuestDialogueRuntime:
                 QuestDialogueDecision(
                     QuestDialogueIntent.COMPLETE_STEP,
                     "npc_quest_action",
-                    _metadata(**common, action="done", expected_point_id=point_id, expected_text=expected_text),
+                    _metadata(
+                        **common,
+                        action="done",
+                        expected_point_id=point_id,
+                        expected_text=expected_text,
+                        inferred_already_open=inferred_already_open,
+                    ),
                     "quest_dialogue_completion_failed",
                     pending.objective.quest_id,
                     snapshot_id,
@@ -421,6 +447,7 @@ class QuestDialogueRuntime:
                 attempted_refs = (*attempted_refs, expected_ref)
             updated = replace(
                 pending,
+                quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened,
                 dialog_steps=pending.dialog_steps + 1,
                 puzzle_step=puzzle_step,
                 puzzle_completed_drums=completed_drums,
@@ -431,6 +458,7 @@ class QuestDialogueRuntime:
         elif decision.intent is QuestDialogueIntent.COMPLETE_STEP:
             updated = replace(
                 pending,
+                quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened,
                 phase=QuestDialoguePhase.VERIFY_ACTIVE,
                 dialog_steps=pending.dialog_steps + 1,
             )

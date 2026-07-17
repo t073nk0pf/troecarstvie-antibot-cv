@@ -766,6 +766,13 @@
           mainFrame.processMenu("b11");
           return "processMenu_b11";
         }
+        const controls = mainFrame.document && typeof mainFrame.document.querySelectorAll === "function"
+          ? Array.from(mainFrame.document.querySelectorAll("li[data-label='рюкзак'][data-command='b11']")).slice(0, 2)
+          : [];
+        if (controls.length === 1 && typeof controls[0].click === "function") {
+          controls[0].click();
+          return "top_menu_backpack_b11";
+        }
         if (mainFrame.frames && mainFrame.frames["main"]) {
           mainFrame.frames["main"].location.href = "user.php?mode=personage&submode=backpack";
           return "main_frame_main_backpack";
@@ -774,12 +781,7 @@
     } catch (error) {
       return `backpack_frame_error:${safeString(error && error.message ? error.message : error, 200)}`;
     }
-    try {
-      root.location.href = "https://3kingdoms.ru/main.php";
-      return "main_fallback";
-    } catch (error) {
-      return `backpack_fallback_error:${safeString(error && error.message ? error.message : error, 200)}`;
-    }
+    return "backpack_control_missing";
   };
 
   const layoutTargets = (root) => {
@@ -962,6 +964,19 @@
       walkWindows(root, "top", 5, new Set(), (win) => {
         if (method) return;
         try {
+          const exactControls = Array.from(
+            win.document.querySelectorAll("a.b-control-right__item.quests[data-command='openQuests']")
+          );
+          if (exactControls.length === 1 && typeof exactControls[0].click === "function") {
+            exactControls[0].click();
+            method = "quest_control_exact";
+            return;
+          }
+          // Compatibility for older page markup used in replay fixtures.  Do
+          // not use an unscoped text match in a live multi-frame shell: it may
+          // select the backpack's internal "Квесты" category instead of the
+          // top navigation control.
+          if (root.frames && root.frames.main_frame) return;
           const elements = Array.from(win.document.querySelectorAll("a,button,[onclick]")).slice(0, 1200);
           for (const element of elements) {
             if (safeString(elementText(element), 120).trim().toLowerCase() !== "квесты") continue;
@@ -973,7 +988,7 @@
           }
         } catch (_) {}
       });
-      if (method === "quest_control") {
+      if (method === "quest_control" || method === "quest_control_exact") {
         let entered = mainContentContext();
         const entryDeadline = Math.min(deadline, Date.now() + Math.min(2000, Math.floor(verifyTimeoutMs / 2)));
         while (entered.pageKind !== "quests" && Date.now() < entryDeadline) {

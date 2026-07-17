@@ -50,6 +50,13 @@
   "max_session_minutes": 480,
   "npc_catalog_path": "docs/3kingdoms/NPC_CATALOG.json",
   "runs_dir": "runs",
+  "run_retention": {
+    "enabled": true,
+    "max_age_days": 7,
+    "max_runs": 20,
+    "max_total_bytes": 104857600,
+    "min_keep": 5
+  },
   "resources": {
     "enabled": true,
     "fail_open_if_missing": false,

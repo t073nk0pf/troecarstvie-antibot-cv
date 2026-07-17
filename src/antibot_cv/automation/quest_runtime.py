@@ -187,6 +187,9 @@ class QuestRuntimeMixin(
         self._quest_accept_last_settle_reason: str | None = None
         self._quest_dialogue = QuestDialogueRuntime()
         self._init_quest_chat_progress()
+        self._quest_inventory_checked_fingerprint: str | None = None
+        self._quest_inventory_checked_cycle: int | None = None
+        self._quest_inventory_terminal_completion_evidence = None
 
     def _validate_route_coordinator_binding(
         self,
@@ -605,27 +608,14 @@ class QuestRuntimeMixin(
         }
         objective = self._quest_director.active_objective if self._quest_director is not None else None
         if objective is not None and objective.quest_id == decision.quest_id:
-            ordered_objectives = (objective,)
-            if self._quest_director is not None:
-                ordered_objectives += tuple(
-                    candidate
-                    for candidate in self._quest_director.supported_objectives
-                    if candidate.quest_id != objective.quest_id
-                )
-            opportunistic_names: list[str] = list(self._quest_target_names)
-            opportunistic_levels: list[int] = []
-            opportunistic_specs: list[tuple[str, int]] = []
-            for candidate in ordered_objectives:
-                if candidate.monster.name not in opportunistic_names:
-                    opportunistic_names.append(candidate.monster.name)
-                if candidate.monster.level not in opportunistic_levels:
-                    opportunistic_levels.append(candidate.monster.level)
-                spec = (candidate.monster.name, candidate.monster.level)
-                if spec not in opportunistic_specs:
-                    opportunistic_specs.append(spec)
-            self._quest_target_names = tuple(opportunistic_names)
-            self._quest_target_levels = tuple(opportunistic_levels)
-            self._quest_target_specs = tuple(opportunistic_specs)
+            # Only the director-owned objective is action-eligible.  Other
+            # supported objectives belong to different quest steps and their
+            # catalogue cards may remain textually unchanged after chat has
+            # confirmed a resource requirement.  Adding them here used to
+            # re-admit already completed mobs as opportunistic hunt targets.
+            self._quest_target_names = (objective.monster.name,)
+            self._quest_target_levels = (objective.monster.level,)
+            self._quest_target_specs = ((objective.monster.name, objective.monster.level),)
             self._quest_route_link_label = objective.navigator_label
         else:
             self._quest_target_levels = ()
@@ -741,7 +731,10 @@ class QuestRuntimeMixin(
             if self._quest_active_page_requested is not None:
                 timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
                 if (time.monotonic() - started) * 1000 >= timeout_ms:
-                    self._stop_leveling_unsafe("quest_active_refresh_timeout")
+                    self._expire_active_catalog_navigation(
+                        "active_catalog_navigation_settle_expired",
+                        self._quest_director.chain.pending_active_catalog_navigation,
+                    )
                 return
             if not self._quest_director.active_catalog.complete:
                 self._request_active_quest_snapshot("quest_active_next_page")
@@ -781,7 +774,10 @@ class QuestRuntimeMixin(
                 elif (time.monotonic() - started) * 1000 >= max(
                     1000, int(self.config.leveling.quest_refresh_timeout_ms)
                 ):
-                    self._stop_leveling_unsafe("quest_active_refresh_timeout")
+                    self._expire_active_catalog_navigation(
+                        "active_catalog_navigation_settle_expired",
+                        self._quest_director.chain.pending_active_catalog_navigation,
+                    )
                 return
             if decision is not None and decision.intent is QuestDirectorIntent.ACCEPT_QUEST:
                 if decision.quest is None:
@@ -822,6 +818,8 @@ class QuestRuntimeMixin(
                 # quest whose navigation is still being observed.  Do not let
                 # the generic policy turn that expected wait into a false
                 # navigation failure.
+                if self._recover_quest_refresh_from_orphan_npc_page():
+                    return
                 return
             if decision is not None and decision.intent is QuestDirectorIntent.STOP_UNSAFE:
                 self._stop_leveling_unsafe(f"quest_director:{decision.reason}")
@@ -900,9 +898,44 @@ class QuestRuntimeMixin(
                 return
             self._finish_quest_refresh_to_hunt("quest_refresh_complete")
             return
+        if (
+            self.current_page_kind == "npc"
+            and self._quest_director is not None
+            and (
+                self.config.leveling.auto_navigate_quest_targets
+                or self.config.leveling.autonomous_quest_director
+            )
+        ):
+            self._recover_quest_refresh_from_orphan_npc_page()
+            return
         timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
         if (time.monotonic() - started) * 1000 >= timeout_ms:
             self._stop_leveling_unsafe("quest_refresh_timeout")
+
+    def _recover_quest_refresh_from_orphan_npc_page(self) -> bool:
+        if (
+            self.current_page_kind != "npc"
+            or self._quest_director is None
+            or self._quest_dialogue.pending is not None
+            or not (
+                self.config.leveling.auto_navigate_quest_targets
+                or self.config.leveling.autonomous_quest_director
+            )
+        ):
+            return False
+        request = ActionRequest(
+            "open_quests",
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run,
+            metadata={"reason": "quest_refresh_recover_from_npc_page"},
+        )
+        if not self.action_executor.execute(request):
+            self._stop_leveling_unsafe("quest_refresh_recover_from_npc_failed")
+            return True
+        self._invalidate_quest_snapshot_cache()
+        self._quest_refresh_requested_monotonic = time.monotonic()
+        return True
 
     def _finish_quest_refresh_to_hunt(self, reason: str) -> bool:
         request = ActionRequest(

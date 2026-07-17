@@ -13,6 +13,11 @@ from src.antibot_cv.automation.route_recovery_policy import (
     ROUTE_STEP_PROGRESS_DEADLINE_S,
 )
 from src.antibot_cv.automation.runtime_constants import JS_VISIBLE_ATTACK_INTERVAL_MS
+from src.antibot_cv.automation.quest_inventory_guard import (
+    QuestInventoryCompletionEvidence,
+    evaluate_quest_inventory,
+    quest_item_requirements,
+)
 from src.antibot_cv.automation.runtime_helpers import (
     detect_direction_pad_roi as _detect_direction_pad_roi,
     is_semantic_location_name as _is_semantic_location_name,
@@ -76,6 +81,11 @@ class NavigationRuntimeMixin:
             if self._maybe_start_quest_refresh():
                 return
             if not self._attack_visible_target_via_injector(frame):
+                if getattr(self, "_quest_inventory_navigation_owned", False):
+                    self._quest_inventory_navigation_owned = False
+                    return
+                if self.state_machine.state is GameState.STOPPED:
+                    return
                 if not self._handle_live_failed_visible_attack(frame):
                     self._open_hunt_from_game_shell(frame)
             return
@@ -905,6 +915,8 @@ class NavigationRuntimeMixin:
             return False
         if frame is not None and not self._resources_allow_search(frame):
             return False
+        if not self._quest_inventory_allows_attack():
+            return False
         now = time.monotonic()
         if self._last_js_visible_attack_monotonic is not None:
             elapsed_ms = (now - self._last_js_visible_attack_monotonic) * 1000
@@ -976,6 +988,95 @@ class NavigationRuntimeMixin:
         self.navigator.reset()
         self._reset_scrollbar_search()
         return True
+
+    def _quest_inventory_allows_attack(self) -> bool:
+        director = getattr(self, "_quest_director", None)
+        objective = director.active_objective if director is not None else None
+        requirements = quest_item_requirements(objective)
+        if (
+            objective is None
+            or not director.active_snapshot_fresh
+            or not director.active_catalog.complete
+        ):
+            return True
+        last_fingerprint = getattr(self, "_quest_inventory_checked_fingerprint", None)
+        last_cycle = getattr(self, "_quest_inventory_checked_cycle", None)
+        current_cycle = self.session.completed_cycles
+        inspection_due = (
+            last_fingerprint != objective.fingerprint
+            or last_cycle is None
+            or current_cycle - last_cycle >= 1
+        )
+        if not inspection_due:
+            return True
+        sink = self.action_executor.sink
+        if hasattr(sink, "last_quest_inventory_snapshot"):
+            sink.last_quest_inventory_snapshot = None
+        request = ActionRequest(
+            "inspect_quest_inventory",
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run,
+            metadata={
+                "quest_id": objective.quest_id,
+                "quest_title": objective.quest_title,
+                "objective_fingerprint": objective.fingerprint,
+                "names": [item.name for item in requirements],
+                "inventory_open_delay_ms": self.config.item_recovery.inventory_open_delay_ms,
+                "reason": "quest_precombat_inventory_guard",
+            },
+        )
+        if not self.action_executor.execute(request):
+            self._stop_leveling_unsafe("quest_inventory_inspection_failed")
+            return False
+        # Inventory inspection owns this controller pass.  Do not let the generic
+        # game-shell recovery reopen hunt before the snapshot is validated.
+        self._quest_inventory_navigation_owned = True
+        self._selected_target = None
+        self._current_target = None
+        result = evaluate_quest_inventory(
+            objective,
+            getattr(sink, "last_quest_inventory_snapshot", None),
+        )
+        self._quest_inventory_checked_fingerprint = objective.fingerprint
+        self._quest_inventory_checked_cycle = current_cycle
+        self.logger.log_event(
+            "quest_inventory_guard_decision",
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            quest_id=objective.quest_id,
+            quest_title=objective.quest_title,
+            objective_fingerprint=objective.fingerprint,
+            confirmed=result.confirmed,
+            complete=result.complete,
+            requirements=[
+                {"name": item.name, "required": item.required}
+                for item in result.requirements
+            ],
+            collected=[{"name": name, "count": count} for name, count in result.collected],
+            reason=result.reason,
+        )
+        if not result.confirmed:
+            self._stop_leveling_unsafe(f"quest_inventory_guard:{result.reason}")
+            return False
+        if not result.complete:
+            # The inspection navigates through the backpack and back to hunt;
+            # the next fresh hunt frame may attack using this bounded result.
+            return False
+        self._quest_inventory_terminal_completion_evidence = (
+            QuestInventoryCompletionEvidence(
+                objective.quest_id,
+                objective.quest_title,
+                objective.fingerprint,
+                result.collected,
+            )
+        )
+        self._quest_target_names = ()
+        self._quest_target_levels = ()
+        self._quest_target_specs = ()
+        self._next_quest_refresh_cycle = current_cycle
+        self._maybe_start_quest_refresh()
+        return False
 
     def _handle_live_failed_visible_attack(self, frame: np.ndarray) -> bool:
         snapshot = self._visible_hunt_snapshot_via_injector()

@@ -46,12 +46,16 @@ class QuestTurnInCoordinatorMixin:
             return False
         progress = matches[0].data.get("progress")
         chat_evidence = getattr(self, "_quest_chat_terminal_completion_evidence", None)
+        inventory_evidence = getattr(
+            self, "_quest_inventory_terminal_completion_evidence", None
+        )
+        completion_evidence = chat_evidence or inventory_evidence
         terminal_collection_confirmed = bool(
-            chat_evidence is not None
-            and chat_evidence.quest_id == lease.quest_id
-            and chat_evidence.quest_title == lease.quest_title
-            and chat_evidence.fingerprint == lease.current_fingerprint
-            and chat_evidence.terminal_collection
+            completion_evidence is not None
+            and completion_evidence.quest_id == lease.quest_id
+            and completion_evidence.quest_title == lease.quest_title
+            and completion_evidence.fingerprint == lease.current_fingerprint
+            and completion_evidence.terminal_collection
         )
         route_plan = classify_objective(matches[0])
         explicit_turn_in = (
@@ -129,6 +133,7 @@ class QuestTurnInCoordinatorMixin:
         )
         if terminal_collection_confirmed:
             self._quest_chat_terminal_completion_evidence = None
+            self._quest_inventory_terminal_completion_evidence = None
         self._quest_refresh_requested_monotonic = time.monotonic()
         if pending.phase is QuestTurnInPhase.ROUTE:
             self._start_location_route(

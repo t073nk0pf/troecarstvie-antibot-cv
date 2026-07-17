@@ -1303,10 +1303,11 @@ const questAction = {
   },
 };
 const detailTitle = { innerText: "Письмо моряку", textContent: "Письмо моряку" };
+const longAnswerText = "Прошу, не карай меня так, доблестный воитель! Помутилось сознание моё, когда попытался я забрать сей нож. Никогда прежде не делал я такого и в будущем не поступлю подобным образом! Что могу сделать я, дабы искупить вину?";
 const answerAction = {
   tagName: "TABLE",
-  innerText: "Я доставлю письмо.",
-  textContent: "Я доставлю письмо.",
+  innerText: longAnswerText,
+  textContent: longAnswerText,
   disabled: false,
   getAttribute(name) {
     if (name === "onclick") return "location.href='npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401&secret'";
@@ -1363,7 +1364,7 @@ const terminalDocument = {
 const detailDocument = {
   title: "Письмо моряку",
   readyState: "complete",
-  body: { innerText: "Письмо моряку Моряк Кентур Я доставлю письмо.", textContent: "" },
+  body: { innerText: `Письмо моряку Моряк Кентур ${longAnswerText}`, textContent: "" },
   querySelectorAll(selector) {
     if (selector === "h2") return [header, detailTitle];
     if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [answerAction];
@@ -1448,13 +1449,15 @@ async function command(type, payload = {}) {
   assert.strictEqual(detail.ok, true);
   assert.strictEqual(detail.message.dialogActions.length, 1);
   assert.strictEqual(detail.message.dialogActions[0].ref, "401");
+  assert.strictEqual(detail.message.dialogActions[0].text, longAnswerText);
+  assert.ok(detail.message.dialogActions[0].text.length > 180);
   const wrongName = await command("npc_dialog_snapshot", { expectedName: "Другой NPC", expectedNpcId: "0" });
   assert.strictEqual(wrongName.message.npcId, "0");
   assert.strictEqual(wrongName.message.identityMatches, false);
   const rejectedWrongName = await command("npc_quest_action", {
     expectedSnapshotId: wrongName.message.snapshotId,
     npcId: "0", questId: "314", expectedTitle: "Письмо моряку",
-    action: "answer", expectedRef: "401", expectedText: "Я доставлю письмо.",
+    action: "answer", expectedRef: "401", expectedText: longAnswerText,
   });
   assert.strictEqual(rejectedWrongName.ok, false);
   assert.strictEqual(rejectedWrongName.message.outcome, "NOT_ISSUED");
@@ -1465,7 +1468,7 @@ async function command(type, payload = {}) {
     expectedSnapshotId: answerSnapshot.message.snapshotId,
     npcId: "0", expectedName: "Другой NPC", questId: "314",
     expectedTitle: "Письмо моряку", action: "answer",
-    expectedRef: "401", expectedText: "Я доставлю письмо.",
+    expectedRef: "401", expectedText: longAnswerText,
   });
   assert.strictEqual(contradictedIdentity.ok, false);
   assert.strictEqual(contradictedIdentity.message.message, "npc_dialog_identity_mismatch");
@@ -1478,7 +1481,7 @@ async function command(type, payload = {}) {
     expectedTitle: "Письмо моряку",
     action: "answer",
     expectedRef: "401",
-    expectedText: "Я доставлю письмо.",
+    expectedText: longAnswerText,
   });
   assert.strictEqual(answered.ok, true);
   assert.strictEqual(answered.message.outcome, "ACK_PENDING");
@@ -2219,7 +2222,12 @@ let clicks = 0;
 const icon = { getAttribute(name) { return name === "alt" ? "квесты" : null; } };
 const link = {
   innerText: "", textContent: "",
-  getAttribute(name) { return name === "href" ? "#" : null; },
+  getAttribute(name) {
+    if (name === "href") return "#";
+    if (name === "data-command") return "openQuests";
+    if (name === "class") return "b-control-right__item quests";
+    return null;
+  },
   querySelectorAll(selector) { return selector === "img[alt],img[title]" ? [icon] : []; },
   closest() { return this; },
   click() {
@@ -2236,7 +2244,9 @@ const root = {
   name: "top", location: { href: "https://3kingdoms.ru/hunt.php" }, frames: [],
   document: {
     title: "Охота", body: { innerText: "Охота", textContent: "Охота" },
-    querySelectorAll(selector) { return selector === "a,button,[onclick]" ? [link] : []; },
+    querySelectorAll(selector) {
+      return selector === "a,button,[onclick]" || selector === "a.b-control-right__item.quests[data-command='openQuests']" ? [link] : [];
+    },
   },
   addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
   postMessage(message) { messages.push(message); }, setTimeout,
@@ -2253,7 +2263,7 @@ vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
   assert.strictEqual(messages.length, 1);
   const result = JSON.parse(messages[0].message);
   assert.strictEqual(result.outcome, "CONFIRMED");
-  assert.strictEqual(result.method, "quest_control");
+  assert.strictEqual(result.method, "quest_control_exact");
   assert.strictEqual(result.after.page, 0);
   assert.strictEqual(clicks, 1);
 })().catch((error) => { console.error(error); process.exit(1); });
@@ -2678,7 +2688,7 @@ const root = {
   name: "top",
   location: { href: "https://3kingdoms.ru/main.php" },
   frames: [],
-  document: doc,
+  document: { body: { innerText: "" }, querySelectorAll() { return []; } },
   setTimeout,
   entry_point_request(scope, action, payload, callback) {
     entryPointCalls.push({ scope, action, payload });
@@ -2715,7 +2725,7 @@ function command(type, payload = {}) {
     },
   });
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 2500;
+    const deadline = Date.now() + 6000;
     const poll = () => {
       if (messages.length) {
         resolve({ ok: messages[0].ok, message: JSON.parse(messages[0].message) });
@@ -3925,22 +3935,40 @@ const image = {
   getAttribute(name) {
     if (name === "src") return "/images/items/burdjuk_udal.png";
     if (name === "style") return "left: 10px; top: 20px;";
+    if (name === "data-artikul") return "555";
     return null;
   },
   closest() { return this; },
   getBoundingClientRect() { return { left: 10, top: 20, width: 32, height: 32 }; },
 };
+const questLink = {
+  tagName: "A",
+  innerText: "Квесты",
+  textContent: "Квесты",
+  value: "",
+  getAttribute(name) {
+    if (name === "href") return "user_iframe.php?group=4";
+    return null;
+  },
+  click() {},
+};
 const doc = {
   title: "",
   body: { innerText: "" },
   documentElement: { innerHTML: "" },
-  querySelectorAll() { return [image]; },
+  querySelectorAll(selector) { return String(selector).includes("#tab_4") ? [questLink] : [image]; },
+};
+const rootDoc = {
+  title: "",
+  body: { innerText: "" },
+  documentElement: { innerHTML: "" },
+  querySelectorAll() { return []; },
 };
 const root = {
   name: "top",
   location: { href: "https://3kingdoms.ru/main.php" },
   frames: [],
-  document: doc,
+  document: rootDoc,
   setTimeout,
   addEventListener(type, callback) { listeners[type] = callback; },
   removeEventListener() {},
@@ -3951,8 +3979,34 @@ const mainFrame = {
   location: { href: "https://3kingdoms.ru/main_frame.php" },
   frames: [],
   document: doc,
-  processMenu() {},
+  processMenu(command) {
+    if (command === "b11") {
+      this.location.href = "https://3kingdoms.ru/user.php?mode=personage&submode=backpack";
+    }
+  },
 };
+const userFrame = {
+  name: "user_iframe",
+  location: { href: "https://3kingdoms.ru/user_iframe.php?group=1" },
+  frames: [],
+  document: {
+    title: "",
+    body: { innerText: "" },
+    documentElement: { innerHTML: "" },
+    querySelectorAll(selector) {
+      if (String(selector) === "script") {
+        return [{
+          textContent: "_top().art_alt['AA_555'] = {\"title\":\"Пояс Кентавра-ветерана\",\"desc\":\"Получение: Существует небольшая вероятность получения.\",\"kind\":{\"value\":\"Квестовые предметы\"},\"slot_id\":\"quest-slot-555\"};",
+        }];
+      }
+      // The game's cell and its inner visual element are both discoverable.
+      // They must collapse to one metadata slot in a quest snapshot.
+      return [image, { ...image, id: "nested-slot-image" }];
+    },
+  },
+};
+mainFrame.frames = [userFrame];
+mainFrame.frames.user_iframe = userFrame;
 root.top = root;
 root.window = root;
 root.frames = [mainFrame];
@@ -3973,7 +4027,7 @@ function command(type, payload = {}) {
     },
   });
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 2500;
+    const deadline = Date.now() + 6000;
     const poll = () => {
       if (messages.length) {
         resolve({ ok: messages[0].ok, message: JSON.parse(messages[0].message) });
@@ -3994,6 +4048,21 @@ function command(type, payload = {}) {
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.message.candidates[0].src, "/images/items/burdjuk_udal.png");
   assert.deepStrictEqual(result.message.candidates[0].rect, { x: 10, y: 20, width: 32, height: 32 });
+  const questStartedAt = Date.now();
+  const questResult = await command("inventory_snapshot", { names: ["пояс кентавра"], open: true, category: "quest" });
+  assert.ok(Date.now() - questStartedAt >= 2900);
+  assert.strictEqual(questResult.ok, true);
+  assert.strictEqual(questResult.message.backpackMessage, "processMenu_b11");
+  assert.strictEqual(questResult.message.backpackProof.confirmed, true);
+  assert.strictEqual(questResult.message.categoryConfirmed, true);
+  assert.strictEqual(questResult.message.categoryLoadDelayMs, 1500);
+  assert.strictEqual(questResult.message.categoryFallback.message, "quest_inventory_frame_navigated");
+  assert.strictEqual(questResult.message.itemCount, 1);
+  assert.strictEqual(questResult.message.truncated, false);
+  assert.strictEqual(questResult.message.items.length, 1);
+  assert.strictEqual(questResult.message.items[0].artAltTitle, "Пояс Кентавра-ветерана");
+  assert.strictEqual(questResult.message.sample[0].artAltTitle, "Пояс Кентавра-ветерана");
+  assert.strictEqual(questResult.message.sample[0].artAltKind, "Квестовые предметы");
 })().catch((error) => {
   console.error(error);
   process.exit(1);

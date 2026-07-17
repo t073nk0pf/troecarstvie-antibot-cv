@@ -288,6 +288,155 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
     assert runtime.pending is None
 
 
+def test_dialogue_recovers_when_quest_is_already_open_without_open_action() -> None:
+    runtime = ready()
+
+    decision = runtime.decide_dialog(
+        dialog(
+            snapshotId="npc-dialog-already-open",
+            questActions=[],
+            dialogActions=[
+                {
+                    "questId": "246",
+                    "npcId": "9",
+                    "action": "answer",
+                    "visible": True,
+                    "disabled": False,
+                    "ref": "6101",
+                    "text": "*Попытаться незаметно забрать нож со стола*",
+                },
+                {
+                    "questId": "246",
+                    "npcId": "9",
+                    "action": "answer",
+                    "visible": True,
+                    "disabled": False,
+                    "ref": "6102",
+                    "text": "*Попросить продать нож*",
+                },
+            ],
+        )
+    )
+
+    assert decision.intent is QuestDialogueIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "6101"
+    assert decision.action_metadata["inferred_already_open"] is True
+    assert runtime.pending is not None and runtime.pending.quest_opened is False
+    acknowledged = runtime.acknowledge(decision)
+    assert acknowledged.quest_opened is True
+
+
+def test_dialogue_already_open_recovery_rejects_ambiguous_snapshots_without_mutation() -> None:
+    runtime = ready()
+    original = runtime.pending
+    assert original is not None and original.quest_opened is False
+
+    answer = {
+        "questId": "246",
+        "npcId": "9",
+        "action": "answer",
+        "visible": True,
+        "disabled": False,
+        "ref": "6101",
+        "text": "*Попытаться незаметно забрать нож со стола*",
+    }
+    done = {
+        "questId": "246",
+        "npcId": "9",
+        "action": "done",
+        "visible": True,
+        "disabled": False,
+        "pointId": "6103",
+        "text": "Продолжить",
+    }
+    cases = [
+        dialog(
+            questActions=[
+                {"questId": "246", "title": "A", "action": "open", "visible": True, "disabled": False},
+                {"questId": "246", "title": "B", "action": "open", "visible": True, "disabled": False},
+            ],
+            dialogActions=[answer],
+        ),
+        dialog(
+            questActions=[
+                {"questId": "246", "title": "A", "action": "open", "visible": True, "disabled": False},
+            ],
+            dialogActions=[answer],
+        ),
+        dialog(dialogActions=[answer], doneActions=[done]),
+    ]
+
+    for snapshot in cases:
+        with pytest.raises(QuestDialogueError):
+            runtime.decide_dialog(snapshot)
+        assert runtime.pending == original
+
+
+def test_dialogue_already_open_recovery_rejections_keep_pending_unchanged() -> None:
+    runtime = ready()
+    original = runtime.pending
+    assert original is not None and original.quest_opened is False
+    runtime.pending = runtime.pending and runtime.pending.__class__(
+        **{
+            **runtime.pending.__dict__,
+            "objective": runtime.pending.objective.__class__(
+                "321",
+                "Заморский сундук",
+                runtime.pending.objective.objective,
+                runtime.pending.objective.npc_query,
+                runtime.pending.objective.location,
+                runtime.pending.objective.fingerprint,
+            ),
+        }
+    )
+    puzzle_original = runtime.pending
+    puzzle_actions = [
+        {
+            "questId": "321",
+            "npcId": "9",
+            "action": "answer",
+            "visible": True,
+            "disabled": False,
+            "ref": str(4842 + index),
+            "text": text,
+        }
+        for index, text in enumerate(
+            (
+                "*Вернуть все кнопки в исходное положение*",
+                "*Нажать кнопку с изображением Огня*",
+                "*Нажать кнопку с изображением Муравья*",
+                "*Попытаться открыть сундук*",
+            )
+        )
+    ]
+    with pytest.raises(QuestDialogueError) as puzzle:
+        runtime.decide_dialog(dialog(dialogActions=puzzle_actions))
+    assert puzzle.value.unsafe_reason == "dialogue_puzzle_unsupported"
+    assert runtime.pending == puzzle_original
+
+    runtime.pending = original and original.__class__(**{**original.__dict__, "dialog_steps": 20})
+    bounded_original = runtime.pending
+    with pytest.raises(QuestDialogueError) as bounded:
+        runtime.decide_dialog(
+            dialog(
+                dialogActions=[
+                    {
+                        "questId": "246",
+                        "npcId": "9",
+                        "action": "answer",
+                        "visible": True,
+                        "disabled": False,
+                        "ref": "6101",
+                        "text": "Continue",
+                    }
+                ]
+            ),
+            max_steps=20,
+        )
+    assert bounded.value.unsafe_reason == "dialogue_step_limit_exceeded"
+    assert runtime.pending == bounded_original
+
+
 def test_dialogue_is_bounded_and_fails_closed_on_ambiguous_progression() -> None:
     runtime = ready()
     runtime.pending = runtime.pending and runtime.pending.__class__(
@@ -368,6 +517,35 @@ def test_dialogue_exploration_tries_each_choice_once_and_resets_on_new_screen() 
     ]
     reset = runtime.decide_dialog(dialog(snapshotId="npc-dialog-choices-4", dialogActions=changed))
     assert reset.action_metadata["expected_ref"] == "501"
+
+
+def test_dialogue_selects_gard_single_atonement_reply() -> None:
+    runtime = ready()
+    runtime.pending = runtime.pending and runtime.pending.__class__(
+        **{**runtime.pending.__dict__, "quest_opened": True}
+    )
+    reply = {
+        "questId": "246",
+        "npcId": "9",
+        "action": "answer",
+        "visible": True,
+        "disabled": False,
+        "ref": "4241",
+        "pointId": "4238",
+        "text": (
+            "Прошу, не карай меня так, доблестный воитель! Помутилось сознание моё, "
+            "когда попытался я забрать сей нож. Никогда прежде не делал я такого и в "
+            "будущем не поступлю подобным образом! Что могу сделать я, дабы искупить вину?"
+        ),
+    }
+
+    decision = runtime.decide_dialog(
+        dialog(snapshotId="npc-dialog-gard-atonement", dialogActions=[reply])
+    )
+
+    assert decision.intent is QuestDialogueIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "4241"
+    assert decision.action_metadata["expected_text"] == reply["text"]
 
 
 def test_dialogue_explores_story_branch_choices_in_source_order() -> None:

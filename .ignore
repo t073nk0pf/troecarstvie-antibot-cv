@@ -1,0 +1,12 @@
+# Keep routine repository searches focused on authored source and active tests.
+# Explicit paths still work when generated or historical artifacts are needed.
+.venv/
+runs/
+output/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+*.jsonl
+
+# Generated from browser_injector/page_bridge_modules/.
+browser_injector/page_bridge.js

@@ -113,6 +113,26 @@ def test_ignores_unrelated_resource_and_non_exact_keyword_message() -> None:
     assert collection_resource("Получено: достаточное количество осиных крыльев") is None
 
 
+def test_accepts_exact_item_receipt_as_resource_evidence() -> None:
+    message = "Получено: Пояс Кентавра-ветерана 1 шт."
+    resource = "Пояс Кентавра-ветерана"
+    tracker = QuestChatProgressTracker()
+
+    assert collection_resource(message) == resource
+    evidence = tracker.observe(
+        section(message, resource),
+        snapshot_generated_at=NOW.isoformat(),
+        step=step(
+            "Добудьте Пояс Кентавра-ветерана и возвращайтесь к заказчику."
+        ),
+        now=NOW,
+    )
+    assert evidence is not None
+    assert evidence.resource == resource
+    assert evidence.terminal_collection is True
+    assert collection_resource("Получено Пояс Кентавра-ветерана 1 шт.") is None
+
+
 def test_only_single_collection_followed_by_explicit_return_completes_step() -> None:
     objective = (
         "Убивая Кабанов-секачей, получите 10 Гурум-корней "

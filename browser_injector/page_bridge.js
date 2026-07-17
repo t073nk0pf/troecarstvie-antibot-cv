@@ -1607,7 +1607,94 @@
       500
     );
 
-  const inventoryItemFromElement = (el, path, index) => {
+  const ART_ALT_CACHE = new Map();
+
+  // The game's metadata assignment is a JavaScript object, not necessarily a
+  // flat JSON literal: `kind` is itself an object.  A non-greedy `/{.*?}/`
+  // match therefore stops at the first nested brace and silently loses all
+  // quest-item titles.  Extract one balanced object while respecting quoted
+  // strings, then JSON-parse the whole value.
+  const balancedObjectAt = (text, start) => {
+    if (!text || text[start] !== "{") return null;
+    let depth = 0;
+    let quote = "";
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = "";
+        continue;
+      }
+      if (char === "'" || char === '"') {
+        quote = char;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) return text.slice(start, index + 1);
+      }
+    }
+    return null;
+  };
+
+  const artAltFromScripts = (key, sourceWin) => {
+    const keyPattern = safeString(key, 120).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!keyPattern) return null;
+    const pattern = new RegExp(`(?:\\b|_)art_alt\\s*\\[\\s*['\"]${keyPattern}['\"]\\s*\\]\\s*=\\s*`);
+    const windows = [];
+    if (sourceWin) windows.push(sourceWin);
+    walkWindows(window.top || window, "top", 4, new Set(), (win) => windows.push(win));
+    const seen = new Set();
+    for (const candidate of windows) {
+      if (!candidate || seen.has(candidate)) continue;
+      seen.add(candidate);
+      try {
+        const scripts = Array.from(candidate.document.querySelectorAll("script")).slice(0, 400);
+        for (const script of scripts) {
+          const text = safeString(script && script.textContent, 30000);
+          const match = text.match(pattern);
+          if (!match) continue;
+          const objectText = balancedObjectAt(text, match.index + match[0].length);
+          if (!objectText) continue;
+          const parsed = JSON.parse(objectText);
+          if (parsed && typeof parsed === "object") return parsed;
+        }
+      } catch (_) {}
+    }
+    return null;
+  };
+
+  const artAltForKey = (key, sourceWin) => {
+    if (!key) return null;
+    if (ART_ALT_CACHE.has(key)) return ART_ALT_CACHE.get(key);
+    let result = null;
+    const directWindows = [sourceWin, window, window.top || window];
+    for (const candidate of directWindows) {
+      try {
+        if (candidate && candidate.art_alt && candidate.art_alt[key]) {
+          result = candidate.art_alt[key];
+          break;
+        }
+      } catch (_) {}
+    }
+    if (!result) {
+      walkWindows(window.top || window, "top", 4, new Set(), (win) => {
+        if (result) return;
+        try {
+          if (win.art_alt && win.art_alt[key]) result = win.art_alt[key];
+        } catch (_) {}
+      });
+    }
+    result = result || artAltFromScripts(key, sourceWin);
+    // A temporary scan before the quest frame finishes loading must not
+    // poison all subsequent snapshots for this bridge lifetime.
+    if (result) ART_ALT_CACHE.set(key, result);
+    return result;
+  };
+
+  const inventoryItemFromElement = (el, path, index, sourceWin) => {
     const text = inventoryText(el);
     let artifactContainer = null;
     try {
@@ -1650,9 +1737,8 @@
     const count = parseInt(attr(el, "data-cnt") || attr(el, "data-count") || attr(el, "count") || "1", 10);
     let artAlt = null;
     try {
-      const topWin = window.top || window;
       const artAltKey = divId || (artikulId ? `AA_${artikulId}` : "");
-      artAlt = artAltKey && topWin.art_alt ? topWin.art_alt[artAltKey] : null;
+      artAlt = artAltForKey(artAltKey, sourceWin);
     } catch (_) {}
     const artAltTitle = safeString(artAlt && artAlt.title, 220);
     const artAltDescription = safeString(artAlt && (artAlt.desc || artAlt.description || artAlt.de_c), 500);
@@ -1671,6 +1757,7 @@
       divId,
       artikulId,
       artAltTitle,
+      artAltDescription,
       artAltKind,
       artAltSlot,
       src,
@@ -1682,9 +1769,9 @@
     };
   };
 
-  const inventoryElementFromElement = (el, path, index) => ({
+  const inventoryElementFromElement = (el, path, index, sourceWin) => ({
     el,
-    item: inventoryItemFromElement(el, path, index),
+    item: inventoryItemFromElement(el, path, index, sourceWin),
   });
 
   const clickableElement = (el) => {
@@ -1997,7 +2084,7 @@
           if (!text && !aid && !dataId && !artikul && !src && !style) {
             return;
           }
-          output.push(inventoryElementFromElement(el, path, index));
+          output.push(inventoryElementFromElement(el, path, index, win));
         });
       } catch (_) {}
     });
@@ -2134,24 +2221,242 @@
     };
   };
 
+  const selectQuestInventoryCategory = () => {
+    let alreadyOpenCount = 0;
+    walkWindows(window.top || window, "top", 4, new Set(), (win) => {
+      try {
+        const href = safeString(win.location && win.location.href, 500);
+        if (/user_iframe\.php\?[^#]*\bgroup=4(?:&|$)/i.test(href)) alreadyOpenCount += 1;
+      } catch (_) {}
+    });
+    if (alreadyOpenCount === 1) {
+      return { dispatched: false, candidateCount: 1, message: "quest_inventory_category_already_open" };
+    }
+    const candidates = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      try {
+        const href = safeString(win.location && win.location.href, 500).toLowerCase();
+        const doc = win.document;
+        const controls = doc && typeof doc.querySelectorAll === "function"
+          ? Array.from(doc.querySelectorAll("#tab_4 a[href],#tab_4 [onclick],a[href*='user_iframe.php'][href*='group=4'],[onclick*='tab_click'][onclick*='4']" )).slice(0, 40)
+          : [];
+        controls.forEach((el) => {
+          const text = safeString(
+            (el && (el.innerText || el.textContent || el.value)) || attr(el, "title"),
+            120
+          ).replace(/\s+/g, " ").trim().toLowerCase();
+          const target = `${safeString(attr(el, "href"), 240)} ${safeString(attr(el, "onclick"), 240)}`;
+          if (
+            !["квесты", "квестовые", "квестовые предметы"].includes(text)
+            || !/(?:\bgroup=4\b|tab_click\s*\(\s*['\"]?4['\"]?\s*\))/i.test(target)
+          ) return;
+          candidates.push({ el, path, text });
+        });
+      } catch (_) {}
+    });
+    if (candidates.length !== 1) {
+      return { dispatched: false, candidateCount: candidates.length, message: "quest_inventory_category_ambiguous" };
+    }
+    try {
+      candidates[0].el.click();
+      return {
+        dispatched: true,
+        candidateCount: 1,
+        message: "quest_inventory_category_selected",
+        framePath: candidates[0].path,
+        text: candidates[0].text,
+      };
+    } catch (error) {
+      return {
+        dispatched: false,
+        candidateCount: 1,
+        message: `quest_inventory_category_click_error:${safeString(error && error.message ? error.message : error, 160)}`,
+      };
+    }
+  };
+
+  const backpackPageProof = () => {
+    const pages = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      try {
+        const href = safeString(win.location && win.location.href, 500);
+        if (
+          /\/user\.php\?[^#]*\bmode=personage(?:&|$)/i.test(href)
+          && /(?:\?|&)submode=backpack(?:&|$)/i.test(href)
+        ) pages.push({ path, href });
+      } catch (_) {}
+    });
+    return {
+      confirmed: pages.length === 1,
+      pageCount: pages.length,
+      framePath: pages.length === 1 ? pages[0].path : null,
+      href: pages.length === 1 ? pages[0].href : null,
+    };
+  };
+
+  const waitForBackpackPage = async (payload) => {
+    const root = window.top || window;
+    const timeoutMs = Math.max(500, Math.min(5000, toNumber(payload && payload.backpackWaitMs, 3000)));
+    const startedAt = Date.now();
+    let proof = backpackPageProof();
+    while (!proof.confirmed && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => root.setTimeout(resolve, 100));
+      proof = backpackPageProof();
+    }
+    return { ...proof, waitedMs: Date.now() - startedAt, timeoutMs };
+  };
+
+  const questInventoryCategoryProof = () => {
+    const frames = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      try {
+        const href = safeString(win.location && win.location.href, 500);
+        if (/user_iframe\.php\?[^#]*\bgroup=4(?:&|$)/i.test(href)) frames.push({ path, href });
+      } catch (_) {}
+    });
+    return {
+      confirmed: frames.length === 1,
+      frameCount: frames.length,
+      framePath: frames.length === 1 ? frames[0].path : null,
+      href: frames.length === 1 ? frames[0].href : null,
+    };
+  };
+
+  const waitForQuestInventoryCategory = async (payload) => {
+    const root = window.top || window;
+    const timeoutMs = Math.max(500, Math.min(5000, toNumber(payload && payload.categoryWaitMs, 3000)));
+    const startedAt = Date.now();
+    let proof = questInventoryCategoryProof();
+    while (!proof.confirmed && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => root.setTimeout(resolve, 150));
+      proof = questInventoryCategoryProof();
+    }
+    return { ...proof, waitedMs: Date.now() - startedAt, timeoutMs };
+  };
+
+  const directQuestInventoryCategoryNavigation = () => {
+    const candidates = [];
+    walkWindows(window.top || window, "top", 4, new Set(), (win, path) => {
+      try {
+        const href = safeString(win.location && win.location.href, 500);
+        if (
+          !/\/user\.php\?[^#]*\bmode=personage(?:&|$)/i.test(href)
+          || !/(?:\?|&)submode=backpack(?:&|$)/i.test(href)
+        ) return;
+        const userFrame = win.frames && win.frames["user_iframe"];
+        if (userFrame) candidates.push({ win: userFrame, path: `${path}.user_iframe` });
+      } catch (_) {}
+    });
+    if (candidates.length !== 1) {
+      return { dispatched: false, candidateCount: candidates.length, message: "quest_inventory_frame_ambiguous" };
+    }
+    try {
+      candidates[0].win.location.href = "user_iframe.php?group=4";
+      return {
+        dispatched: true,
+        candidateCount: 1,
+        framePath: candidates[0].path,
+        message: "quest_inventory_frame_navigated",
+      };
+    } catch (error) {
+      return {
+        dispatched: false,
+        candidateCount: 1,
+        message: `quest_inventory_frame_navigation_error:${safeString(error && error.message ? error.message : error, 160)}`,
+      };
+    }
+  };
+
+  const exactQuestInventoryItems = (entries) => {
+    const unique = new Map();
+    entries.forEach((entry) => {
+      const item = entry && entry.item;
+      if (!item || !/^\s*квестовые предметы\s*$/iu.test(safeString(item.artAltKind, 120))) return;
+      if (!safeString(item.artAltTitle, 220)) return;
+      // A quest slot is exposed both by its table cell and its nested visual
+      // element.  They have different DOM ids but the same metadata slot.
+      // Prefer that stable slot id, otherwise one real trophy appears twice
+      // and the Python guard correctly-but-unhelpfully treats the binding as
+      // ambiguous.
+      const identity = safeString(
+        item.artAltSlot || item.divId || item.cellAid || item.aid || item.id || item.artikulId,
+        120
+      );
+      if (!identity || unique.has(identity)) return;
+      unique.set(identity, item);
+    });
+    return Array.from(unique.values());
+  };
+
+  const QUEST_INVENTORY_ITEM_LIMIT = 256;
+
+  const questInventoryCategoryLoadDelayMs = (payload) => Math.max(
+    0,
+    Math.min(5000, toNumber(payload && payload.questCategoryLoadDelayMs, 1500))
+  );
+
   const inventorySnapshot = async (payload) => {
     const root = window.top || window;
     const names = normalizeNeedleList(payload && payload.names);
     const open = payload && payload.open != null ? Boolean(payload.open) : true;
+    const category = safeString(payload && payload.category, 40).toLowerCase() || null;
     const backpackMessage = open ? openBackpack() : "not_opened";
-    if (open) {
+    const backpackProof = open
+      ? await waitForBackpackPage(payload)
+      : backpackPageProof();
+    if (open && backpackProof.confirmed && inventoryOpenDelayMs(payload) > 0) {
       await new Promise((resolve) => root.setTimeout(resolve, inventoryOpenDelayMs(payload)));
     }
+    const categoryResult = category === "quest"
+      ? !open || backpackProof.confirmed || questInventoryCategoryProof().confirmed
+        ? selectQuestInventoryCategory()
+        : { dispatched: false, candidateCount: 0, message: "quest_inventory_backpack_unconfirmed" }
+      : { dispatched: false, candidateCount: 0, message: "inventory_category_not_requested" };
+    const initialCategoryPayload = {
+      ...(payload || {}),
+      categoryWaitMs: Math.min(900, toNumber(payload && payload.categoryWaitMs, 3000)),
+    };
+    let categoryProof = category === "quest"
+      ? await waitForQuestInventoryCategory(initialCategoryPayload)
+      : { confirmed: category == null, frameCount: 0, framePath: null, href: null };
+    let categoryFallback = null;
+    if (category === "quest" && !categoryProof.confirmed && backpackProof.confirmed) {
+      categoryFallback = directQuestInventoryCategoryNavigation();
+      if (categoryFallback.dispatched) {
+        categoryProof = await waitForQuestInventoryCategory(payload);
+      }
+    }
+    const categoryLoadDelayMs = category === "quest" && categoryProof.confirmed
+      ? questInventoryCategoryLoadDelayMs(payload)
+      : 0;
+    if (categoryLoadDelayMs > 0) {
+      await new Promise((resolve) => root.setTimeout(resolve, categoryLoadDelayMs));
+    }
     const entries = collectInventoryElements();
+    const questItems = exactQuestInventoryItems(entries);
+    const categoryConfirmed = categoryProof.confirmed;
+    const snapshotItems = category === "quest"
+      ? questItems
+      : entries.map((entry) => entry.item);
     return {
       ok: true,
       message: "inventory_snapshot",
       bridgeVersion: BRIDGE_VERSION,
       backpackMessage,
-      itemCount: entries.length,
+      backpackProof,
+      itemCount: snapshotItems.length,
       names,
+      category,
+      categoryConfirmed,
+      categoryResult,
+      categoryProof,
+      categoryFallback,
+      categoryLoadDelayMs,
       candidates: inventoryDebugItems(entries, names),
-      sample: entries.map((entry) => entry.item).slice(0, 80),
+      items: snapshotItems.slice(0, QUEST_INVENTORY_ITEM_LIMIT),
+      // Compatibility for clients that still consume the legacy field.
+      sample: snapshotItems.slice(0, QUEST_INVENTORY_ITEM_LIMIT),
+      truncated: snapshotItems.length > QUEST_INVENTORY_ITEM_LIMIT,
     };
   };
 
@@ -3386,6 +3691,13 @@
           mainFrame.processMenu("b11");
           return "processMenu_b11";
         }
+        const controls = mainFrame.document && typeof mainFrame.document.querySelectorAll === "function"
+          ? Array.from(mainFrame.document.querySelectorAll("li[data-label='рюкзак'][data-command='b11']")).slice(0, 2)
+          : [];
+        if (controls.length === 1 && typeof controls[0].click === "function") {
+          controls[0].click();
+          return "top_menu_backpack_b11";
+        }
         if (mainFrame.frames && mainFrame.frames["main"]) {
           mainFrame.frames["main"].location.href = "user.php?mode=personage&submode=backpack";
           return "main_frame_main_backpack";
@@ -3394,12 +3706,7 @@
     } catch (error) {
       return `backpack_frame_error:${safeString(error && error.message ? error.message : error, 200)}`;
     }
-    try {
-      root.location.href = "https://3kingdoms.ru/main.php";
-      return "main_fallback";
-    } catch (error) {
-      return `backpack_fallback_error:${safeString(error && error.message ? error.message : error, 200)}`;
-    }
+    return "backpack_control_missing";
   };
 
   const layoutTargets = (root) => {
@@ -3582,6 +3889,19 @@
       walkWindows(root, "top", 5, new Set(), (win) => {
         if (method) return;
         try {
+          const exactControls = Array.from(
+            win.document.querySelectorAll("a.b-control-right__item.quests[data-command='openQuests']")
+          );
+          if (exactControls.length === 1 && typeof exactControls[0].click === "function") {
+            exactControls[0].click();
+            method = "quest_control_exact";
+            return;
+          }
+          // Compatibility for older page markup used in replay fixtures.  Do
+          // not use an unscoped text match in a live multi-frame shell: it may
+          // select the backpack's internal "Квесты" category instead of the
+          // top navigation control.
+          if (root.frames && root.frames.main_frame) return;
           const elements = Array.from(win.document.querySelectorAll("a,button,[onclick]")).slice(0, 1200);
           for (const element of elements) {
             if (safeString(elementText(element), 120).trim().toLowerCase() !== "квесты") continue;
@@ -3593,7 +3913,7 @@
           }
         } catch (_) {}
       });
-      if (method === "quest_control") {
+      if (method === "quest_control" || method === "quest_control_exact") {
         let entered = mainContentContext();
         const entryDeadline = Math.min(deadline, Date.now() + Math.min(2000, Math.floor(verifyTimeoutMs / 2)));
         while (entered.pageKind !== "quests" && Date.now() < entryDeadline) {
@@ -5698,7 +6018,10 @@
     ).slice(0, 150);
     for (let index = 0; index < elements.length; index += 1) {
       const element = elements[index];
-      const text = safeString(npcActionText(element), 180);
+      // Dialogue replies can be long prose.  Python binds answers with a
+      // 1200-character limit, so truncating here can remove the decisive
+      // continuation at the end and turn a safe sole reply into a refusal.
+      const text = safeString(npcActionText(element), 1200);
       const query = npcQuerySummary(npcActionHref(element, context.href), context.href);
       if (!text && !query) continue;
       const container = element.closest
@@ -6078,13 +6401,17 @@
 
   const questChatResource = (value) => {
     const raw = safeString(value, 500);
-    const marker = raw.search(/Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+/iu);
+    const marker = raw.search(/(?:Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество|Получено\s*:)/iu);
     if (marker < 0) return null;
     const prefix = raw.slice(Math.max(0, marker - 12), marker);
     const visibleTime = prefix.match(/(\d{1,2}:\d{2})\s*$/);
-    const match = raw.slice(marker).match(
+    const collectionMatch = raw.slice(marker).match(
       /^(Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+(.+?)\s*[.!])(?=\s|$)/iu
     );
+    const receiptMatch = raw.slice(marker).match(
+      /^(Получено\s*:\s*(.+?)\s+[1-9]\d*\s*шт\.?)(?=\s|$)/iu
+    );
+    const match = collectionMatch || receiptMatch;
     if (!match) return null;
     const text = safeString(match[1], 500);
     const resource = safeString(match[2], 220).replace(/[.!]+$/, "").trim();
@@ -6095,7 +6422,7 @@
 
   const questChatResources = (value) => {
     const raw = String(value || "");
-    const marker = /Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+/giu;
+    const marker = /(?:Вы\s+набрали\s+(?:достаточное|необходимое)\s+количество|Получено\s*:)/giu;
     const parsed = [];
     let match;
     while ((match = marker.exec(raw)) !== null && parsed.length < 40) {

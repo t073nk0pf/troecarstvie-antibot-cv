@@ -91,7 +91,10 @@ class QuestRefreshRuntimeMixin:
                 self._quest_active_page_requested = pending_active_navigation.page
                 self._quest_active_request_snapshot_id = pending_active_navigation.baseline_snapshot_id
                 if time.time() >= pending_active_navigation.deadline:
-                    return self._stop_leveling_unsafe("active_catalog_navigation_settle_expired")
+                    return self._expire_active_catalog_navigation(
+                        "active_catalog_navigation_settle_expired",
+                        pending_active_navigation,
+                    )
                 return True
             pending_navigation = self._quest_director.chain.pending_catalog_navigation
             if pending_navigation is not None:
@@ -369,9 +372,10 @@ class QuestRefreshRuntimeMixin:
         if time.monotonic() < self._quest_active_navigation_retry_monotonic:
             return True
         if self._quest_active_navigation_attempts >= 2:
-            # Keep the refresh/chat latch closed until its existing outer TTL
-            # expires; never turn repeated NOT_ISSUED into an attack window.
-            return True
+            return self._expire_active_catalog_navigation(
+                "active_catalog_navigation_not_issued_exhausted",
+                director.chain.pending_active_catalog_navigation,
+            )
         if not self._quest_active_snapshot_requested:
             director.begin_active_refresh(
                 after_confirmed_victory=reason == "quest_objective_victory_refresh"
@@ -432,6 +436,20 @@ class QuestRefreshRuntimeMixin:
             return self._stop_leveling_unsafe("quest_active_refresh_open_failed")
         self._quest_refresh_requested_monotonic = time.monotonic()
         return True
+
+    def _expire_active_catalog_navigation(self, reason: str, pending: object = None) -> bool:
+        director = self._quest_director
+        if director is not None and pending is not None:
+            try:
+                director.chain.clear_active_catalog_navigation(pending)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return self._stop_leveling_unsafe(f"quest_active_catalog_expire_clear:{exc}")
+        self._quest_active_snapshot_requested = False
+        self._quest_active_page_requested = None
+        self._quest_active_request_snapshot_id = None
+        self._quest_active_navigation_attempts = 0
+        self._quest_active_navigation_retry_monotonic = 0.0
+        return self._stop_leveling_unsafe(reason)
 
     def _stage_active_catalog_navigation(self, page: int):
         director = self._quest_director
@@ -827,7 +845,6 @@ class QuestRefreshRuntimeMixin:
                     return True
                 if reason in {
                     "dialogue_puzzle_unsupported",
-                    "dialogue_choices_exhausted",
                 }:
                     return self._defer_active_quest(
                         pending.objective.quest_id,

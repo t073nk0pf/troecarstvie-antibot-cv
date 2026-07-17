@@ -22,6 +22,10 @@ _COLLECTION_MESSAGE = re.compile(
     r"^вы\s+набрали\s+(?:достаточное|необходимое)\s+количество\s+(.+?)\s*[.!]?$",
     re.IGNORECASE,
 )
+_ITEM_RECEIPT_MESSAGE = re.compile(
+    r"^получено\s*:\s*(.+?)\s+([1-9]\d*)\s*шт\.?$",
+    re.IGNORECASE,
+)
 _WORD = re.compile(r"[а-яa-z0-9]+", re.IGNORECASE)
 _ENDINGS = tuple(
     sorted(
@@ -229,6 +233,8 @@ class QuestChatProgressTracker:
 def collection_resource(text: object) -> str | None:
     value = _bounded_text(text, 500)
     match = _COLLECTION_MESSAGE.fullmatch(value)
+    if match is None:
+        match = _ITEM_RECEIPT_MESSAGE.fullmatch(value)
     if match is None:
         return None
     resource = re.sub(r"\s+", " ", match.group(1)).strip(" .!\t\r\n")

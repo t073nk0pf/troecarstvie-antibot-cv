@@ -106,6 +106,20 @@ def test_live_pridon_sole_country_report_is_not_mistaken_for_refusal() -> None:
     assert select_progress_dialogue_action((report,)) is report
 
 
+def test_sole_atonement_question_is_safe_even_with_past_denial_words() -> None:
+    apology = {
+        "ref": "994",
+        "text": (
+            "Прошу, не карай меня так, доблестный воитель! Помутилось сознание моё, "
+            "когда попытался я забрать сей нож. Никогда прежде не делал я такого "
+            "и в будущем не поступлю подобным образом! Что могу сделать я, дабы "
+            "искупить вину?"
+        ),
+    }
+
+    assert select_progress_dialogue_action((apology,)) is apology
+
+
 def test_exploration_clicks_single_neutral_question_and_skips_attempted_ref() -> None:
     from src.antibot_cv.automation.quest_dialogue_choice_policy import (
         select_exploratory_dialogue_action,
@@ -149,6 +163,20 @@ def test_exploration_tries_story_branch_choices_in_source_order() -> None:
     assert select_exploratory_dialogue_action(
         (steal, buy), attempted_refs=("6101",)
     ) is buy
+
+
+def test_exploration_advances_uncertain_story_question_but_not_refusal() -> None:
+    from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+        select_exploratory_dialogue_action,
+    )
+
+    question = {"ref": "6201", "text": "Может быть, ты расскажешь, что случилось?"}
+    refusal = {"ref": "6202", "text": "Нет, прощай."}
+
+    assert select_exploratory_dialogue_action((question, refusal)) is question
+    assert select_exploratory_dialogue_action(
+        (question, refusal), attempted_refs=("6201",)
+    ) is None
 
 
 @pytest.mark.parametrize(

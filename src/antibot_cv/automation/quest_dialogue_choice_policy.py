@@ -43,6 +43,9 @@ _SAFE_GREETING_CONTINUATION_PATTERNS = (
     re.compile(r"\b(?:хочу|желаю)\s+(?:я\s+)?поприветствовать\b"),
     re.compile(r"\bрад\s+(?:я\s+)?служить\s+во\s+благо\b"),
 )
+_SAFE_ATONEMENT_CONTINUATION_PATTERN = re.compile(
+    r"\bчто\s+могу\s+сделать\b.{0,120}\b(?:искупить|загладить)\s+вин\w*\b"
+)
 _HESITATION_PATTERNS = (
     re.compile(r"\bбоюсь\b"),
     re.compile(r"\b(?:почему|зачем|разве|что\s+ты)\b"),
@@ -166,9 +169,32 @@ def select_exploratory_dialogue_action(
     for (ref, _), action in distinct.items():
         if ref in attempted:
             continue
-        if not _score(action).disqualified:
+        if not _exploration_disqualified(action):
             return action
     return None
+
+
+def _exploration_disqualified(candidate: Mapping[str, object]) -> bool:
+    """Keep explicit refusals out while allowing neutral story questions.
+
+    The strict scorer decides which branch is semantically preferred.  When
+    no branch wins, bounded exploration must still advance ordinary dialogue
+    questions; treating uncertainty as a hard veto previously abandoned the
+    entire quest and switched to an unrelated combat objective.
+    """
+
+    normalized = " ".join(
+        str(candidate.get("text") or "").casefold().replace("ё", "е").split()
+    )
+    promise_reminder = _PROMISE_REMINDER_PATTERN.search(normalized) is not None
+    return (
+        (
+            any(pattern.search(normalized) for pattern in _DIRECT_DENY_PATTERNS)
+            or _DIRECT_NO_PATTERN.search(normalized) is not None
+        )
+        and not promise_reminder
+        and _SAFE_ATONEMENT_CONTINUATION_PATTERN.search(normalized) is None
+    )
 
 
 def _score(candidate: Mapping[str, object]) -> _ChoiceScore:
@@ -187,22 +213,34 @@ def _score(candidate: Mapping[str, object]) -> _ChoiceScore:
         pattern.search(normalized)
         for pattern in _SAFE_GREETING_CONTINUATION_PATTERNS
     )
+    safe_atonement_continuation = (
+        _SAFE_ATONEMENT_CONTINUATION_PATTERN.search(normalized) is not None
+    )
     uncertain = (
         any(pattern.search(normalized) for pattern in _UNCERTAINTY_PATTERNS)
         and not safe_greeting_continuation
+        and not safe_atonement_continuation
     )
     positive, negated_positive = _positive_evidence(normalized)
     if promise_reminder:
         positive += 4
     if safe_greeting_continuation:
         positive += 3
+    if safe_atonement_continuation:
+        positive += 3
     unsafe_commitment_question = (
         positive >= _MIN_POSITIVE_EVIDENCE
         and "?" in normalized
         and not safe_greeting_continuation
+        and not safe_atonement_continuation
         and _SAFE_ACTION_REQUEST_QUESTION.fullmatch(normalized) is None
     )
-    disqualified = direct_deny or uncertain or negated_positive or unsafe_commitment_question
+    disqualified = (
+        (direct_deny and not safe_atonement_continuation)
+        or uncertain
+        or (negated_positive and not safe_atonement_continuation)
+        or unsafe_commitment_question
+    )
     negative = sum(2 for pattern in _HESITATION_PATTERNS if pattern.search(normalized))
     if "?" in normalized:
         negative += 1
