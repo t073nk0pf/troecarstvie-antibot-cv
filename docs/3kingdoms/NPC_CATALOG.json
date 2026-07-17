@@ -1,0 +1,2657 @@
+{
+  "generatedAt": "2026-07-17",
+  "identityContract": {
+    "areaObjectId": "runtime-only .b-control-area NPC/proxy data-id",
+    "canonicalName": "map XML display name; not a click identity",
+    "locationId": "parent world location identity",
+    "npcInstanceId": "runtime-only npc.php npc_id when observed",
+    "proxyNames": "runtime aliases such as Дом ... or Палатка ..."
+  },
+  "npcs": [
+    {
+      "areaObjectId": null,
+      "canonicalName": "Алхимик Ротнильд",
+      "innerPosition": "554,383",
+      "locationAliases": [
+        "Деревня ремесленников"
+      ],
+      "locationId": "145",
+      "locationName": "Деревня ремесленников",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Алхимик Филонид",
+      "innerPosition": "355,345",
+      "locationAliases": [
+        "Туманные Луга"
+      ],
+      "locationId": "121",
+      "locationName": "Туманные Луга",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Атаман Асиггка",
+      "innerPosition": "217,501",
+      "locationAliases": [
+        "Кощунов путь"
+      ],
+      "locationId": "153",
+      "locationName": "Кощунов путь",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Барышник Мирг",
+      "innerPosition": "600,142",
+      "locationAliases": [
+        "Древесные дома ховаргов"
+      ],
+      "locationId": "449",
+      "locationName": "Древесные дома ховаргов",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Барышник Темнар",
+      "innerPosition": "785,365",
+      "locationAliases": [
+        "Поселение ховаргов"
+      ],
+      "locationId": "441",
+      "locationName": "Поселение ховаргов",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Беглец Хокайт",
+      "innerPosition": "430,470",
+      "locationAliases": [
+        "Северный Громград"
+      ],
+      "locationId": "494",
+      "locationName": "Северный Громград",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Беглец Шакей",
+      "innerPosition": "505,360",
+      "locationAliases": [
+        "Южный Громград"
+      ],
+      "locationId": "485",
+      "locationName": "Южный Громград",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Безродный Войт",
+      "innerPosition": "430,470",
+      "locationAliases": [
+        "Северный Громград"
+      ],
+      "locationId": "494",
+      "locationName": "Северный Громград",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Безродный Хныш",
+      "innerPosition": "505,360",
+      "locationAliases": [
+        "Южный Громград"
+      ],
+      "locationId": "485",
+      "locationName": "Южный Громград",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Богатырь Тур",
+      "innerPosition": "346,248",
+      "locationAliases": [
+        "Городская площадь Арсы"
+      ],
+      "locationId": "102",
+      "locationName": "Городская площадь Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Братья Мерет и Герильд",
+      "innerPosition": "483,161",
+      "locationAliases": [
+        "Долина «Песнь Ветров»"
+      ],
+      "locationId": "149",
+      "locationName": "Долина «Песнь Ветров»",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ведун Кулия",
+      "innerPosition": "208,195",
+      "locationAliases": [
+        "Райские земи"
+      ],
+      "locationId": "161",
+      "locationName": "Райские земи",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ведун Такса",
+      "innerPosition": "429,79",
+      "locationAliases": [
+        "Курганы Бренности"
+      ],
+      "locationId": "110",
+      "locationName": "Курганы Бренности",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ведунья Ильмет",
+      "innerPosition": "429,79",
+      "locationAliases": [
+        "Курганы Бренности"
+      ],
+      "locationId": "110",
+      "locationName": "Курганы Бренности",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Великий Зарр",
+      "innerPosition": "220,175",
+      "locationAliases": [
+        "Храм Двуединого"
+      ],
+      "locationId": "457",
+      "locationName": "Храм Двуединого",
+      "marker": "chel_orange",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "hram_dvuedinogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ветеран Гестор",
+      "innerPosition": "333,218",
+      "locationAliases": [
+        "Поместья Беров"
+      ],
+      "locationId": "144",
+      "locationName": "Поместья Беров",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ветеран Тогерд",
+      "innerPosition": "340,288",
+      "locationAliases": [
+        "Чёрное капище"
+      ],
+      "locationId": "109",
+      "locationName": "Чёрное капище",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вещий ворон",
+      "innerPosition": "160,420",
+      "locationAliases": [
+        "Пещеры черных теней"
+      ],
+      "locationId": "131",
+      "locationName": "Пещеры черных теней",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воевода Аснерд",
+      "innerPosition": "141,409",
+      "locationAliases": [
+        "Прокалённое плато"
+      ],
+      "locationId": "111",
+      "locationName": "Прокалённое плато",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воевода Дунай",
+      "innerPosition": "208,103",
+      "locationAliases": [
+        "Городская площадь Куябы"
+      ],
+      "locationId": "135",
+      "locationName": "Городская площадь Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Военачальник Ворг",
+      "innerPosition": "600,142",
+      "locationAliases": [
+        "Древесные дома ховаргов"
+      ],
+      "locationId": "449",
+      "locationName": "Древесные дома ховаргов",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Военачальник Гадар",
+      "innerPosition": "785,365",
+      "locationAliases": [
+        "Поселение ховаргов"
+      ],
+      "locationId": "441",
+      "locationName": "Поселение ховаргов",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вожак Арргак",
+      "innerPosition": "1320,215",
+      "locationAliases": [
+        "Развалины Твердсхейма"
+      ],
+      "locationId": "442",
+      "locationName": "Развалины Твердсхейма",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вожак Мархарр",
+      "innerPosition": "1150,242",
+      "locationAliases": [
+        "Покинутый Дорборг"
+      ],
+      "locationId": "450",
+      "locationName": "Покинутый Дорборг",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вождь Барсар",
+      "innerPosition": "735,250",
+      "locationAliases": [
+        "Ледяные берега"
+      ],
+      "locationId": "351",
+      "locationName": "Ледяные берега",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вождь Гризлорк",
+      "innerPosition": "735,250",
+      "locationAliases": [
+        "Ледяные берега"
+      ],
+      "locationId": "351",
+      "locationName": "Ледяные берега",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вождь Медведарь",
+      "innerPosition": "980,180",
+      "locationAliases": [
+        "Водопад забвения"
+      ],
+      "locationId": "357",
+      "locationName": "Водопад забвения",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Вождь Тиграм",
+      "innerPosition": "980,180",
+      "locationAliases": [
+        "Водопад забвения"
+      ],
+      "locationId": "357",
+      "locationName": "Водопад забвения",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воин Надар",
+      "innerPosition": "407,127",
+      "locationAliases": [
+        "Пригород Куябы"
+      ],
+      "locationId": "172",
+      "locationName": "Пригород Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воитель Аспарт",
+      "innerPosition": "574,300",
+      "locationAliases": [
+        "Город Барбус"
+      ],
+      "locationId": "193",
+      "locationName": "Город Барбус",
+      "marker": "chel_orange",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воитель Герць",
+      "innerPosition": "346,248",
+      "locationAliases": [
+        "Городская площадь Арсы"
+      ],
+      "locationId": "102",
+      "locationName": "Городская площадь Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воитель Кронг",
+      "innerPosition": "574,300",
+      "locationAliases": [
+        "Город Барбус"
+      ],
+      "locationId": "193",
+      "locationName": "Город Барбус",
+      "marker": "chel_orange",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Воитель Ратша",
+      "innerPosition": "299,269",
+      "locationAliases": [
+        "Бездорожье"
+      ],
+      "locationId": "150",
+      "locationName": "Бездорожье",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Волхв Алстард",
+      "innerPosition": "141,409",
+      "locationAliases": [
+        "Прокалённое плато"
+      ],
+      "locationId": "111",
+      "locationName": "Прокалённое плато",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Волхв Вяземайт",
+      "innerPosition": "310,380",
+      "locationAliases": [
+        "Пригород Арсы"
+      ],
+      "locationId": "171",
+      "locationName": "Пригород Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ворожея Варга",
+      "innerPosition": "1320,215",
+      "locationAliases": [
+        "Развалины Твердсхейма"
+      ],
+      "locationId": "442",
+      "locationName": "Развалины Твердсхейма",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ворожея Шахра",
+      "innerPosition": "1150,242",
+      "locationAliases": [
+        "Покинутый Дорборг"
+      ],
+      "locationId": "450",
+      "locationName": "Покинутый Дорборг",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Герой Иггельд",
+      "innerPosition": "741,355",
+      "locationAliases": [
+        "Долина Иггельда"
+      ],
+      "locationId": "158",
+      "locationName": "Долина Иггельда",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Герой Рокош",
+      "innerPosition": "504,162",
+      "locationAliases": [
+        "Заросли терновника"
+      ],
+      "locationId": "119",
+      "locationName": "Заросли терновника",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Глубинник Вирри",
+      "innerPosition": "430,470",
+      "locationAliases": [
+        "Северный Громград"
+      ],
+      "locationId": "494",
+      "locationName": "Северный Громград",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Глубинник Дилми",
+      "innerPosition": "505,360",
+      "locationAliases": [
+        "Южный Громград"
+      ],
+      "locationId": "485",
+      "locationName": "Южный Громград",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Грайвар",
+      "innerPosition": "420,175",
+      "locationAliases": [
+        "Зверобожье капище"
+      ],
+      "locationId": "448",
+      "locationName": "Зверобожье капище",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Грайвар",
+      "innerPosition": "380,265",
+      "locationAliases": [
+        "Мольбище древних"
+      ],
+      "locationId": "440",
+      "locationName": "Мольбище древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Гранитус Горр",
+      "innerPosition": "610,345",
+      "locationAliases": [
+        "Подгорная тропа"
+      ],
+      "locationId": "493",
+      "locationName": "Подгорная тропа",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Гранитус Эрр",
+      "innerPosition": "660,315",
+      "locationAliases": [
+        "Путь в глубины"
+      ],
+      "locationId": "484",
+      "locationName": "Путь в глубины",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Десятник Берторд",
+      "innerPosition": "310,490",
+      "locationAliases": [
+        "Лагерь новобранцев"
+      ],
+      "locationId": "276",
+      "locationName": "Лагерь новобранцев",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zemli_otrokov.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Десятник Илемай",
+      "innerPosition": "630,310",
+      "locationAliases": [
+        "Поселение новобранцев"
+      ],
+      "locationId": "271",
+      "locationName": "Поселение новобранцев",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "kray_unosti.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Див Гарагон",
+      "innerPosition": "555,634",
+      "locationAliases": [
+        "Дебри кошмаров"
+      ],
+      "locationId": "320",
+      "locationName": "Дебри кошмаров",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Див Грохохон",
+      "innerPosition": "280,217",
+      "locationAliases": [
+        "Пристанище путешественников"
+      ],
+      "locationId": "312",
+      "locationName": "Пристанище путешественников",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Див Древогор",
+      "innerPosition": "190,420",
+      "locationAliases": [
+        "Стародубье"
+      ],
+      "locationId": "157",
+      "locationName": "Стародубье",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Диварь Дарадан",
+      "innerPosition": "516,126",
+      "locationAliases": [
+        "Чаща трепета"
+      ],
+      "locationId": "314",
+      "locationName": "Чаща трепета",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Диварь Фириет",
+      "innerPosition": "418,724",
+      "locationAliases": [
+        "Долина загадок"
+      ],
+      "locationId": "318",
+      "locationName": "Долина загадок",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Дракозница Яська",
+      "innerPosition": "208,195",
+      "locationAliases": [
+        "Райские земи"
+      ],
+      "locationId": "161",
+      "locationName": "Райские земи",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Дружинник Варард",
+      "innerPosition": "459,134",
+      "locationAliases": [
+        "Брусничные заросли"
+      ],
+      "locationId": "156",
+      "locationName": "Брусничные заросли",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Дружинник Радур",
+      "innerPosition": "375,325",
+      "locationAliases": [
+        "Кряж Обречённости"
+      ],
+      "locationId": "117",
+      "locationName": "Кряж Обречённости",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жертвенник Иллидора",
+      "innerPosition": "270,190",
+      "locationAliases": [
+        "Долина теней"
+      ],
+      "locationId": "547",
+      "locationName": "Долина теней",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "pystina_vechnoi_tmi.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жертвенник Иллидора",
+      "innerPosition": "220,140",
+      "locationAliases": [
+        "Сумрачный дол"
+      ],
+      "locationId": "550",
+      "locationName": "Сумрачный дол",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zlovescjie_peski.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Житель пустыни Арон",
+      "innerPosition": "220,140",
+      "locationAliases": [
+        "Сумрачный дол"
+      ],
+      "locationId": "550",
+      "locationName": "Сумрачный дол",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zlovescjie_peski.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Житель пустыни Эгир",
+      "innerPosition": "270,190",
+      "locationAliases": [
+        "Долина теней"
+      ],
+      "locationId": "547",
+      "locationName": "Долина теней",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "pystina_vechnoi_tmi.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жрец Буревей",
+      "innerPosition": "145,605",
+      "locationAliases": [
+        "Цитадель дэвов"
+      ],
+      "locationId": "354",
+      "locationName": "Цитадель дэвов",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жрец Вьюгий",
+      "innerPosition": "250,520",
+      "locationAliases": [
+        "Владения дэвов"
+      ],
+      "locationId": "360",
+      "locationName": "Владения дэвов",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жрец Разумир",
+      "innerPosition": "217,501",
+      "locationAliases": [
+        "Кощунов путь"
+      ],
+      "locationId": "153",
+      "locationName": "Кощунов путь",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жрец Холард",
+      "innerPosition": "333,218",
+      "locationAliases": [
+        "Поместья Беров"
+      ],
+      "locationId": "144",
+      "locationName": "Поместья Беров",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Жрец Яросвет",
+      "innerPosition": "326,93",
+      "locationAliases": [
+        "Ущелье Мрака"
+      ],
+      "locationId": "129",
+      "locationName": "Ущелье Мрака",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Заводчик Брокий",
+      "innerPosition": "749,568",
+      "locationAliases": [
+        "Лес Призраков"
+      ],
+      "locationId": "201",
+      "locationName": "Лес Призраков",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Заводчик Тахай",
+      "innerPosition": "616,180",
+      "locationAliases": [
+        "Лес Обречённых"
+      ],
+      "locationId": "202",
+      "locationName": "Лес Обречённых",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Знатный бер Черево",
+      "innerPosition": "333,218",
+      "locationAliases": [
+        "Поместья Беров"
+      ],
+      "locationId": "144",
+      "locationName": "Поместья Беров",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Знахарка Расцвея",
+      "innerPosition": "554,383",
+      "locationAliases": [
+        "Деревня ремесленников"
+      ],
+      "locationId": "145",
+      "locationName": "Деревня ремесленников",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Знахарь Верст",
+      "innerPosition": "106,328",
+      "locationAliases": [
+        "Жемчужный залив"
+      ],
+      "locationId": "124",
+      "locationName": "Жемчужный залив",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Знахарь Керай",
+      "innerPosition": "270,379",
+      "locationAliases": [
+        "Златые нивы"
+      ],
+      "locationId": "162",
+      "locationName": "Златые нивы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Идол Перуна",
+      "innerPosition": "310,490",
+      "locationAliases": [
+        "Лагерь новобранцев"
+      ],
+      "locationId": "276",
+      "locationName": "Лагерь новобранцев",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zemli_otrokov.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Идол Перуна",
+      "innerPosition": "347,706",
+      "locationAliases": [
+        "Майские овраги"
+      ],
+      "locationId": "151",
+      "locationName": "Майские овраги",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Искатель Бородор",
+      "innerPosition": "185,436",
+      "locationAliases": [
+        "Дикий предел"
+      ],
+      "locationId": "313",
+      "locationName": "Дикий предел",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Искатель Световей",
+      "innerPosition": "516,266",
+      "locationAliases": [
+        "Темный рубеж"
+      ],
+      "locationId": "319",
+      "locationName": "Темный рубеж",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Кайри",
+      "innerPosition": "895,235",
+      "locationAliases": [
+        "Дюны забвения"
+      ],
+      "locationId": "549",
+      "locationName": "Дюны забвения",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zlovescjie_peski.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Кайри",
+      "innerPosition": "690,65",
+      "locationAliases": [
+        "Раскаленные склоны"
+      ],
+      "locationId": "546",
+      "locationName": "Раскаленные склоны",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "pystina_vechnoi_tmi.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Капитан Грок",
+      "innerPosition": "574,300",
+      "locationAliases": [
+        "Город Барбус"
+      ],
+      "locationId": "193",
+      "locationName": "Город Барбус",
+      "marker": "chel_orange",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Князь Антланец",
+      "innerPosition": "254,113",
+      "locationAliases": [
+        "Медвежьи колки"
+      ],
+      "locationId": "155",
+      "locationName": "Медвежьи колки",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Колдунья Вилена",
+      "innerPosition": "243,295",
+      "locationAliases": [
+        "Длань Рода"
+      ],
+      "locationId": "128",
+      "locationName": "Длань Рода",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Коллекционер Дорильд",
+      "innerPosition": "472,143",
+      "locationAliases": [
+        "Просторье"
+      ],
+      "locationId": "163",
+      "locationName": "Просторье",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Крестьянка Василиса",
+      "innerPosition": "366,318",
+      "locationAliases": [
+        "Пристанище трёх ветров"
+      ],
+      "locationId": "127",
+      "locationName": "Пристанище трёх ветров",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Кудесник Марилий",
+      "innerPosition": "574,300",
+      "locationAliases": [
+        "Город Барбус"
+      ],
+      "locationId": "193",
+      "locationName": "Город Барбус",
+      "marker": "chel_orange",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Кузнец Жаробой",
+      "innerPosition": "595,335",
+      "locationAliases": [
+        "Студёное ущелье"
+      ],
+      "locationId": "352",
+      "locationName": "Студёное ущелье",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Кузнец Чугуний",
+      "innerPosition": "640,280",
+      "locationAliases": [
+        "Заколдованный перевал"
+      ],
+      "locationId": "358",
+      "locationName": "Заколдованный перевал",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Купец Крумта",
+      "innerPosition": "208,103",
+      "locationAliases": [
+        "Городская площадь Куябы"
+      ],
+      "locationId": "135",
+      "locationName": "Городская площадь Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Куявский посол Щажард",
+      "innerPosition": "551,486",
+      "locationAliases": [
+        "Селение Кочевников"
+      ],
+      "locationId": "112",
+      "locationName": "Селение Кочевников",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Маг Барвник",
+      "innerPosition": "407,127",
+      "locationAliases": [
+        "Пригород Куябы"
+      ],
+      "locationId": "172",
+      "locationName": "Пригород Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Моргрод",
+      "innerPosition": "420,175",
+      "locationAliases": [
+        "Зверобожье капище"
+      ],
+      "locationId": "448",
+      "locationName": "Зверобожье капище",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Моргрод",
+      "innerPosition": "380,265",
+      "locationAliases": [
+        "Мольбище древних"
+      ],
+      "locationId": "440",
+      "locationName": "Мольбище древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Моряк Дэсигор",
+      "innerPosition": "150,190",
+      "locationAliases": [
+        "Порт реки Данапр"
+      ],
+      "locationId": "165",
+      "locationName": "Порт реки Данапр",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "port_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Моряк Кентур",
+      "innerPosition": "141,150",
+      "locationAliases": [
+        "Порт безбрежного моря"
+      ],
+      "locationId": "125",
+      "locationName": "Порт безбрежного моря",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "port_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Мститель Безар",
+      "innerPosition": "1320,215",
+      "locationAliases": [
+        "Развалины Твердсхейма"
+      ],
+      "locationId": "442",
+      "locationName": "Развалины Твердсхейма",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Мститель Хагарад",
+      "innerPosition": "1150,242",
+      "locationAliases": [
+        "Покинутый Дорборг"
+      ],
+      "locationId": "450",
+      "locationName": "Покинутый Дорборг",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Мудрец Ладей",
+      "innerPosition": "483,161",
+      "locationAliases": [
+        "Долина «Песнь Ветров»"
+      ],
+      "locationId": "149",
+      "locationName": "Долина «Песнь Ветров»",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Некромант Тадор",
+      "innerPosition": "429,429",
+      "locationAliases": [
+        "Вязкие топи"
+      ],
+      "locationId": "159",
+      "locationName": "Вязкие топи",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Отшельник Дорон",
+      "innerPosition": "470,356",
+      "locationAliases": [
+        "Просторы Безмолвия"
+      ],
+      "locationId": "126",
+      "locationName": "Просторы Безмолвия",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Отшельник Могор",
+      "innerPosition": "437,378",
+      "locationAliases": [
+        "Угрюмая лощина"
+      ],
+      "locationId": "164",
+      "locationName": "Угрюмая лощина",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Охотник Агравур",
+      "innerPosition": "190,420",
+      "locationAliases": [
+        "Стародубье"
+      ],
+      "locationId": "157",
+      "locationName": "Стародубье",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Первопроходец Агир",
+      "innerPosition": "420,475",
+      "locationAliases": [
+        "Оледеневшая долина"
+      ],
+      "locationId": "353",
+      "locationName": "Оледеневшая долина",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Первопроходец Борб",
+      "innerPosition": "500,400",
+      "locationAliases": [
+        "Застывшее озеро"
+      ],
+      "locationId": "359",
+      "locationName": "Застывшее озеро",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Перевозчик Мирзат",
+      "innerPosition": "250,510",
+      "locationAliases": [
+        "Брега забвения"
+      ],
+      "locationId": "495",
+      "locationName": "Брега забвения",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Перевозчик Мирзат",
+      "innerPosition": "344,525",
+      "locationAliases": [
+        "Пристань печали"
+      ],
+      "locationId": "486",
+      "locationName": "Пристань печали",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Песчаный царь",
+      "innerPosition": "895,235",
+      "locationAliases": [
+        "Дюны забвения"
+      ],
+      "locationId": "549",
+      "locationName": "Дюны забвения",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zlovescjie_peski.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Песчаный царь",
+      "innerPosition": "690,65",
+      "locationAliases": [
+        "Раскаленные склоны"
+      ],
+      "locationId": "546",
+      "locationName": "Раскаленные склоны",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "pystina_vechnoi_tmi.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Повар Торвар",
+      "innerPosition": "366,318",
+      "locationAliases": [
+        "Пристанище трёх ветров"
+      ],
+      "locationId": "127",
+      "locationName": "Пристанище трёх ветров",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Погонщик Оксайт",
+      "innerPosition": "551,486",
+      "locationAliases": [
+        "Селение Кочевников"
+      ],
+      "locationId": "112",
+      "locationName": "Селение Кочевников",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Полководец Щецин",
+      "innerPosition": "310,380",
+      "locationAliases": [
+        "Пригород Арсы"
+      ],
+      "locationId": "171",
+      "locationName": "Пригород Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Принцесса Блестка",
+      "innerPosition": "295,56",
+      "locationAliases": [
+        "Площадь мудрого Олега"
+      ],
+      "locationId": "235",
+      "locationName": "Площадь мудрого Олега",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Принцесса Итания",
+      "innerPosition": "208,103",
+      "locationAliases": [
+        "Городская площадь Куябы"
+      ],
+      "locationId": "135",
+      "locationName": "Городская площадь Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Провидец Базилий",
+      "innerPosition": "347,706",
+      "locationAliases": [
+        "Майские овраги"
+      ],
+      "locationId": "151",
+      "locationName": "Майские овраги",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Разбойник Аскорд",
+      "innerPosition": "427,202",
+      "locationAliases": [
+        "Земли Пращуров"
+      ],
+      "locationId": "122",
+      "locationName": "Земли Пращуров",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Разбойник Ботай",
+      "innerPosition": "741,355",
+      "locationAliases": [
+        "Долина Иггельда"
+      ],
+      "locationId": "158",
+      "locationName": "Долина Иггельда",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "temnolesie.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ремесленник Перест",
+      "innerPosition": "554,383",
+      "locationAliases": [
+        "Деревня ремесленников"
+      ],
+      "locationId": "145",
+      "locationName": "Деревня ремесленников",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ремесленник Сулемайт",
+      "innerPosition": "141,409",
+      "locationAliases": [
+        "Прокалённое плато"
+      ],
+      "locationId": "111",
+      "locationName": "Прокалённое плато",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Рубака Гард",
+      "innerPosition": "326,93",
+      "locationAliases": [
+        "Ущелье Мрака"
+      ],
+      "locationId": "129",
+      "locationName": "Ущелье Мрака",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Рыбак Нариет",
+      "innerPosition": "106,328",
+      "locationAliases": [
+        "Жемчужный залив"
+      ],
+      "locationId": "124",
+      "locationName": "Жемчужный залив",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Рыбак Торик",
+      "innerPosition": "576,137",
+      "locationAliases": [
+        "Рыбацкое селение"
+      ],
+      "locationId": "146",
+      "locationName": "Рыбацкое селение",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Сирота Вея",
+      "innerPosition": "145,601",
+      "locationAliases": [
+        "Склад оружия"
+      ],
+      "locationId": "301",
+      "locationName": "Склад оружия",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "zemli_otrokov.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Сирота Лиша",
+      "innerPosition": "461,453",
+      "locationAliases": [
+        "Оружейная"
+      ],
+      "locationId": "273",
+      "locationName": "Оружейная",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "kray_unosti.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Следопыт Олекса",
+      "innerPosition": "310,380",
+      "locationAliases": [
+        "Пригород Арсы"
+      ],
+      "locationId": "171",
+      "locationName": "Пригород Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Служитель Дилей",
+      "innerPosition": "324,129",
+      "locationAliases": [
+        "Древние Врата"
+      ],
+      "locationId": "188",
+      "locationName": "Древние Врата",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "nasledie_drevnih.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Служитель Фаремайт",
+      "innerPosition": "230,150",
+      "locationAliases": [
+        "Врата Древних"
+      ],
+      "locationId": "185",
+      "locationName": "Врата Древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "nasledie_drevnih_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Сотник Рипей",
+      "innerPosition": "407,127",
+      "locationAliases": [
+        "Пригород Куябы"
+      ],
+      "locationId": "172",
+      "locationName": "Пригород Куябы",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старатель Гутай",
+      "innerPosition": "554,383",
+      "locationAliases": [
+        "Деревня ремесленников"
+      ],
+      "locationId": "145",
+      "locationName": "Деревня ремесленников",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старатель Урайт",
+      "innerPosition": "551,486",
+      "locationAliases": [
+        "Селение Кочевников"
+      ],
+      "locationId": "112",
+      "locationName": "Селение Кочевников",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старейший Дилим",
+      "innerPosition": "505,360",
+      "locationAliases": [
+        "Южный Громград"
+      ],
+      "locationId": "485",
+      "locationName": "Южный Громград",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старейший Мидин",
+      "innerPosition": "430,470",
+      "locationAliases": [
+        "Северный Громград"
+      ],
+      "locationId": "494",
+      "locationName": "Северный Громград",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старейшина Гарг",
+      "innerPosition": "600,142",
+      "locationAliases": [
+        "Древесные дома ховаргов"
+      ],
+      "locationId": "449",
+      "locationName": "Древесные дома ховаргов",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старейшина Громгорд",
+      "innerPosition": "785,365",
+      "locationAliases": [
+        "Поселение ховаргов"
+      ],
+      "locationId": "441",
+      "locationName": "Поселение ховаргов",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старец Льдяст",
+      "innerPosition": "455,150",
+      "locationAliases": [
+        "Лунное Плато"
+      ],
+      "locationId": "116",
+      "locationName": "Лунное Плато",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Старец Норид",
+      "innerPosition": "223,141",
+      "locationAliases": [
+        "Заброшенные копи"
+      ],
+      "locationId": "123",
+      "locationName": "Заброшенные копи",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Староста Добрей",
+      "innerPosition": "1150,160",
+      "locationAliases": [
+        "Северные угодья"
+      ],
+      "locationId": "356",
+      "locationName": "Северные угодья",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Староста Радок",
+      "innerPosition": "1020,120",
+      "locationAliases": [
+        "Рипейские предместья"
+      ],
+      "locationId": "350",
+      "locationName": "Рипейские предместья",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "mountains_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Стихийник пламени",
+      "innerPosition": "185,500",
+      "locationAliases": [
+        "Бастион хлада и пламени"
+      ],
+      "locationId": "487",
+      "locationName": "Бастион хлада и пламени",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Стихийник пламени",
+      "innerPosition": "150,595",
+      "locationAliases": [
+        "Оплот великих стихий"
+      ],
+      "locationId": "496",
+      "locationName": "Оплот великих стихий",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Стихийник хлада",
+      "innerPosition": "185,500",
+      "locationAliases": [
+        "Бастион хлада и пламени"
+      ],
+      "locationId": "487",
+      "locationName": "Бастион хлада и пламени",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Стихийник хлада",
+      "innerPosition": "150,595",
+      "locationAliases": [
+        "Оплот великих стихий"
+      ],
+      "locationId": "496",
+      "locationName": "Оплот великих стихий",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Страж Всебой",
+      "innerPosition": "540,455",
+      "locationAliases": [
+        "Застава храбрых"
+      ],
+      "locationId": "310",
+      "locationName": "Застава храбрых",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Страж Мечеслав",
+      "innerPosition": "372,349",
+      "locationAliases": [
+        "Врата отважных"
+      ],
+      "locationId": "316",
+      "locationName": "Врата отважных",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Торгаш Жадномир",
+      "innerPosition": "765,260",
+      "locationAliases": [
+        "Северные врата подземья"
+      ],
+      "locationId": "492",
+      "locationName": "Северные врата подземья",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Торгаш Серебрян",
+      "innerPosition": "905,250",
+      "locationAliases": [
+        "Южные врата подземья"
+      ],
+      "locationId": "483",
+      "locationName": "Южные врата подземья",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ripeyskoe_podzemie_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Торговец Богдан",
+      "innerPosition": "346,248",
+      "locationAliases": [
+        "Городская площадь Арсы"
+      ],
+      "locationId": "102",
+      "locationName": "Городская площадь Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Торговец Златослав",
+      "innerPosition": "408,335",
+      "locationAliases": [
+        "Ярмарка дивностей"
+      ],
+      "locationId": "311",
+      "locationName": "Ярмарка дивностей",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_artania.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Торговец Рубиний",
+      "innerPosition": "485,485",
+      "locationAliases": [
+        "Перекресток чудес"
+      ],
+      "locationId": "317",
+      "locationName": "Перекресток чудес",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "evil_land_kuyavia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Укротительница Зария",
+      "innerPosition": "295,56",
+      "locationAliases": [
+        "Площадь мудрого Олега"
+      ],
+      "locationId": "235",
+      "locationName": "Площадь мудрого Олега",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Укротительница Малиса",
+      "innerPosition": "182,350",
+      "locationAliases": [
+        "Площадь славного Таргитая"
+      ],
+      "locationId": "236",
+      "locationName": "Площадь славного Таргитая",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ученик Сангор",
+      "innerPosition": "380,265",
+      "locationAliases": [
+        "Мольбище древних"
+      ],
+      "locationId": "440",
+      "locationName": "Мольбище древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Ученик Шагард",
+      "innerPosition": "420,175",
+      "locationAliases": [
+        "Зверобожье капище"
+      ],
+      "locationId": "448",
+      "locationName": "Зверобожье капище",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Химри",
+      "innerPosition": "420,175",
+      "locationAliases": [
+        "Зверобожье капище"
+      ],
+      "locationId": "448",
+      "locationName": "Зверобожье капище",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Химри",
+      "innerPosition": "380,265",
+      "locationAliases": [
+        "Мольбище древних"
+      ],
+      "locationId": "440",
+      "locationName": "Мольбище древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Хранитель леса Меривой",
+      "innerPosition": "616,180",
+      "locationAliases": [
+        "Лес Обречённых"
+      ],
+      "locationId": "202",
+      "locationName": "Лес Обречённых",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Хранитель леса Франк",
+      "innerPosition": "749,568",
+      "locationAliases": [
+        "Лес Призраков"
+      ],
+      "locationId": "201",
+      "locationName": "Лес Призраков",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "barbusia.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царевич Придон",
+      "innerPosition": "310,380",
+      "locationAliases": [
+        "Пригород Арсы"
+      ],
+      "locationId": "171",
+      "locationName": "Пригород Арсы",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Arsa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царевич Ютлан",
+      "innerPosition": "355,345",
+      "locationAliases": [
+        "Туманные Луга"
+      ],
+      "locationId": "121",
+      "locationName": "Туманные Луга",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царица Иргильда",
+      "innerPosition": "141,809",
+      "locationAliases": [
+        "Леса вечности"
+      ],
+      "locationId": "152",
+      "locationName": "Леса вечности",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "luga_velesa.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царь времени Кинос",
+      "innerPosition": "375,325",
+      "locationAliases": [
+        "Кряж Обречённости"
+      ],
+      "locationId": "117",
+      "locationName": "Кряж Обречённости",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царь Скилл",
+      "innerPosition": "504,162",
+      "locationAliases": [
+        "Заросли терновника"
+      ],
+      "locationId": "119",
+      "locationName": "Заросли терновника",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_pechali.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Царь Тулей",
+      "innerPosition": "182,350",
+      "locationAliases": [
+        "Площадь славного Таргитая"
+      ],
+      "locationId": "236",
+      "locationName": "Площадь славного Таргитая",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "city_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Чародей Бортник",
+      "innerPosition": "472,143",
+      "locationAliases": [
+        "Просторье"
+      ],
+      "locationId": "163",
+      "locationName": "Просторье",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "dolina_jisni.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Чародей Горасвильд",
+      "innerPosition": "333,218",
+      "locationAliases": [
+        "Поместья Беров"
+      ],
+      "locationId": "144",
+      "locationName": "Поместья Беров",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "prigorod_Kuyaba.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Чародей Ламтаил",
+      "innerPosition": "427,202",
+      "locationAliases": [
+        "Земли Пращуров"
+      ],
+      "locationId": "122",
+      "locationName": "Земли Пращуров",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "ravnina_nebesnogo.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Чёрный маг Вагард",
+      "innerPosition": "225,305",
+      "locationAliases": [
+        "След Велета"
+      ],
+      "locationId": "132",
+      "locationName": "След Велета",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Шаман Баравар",
+      "innerPosition": "420,175",
+      "locationAliases": [
+        "Зверобожье капище"
+      ],
+      "locationId": "448",
+      "locationName": "Зверобожье капище",
+      "marker": "chel_green",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "neprogladnaya_chasha.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Шаман Орг",
+      "innerPosition": "380,265",
+      "locationAliases": [
+        "Мольбище древних"
+      ],
+      "locationId": "440",
+      "locationName": "Мольбище древних",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "besprosvetye.xml"
+      ]
+    },
+    {
+      "areaObjectId": null,
+      "canonicalName": "Экзорцист Фелиор",
+      "innerPosition": "160,420",
+      "locationAliases": [
+        "Пещеры черных теней"
+      ],
+      "locationId": "131",
+      "locationName": "Пещеры черных теней",
+      "marker": "chel_gray",
+      "npcInstanceId": null,
+      "proxyNames": [],
+      "sources": [
+        "gori_kosti_yashera.xml"
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "sources": {
+    "scope": "public regional map XML object[id^=chel_]",
+    "world": "https://3kingdoms.ru/images/data/areas/world_conf.xml"
+  }
+}

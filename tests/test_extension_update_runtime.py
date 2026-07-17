@@ -12,16 +12,16 @@ def test_extension_update_runtime_is_wired_without_new_permissions() -> None:
     popup_html = Path("browser_injector/popup.html").read_text(encoding="utf-8")
 
     assert set(manifest["permissions"]) == {"storage", "tabs"}
-    assert manifest["version"] == "0.3.21"
+    assert manifest["version"] == "0.3.30"
     assert 'importScripts("update_runtime.js")' in background
     assert "registerExtensionUpdateLifecycle" in background
     assert "startExtensionUpdateMonitor" in background
     assert "const extensionUpdateLifecycle" in background
     assert "ready: extensionUpdateLifecycle.startup" in background
     assert "const extensionUpdateMonitor" in background
-    assert "void extensionUpdateMonitor.checkNow()" in background
-    assert 'const bridgeVersion = "2026-07-13-quest-scope-v52"' in Path("browser_injector/content.js").read_text(encoding="utf-8")
-    assert 'const BRIDGE_VERSION = "2026-07-13-quest-scope-v52"' in background
+    assert "void extensionUpdateMonitor.checkNow()" not in background
+    assert 'const bridgeVersion = "2026-07-17-fight-owner-first-v68"' in Path("browser_injector/content.js").read_text(encoding="utf-8")
+    assert 'const BRIDGE_VERSION = "2026-07-17-fight-owner-first-v67"' in background
     assert 'const status = await api("/status")' in popup
     assert "currentClient?.version" in popup
     assert "unknown-pre-updater" in popup

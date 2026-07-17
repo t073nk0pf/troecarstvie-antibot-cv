@@ -42,3 +42,26 @@ def test_world_registry_finds_saved_directed_path(tmp_path) -> None:
     registry.observe_route({"currentLocationId": "2", "nextTransition": {"locId": "3", "name": "three"}})
     assert registry.shortest_path("1", "3") == ("2", "3")
     assert registry.shortest_path("3", "1") is None
+
+
+def test_npc_instance_id_is_scoped_by_parent_location(tmp_path) -> None:
+    registry = WorldRegistry(tmp_path / "world.json")
+    registry.observe_area_npcs({
+        "location": {"id": "122", "name": "Земли Пращуров"},
+        "items": [{"dataId": "0", "name": "Дом Аскорда"}],
+    })
+    registry.observe_area_npcs({
+        "location": {"id": "128", "name": "Длань Рода"},
+        "items": [{"dataId": "0", "name": "Палатка Вилены"}],
+    })
+
+    snapshot = {
+        "npcId": "0",
+        "questActions": [{"npcInstanceId": "81"}],
+        "dialogActions": [],
+    }
+    assert registry.observe_npc_dialog(snapshot) is False
+    assert registry.observe_npc_dialog(snapshot, location_id="122") is True
+
+    assert registry.data["npcs"]["122:0"]["npcInstanceId"] == "81"
+    assert "npcInstanceId" not in registry.data["npcs"]["128:0"]

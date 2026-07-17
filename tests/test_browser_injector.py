@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -31,8 +32,124 @@ def test_content_command_timeout_allows_inventory_delay() -> None:
     assert "timeoutForPageCommand" in content
     assert "inventoryOpenDelayMs" in content
     assert "Number.isFinite(rawInventoryDelay)" in content
-    assert "inventoryDelay + 5000" in content
+    assert "inventoryDelay > 0 ? inventoryDelay + 5000 : 0" in content
     assert "Math.min(25000, Math.max(" in content
+
+
+def test_content_uses_long_poll_instead_of_350ms_interval() -> None:
+    content = Path("browser_injector/content.js").read_text(encoding="utf-8")
+    assert 'params.set("wait", "25")' in content
+    assert "window.setInterval(poll, 25000)" in content
+    assert "window.setInterval(poll, 350)" not in content
+    background = Path("browser_injector/background.js").read_text(encoding="utf-8")
+    assert "extensionUpdateMonitor.checkNow()" not in background
+
+
+def test_injector_wait_is_interruptible_with_bounded_latency() -> None:
+    server = BrowserInjectorServer(port=0)
+    cancelled = threading.Event()
+    timer = threading.Timer(0.05, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    result = server.execute("probe_page", timeout_s=5.0, cancellation_event=cancelled)
+    elapsed = time.monotonic() - started
+    timer.cancel()
+    server.stop()
+
+    assert result.ok is False
+    assert result.message == "injector_cancelled"
+    assert elapsed < 0.2
+
+
+def test_content_transport_overwrites_caller_claimed_client_provenance() -> None:
+    content = Path("browser_injector/content.js").read_text(encoding="utf-8")
+
+    assert "const transportPayload = {" in content
+    assert "...payload," in content
+    assert "transport: { clientId }," in content
+    assert "payload: transportPayload" in content
+    assert content.index("...payload,") < content.index("transport: { clientId },")
+
+
+def test_content_transport_behavior_rejects_nested_and_primitive_client_spoofs() -> None:
+    script = r'''
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/content.js", "utf8");
+const listeners = {};
+const pageCommands = [];
+let intervalCallback = null;
+let nextCount = 0;
+const commands = [
+  {id:"nested", type:"procurement_observation_snapshot", payload:{
+    transport:{clientId:"client-tab-a"}, metadata:{clientId:"client-tab-a"}, primitive:"preserved",
+  }},
+  {id:"primitive", type:"procurement_observation_snapshot", payload:"client-tab-a"},
+];
+const document = {
+  title:"Test", documentElement:{
+    dataset:{},
+    appendChild(script) { queueMicrotask(() => script.onload()); },
+  },
+  createElement() { return {setAttribute(){}, remove(){}, onload:null, onerror:null}; },
+};
+const root = {
+  location:{href:"https://3kingdoms.ru/auction.php"}, document,
+  addEventListener(type, callback) { listeners[type] = callback; },
+  removeEventListener() {},
+  postMessage(message) {
+    if (!message || !message.command) return;
+    pageCommands.push(message.command);
+    queueMicrotask(() => listeners.message({source:root, data:{
+      source:message.source.replace("content", "injector"), token:message.token, ok:true, message:"{}",
+    }}));
+  },
+  setTimeout, clearTimeout,
+  setInterval(callback) { intervalCallback = callback; return 1; },
+};
+root.top = root; root.window = root;
+const chrome = {
+  runtime:{
+    lastError:null,
+    getURL(path) { return `chrome-extension://test/${path}`; },
+    onMessage:{addListener(){}},
+    sendMessage(message, callback) {
+      if (message.type === "antibot-cv-tab-identity") {
+        callback({ok:true, clientId:"client-tab-b", profileId:"profile-b", tabId:22});
+        return;
+      }
+      const request = message.request || {};
+      if (request.path && request.path.startsWith("/next")) {
+        callback({ok:true, data:{command:commands[nextCount++] || null}});
+        return;
+      }
+      if (request.path === "/ack") {
+        callback({ok:true, data:{ok:true}});
+        if (nextCount < commands.length) setTimeout(() => intervalCallback(), 0);
+        return;
+      }
+      callback({ok:false, error:"unexpected"});
+    },
+  },
+};
+vm.runInNewContext(source, {
+  window:root, document, chrome, crypto:{getRandomValues(values){ values.fill(7); return values; }},
+  Uint32Array, URLSearchParams, Promise, setTimeout, clearTimeout, queueMicrotask,
+});
+(async () => {
+  const deadline = Date.now() + 1000;
+  while (pageCommands.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(pageCommands.length, 2);
+  assert.strictEqual(pageCommands[0].payload.transport.clientId, "client-tab-b");
+  assert.strictEqual(pageCommands[0].payload.primitive, "preserved");
+  assert.strictEqual(pageCommands[0].payload.metadata.clientId, "client-tab-a");
+  assert.deepStrictEqual(Object.keys(pageCommands[1].payload), ["transport"]);
+  assert.strictEqual(pageCommands[1].payload.transport.clientId, "client-tab-b");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+'''
+    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_content_exposes_current_client_to_popup() -> None:
@@ -46,6 +163,42 @@ def test_content_exposes_current_client_to_popup() -> None:
     assert "chrome.tabs.query({ active: true, currentWindow: true })" in popup
     assert "chrome.tabs.sendMessage" in popup
     assert "tabs" in manifest["permissions"]
+
+
+def test_popup_exposes_damage_boost_chance_control() -> None:
+    popup_html = Path("browser_injector/popup.html").read_text(encoding="utf-8")
+    popup_js = Path("browser_injector/popup.js").read_text(encoding="utf-8")
+
+    assert 'id="battleDamageBoostChancePercent"' in popup_html
+    assert 'type="range"' in popup_html
+    assert 'id="battleDamageBoostChanceValue"' in popup_html
+    assert '"battleDamageBoostChancePercent"' in popup_js
+    assert "renderDamageBoostChance" in popup_js
+
+
+def test_popup_exposes_autonomous_quest_cycle_button() -> None:
+    popup_html = Path("browser_injector/popup.html").read_text(encoding="utf-8")
+    popup_js = Path("browser_injector/popup.js").read_text(encoding="utf-8")
+
+    assert 'id="questRunButton"' in popup_html
+    assert "Выполнять квесты" in popup_html
+    assert "async function startQuestBot()" in popup_js
+    assert "Для реального выполнения квестов включи live" in popup_js
+    assert "settings.autonomousQuestDirector = true" in popup_js
+    assert "settings.autoNavigateQuestTargets = true" in popup_js
+    assert "settings.openHuntOnStart = false" in popup_js
+    assert 'settings.requiredCharacterName = ""' in popup_js
+
+
+def test_popup_plain_start_forces_non_quest_farm_mode() -> None:
+    popup_js = Path("browser_injector/popup.js").read_text(encoding="utf-8")
+    plain_start = popup_js.split("async function startBot()", 1)[1].split(
+        "async function startQuestBot()", 1
+    )[0]
+
+    assert "settings.autonomousQuestDirector = false" in plain_start
+    assert "settings.autoNavigateQuestTargets = false" in plain_start
+    assert "settings.openHuntOnStart = true" in plain_start
 
 
 def test_content_injects_page_bridge_as_utf8_for_legacy_game_document() -> None:
@@ -389,6 +542,18 @@ def test_browser_injector_rebinds_stale_document_client_to_same_profile_tab() ->
     assert result.ok is True
     assert result.message == "rebound"
     assert result.client_id == "new-client"
+
+
+def test_browser_client_registry_prunes_stale_entries_and_caps_size() -> None:
+    server = BrowserInjectorServer(port=0)
+    with server._lock:  # noqa: SLF001 - focused retention-policy test.
+        server._record_client_locked("stale", CURRENT_BRIDGE_VERSION)  # noqa: SLF001
+        server._clients["stale"]["last_seen"] -= server.CLIENT_TTL_S + 1  # noqa: SLF001
+        for index in range(server.MAX_CLIENTS + 5):
+            server._record_client_locked(f"client-{index}", CURRENT_BRIDGE_VERSION)  # noqa: SLF001
+        assert "stale" not in server._clients  # noqa: SLF001
+        assert len(server._clients) == server.MAX_CLIENTS  # noqa: SLF001
+        assert "client-0" not in server._clients  # noqa: SLF001
 
 
 def test_browser_injector_requires_explicit_client_when_multiple_recent_clients() -> None:

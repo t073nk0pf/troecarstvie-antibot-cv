@@ -41,6 +41,16 @@ def area(*items: dict[str, object], name: str = "Туманные луга") -> 
     }
 
 
+def test_parse_dative_npc_handoff_without_preposition() -> None:
+    parsed = parse_dialogue_objective(entry(
+        objective="Отправляйтесь ремесленнику Сулемайту на Прокалённое плато и отдайте ему полученную книгу.",
+        navigation=(MappingProxyType({"text": "Прокалённое плато", "target": "Прокалённое плато"}),),
+    ))
+
+    assert parsed.npc_query == "ремесленнику Сулемайту"
+    assert parsed.location == "Прокалённое плато"
+
+
 def dialog(**updates: object) -> dict[str, object]:
     snapshot: dict[str, object] = {
         "ok": True,
@@ -136,10 +146,24 @@ def test_route_and_area_lookup_emit_exact_snapshot_bound_npc_action() -> None:
         "expected_location_id": "121",
         "npc_id": "9",
         "expected_name": "Алхимик Филонид",
-        "expected_dialog_name": "Алхимик Филонид",
+        "expected_dialog_name": "алхимику Филониду",
         "quest_id": "246",
     }
     assert runtime.acknowledge(decision).phase is QuestDialoguePhase.NPC_DIALOG
+
+
+def test_area_lookup_accepts_zero_based_npc_identity() -> None:
+    runtime = QuestDialogueRuntime()
+    runtime.begin(entry(), already_at_location=True)
+
+    decision = runtime.decide_area_npc(
+        area({"dataId": "0", "name": "Дом Филонида", "actionable": True})
+    )
+
+    assert decision.intent is QuestDialogueIntent.OPEN_NPC
+    assert decision.action_metadata["npc_id"] == "0"
+    assert decision.action_metadata["expected_name"] == "Дом Филонида"
+    assert decision.action_metadata["expected_dialog_name"] == "алхимику Филониду"
 
 
 def test_area_lookup_rejects_wrong_location_and_ambiguous_stem_match() -> None:
@@ -303,3 +327,115 @@ def test_dialogue_is_bounded_and_fails_closed_on_ambiguous_progression() -> None
             )
         )
     assert ambiguous.value.unsafe_reason == "dialogue_action_ambiguous"
+
+
+def test_dialogue_exploration_tries_each_choice_once_and_resets_on_new_screen() -> None:
+    runtime = ready()
+    runtime.pending = runtime.pending and runtime.pending.__class__(
+        **{**runtime.pending.__dict__, "quest_opened": True}
+    )
+
+    def answer(ref: str, text: str) -> dict[str, object]:
+        return {
+            "questId": "246",
+            "npcId": "9",
+            "action": "answer",
+            "visible": True,
+            "disabled": False,
+            "ref": ref,
+            "text": text,
+        }
+
+    choices = [
+        answer("501", "Расскажи о стране."),
+        answer("502", "Что случилось дальше?"),
+    ]
+    first = runtime.decide_dialog(dialog(snapshotId="npc-dialog-choices-1", dialogActions=choices))
+    assert first.action_metadata["expected_ref"] == "501"
+    runtime.acknowledge(first)
+
+    second = runtime.decide_dialog(dialog(snapshotId="npc-dialog-choices-2", dialogActions=choices))
+    assert second.action_metadata["expected_ref"] == "502"
+    runtime.acknowledge(second)
+
+    with pytest.raises(QuestDialogueError) as exhausted:
+        runtime.decide_dialog(dialog(snapshotId="npc-dialog-choices-3", dialogActions=choices))
+    assert exhausted.value.unsafe_reason == "dialogue_choices_exhausted"
+
+    changed = [
+        answer("501", "А что же поделать мы можем?"),
+        answer("502", "Что случилось дальше?"),
+    ]
+    reset = runtime.decide_dialog(dialog(snapshotId="npc-dialog-choices-4", dialogActions=changed))
+    assert reset.action_metadata["expected_ref"] == "501"
+
+
+def test_dialogue_explores_story_branch_choices_in_source_order() -> None:
+    runtime = ready()
+    runtime.pending = runtime.pending and runtime.pending.__class__(
+        **{**runtime.pending.__dict__, "quest_opened": True}
+    )
+
+    def answer(ref: str, text: str) -> dict[str, object]:
+        return {
+            "questId": "246",
+            "npcId": "9",
+            "action": "answer",
+            "visible": True,
+            "disabled": False,
+            "ref": ref,
+            "text": text,
+        }
+
+    choices = [
+        answer("6101", "*Попытаться незаметно забрать нож со стола*"),
+        answer("6102", "*Попросить продать нож*"),
+    ]
+    first = runtime.decide_dialog(dialog(snapshotId="npc-dialog-knife-1", dialogActions=choices))
+    assert first.action_metadata["expected_ref"] == "6101"
+    runtime.acknowledge(first)
+
+    second = runtime.decide_dialog(dialog(snapshotId="npc-dialog-knife-2", dialogActions=choices))
+    assert second.action_metadata["expected_ref"] == "6102"
+
+
+def test_unverified_puzzle_is_classified_separately_from_dialogue_branch() -> None:
+    runtime = ready()
+    runtime.pending = runtime.pending and runtime.pending.__class__(
+        **{
+            **runtime.pending.__dict__,
+            "quest_opened": True,
+            "objective": runtime.pending.objective.__class__(
+                "321",
+                "Заморский сундук",
+                runtime.pending.objective.objective,
+                runtime.pending.objective.npc_query,
+                runtime.pending.objective.location,
+                runtime.pending.objective.fingerprint,
+            ),
+        }
+    )
+    actions = [
+        {
+            "questId": "321",
+            "npcId": "9",
+            "action": "answer",
+            "visible": True,
+            "disabled": False,
+            "ref": str(4842 + index),
+            "text": text,
+        }
+        for index, text in enumerate(
+            (
+                "*Вернуть все кнопки в исходное положение*",
+                "*Нажать кнопку с изображением Огня*",
+                "*Нажать кнопку с изображением Муравья*",
+                "*Попытаться открыть сундук*",
+            )
+        )
+    ]
+
+    with pytest.raises(QuestDialogueError) as unsupported:
+        runtime.decide_dialog(dialog(dialogActions=actions))
+
+    assert unsupported.value.unsafe_reason == "dialogue_puzzle_unsupported"

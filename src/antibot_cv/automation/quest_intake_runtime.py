@@ -12,6 +12,9 @@ from src.antibot_cv.automation.quest_dialogue_choice_policy import (
     select_progress_dialogue_action,
 )
 from src.antibot_cv.automation.quest_giver import resolve_unique_giver
+from src.antibot_cv.automation.quest_catalog_navigation import snapshot_epoch_seconds
+from src.antibot_cv.automation.quest_npc_open_navigation import PendingNpcOpen
+from src.antibot_cv.automation.quest_npc_action_journal import dialog_semantic_fingerprint
 
 
 class QuestAcceptPhase(str, Enum):
@@ -61,6 +64,7 @@ class PendingQuestAccept:
     npc_id: str | None = None
     npc_name: str | None = None
     area_snapshot_id: str | None = None
+    area_generated_at: float | None = None
     quest_opened: bool = False
     dialog_steps: int = 0
     accept_submitted: bool = False
@@ -71,6 +75,7 @@ class QuestIntakeRuntime:
 
     def __init__(self) -> None:
         self.pending: PendingQuestAccept | None = None
+        self._pending_ref: QuestRef | None = None
         self._pending_decision: QuestIntakeDecision | None = None
 
     def begin(self, quest: QuestRef, *, already_at_location: bool) -> PendingQuestAccept:
@@ -83,6 +88,7 @@ class QuestIntakeRuntime:
         if len(quest.giver_names) != 1 or not quest.giver_names[0].strip():
             raise ValueError("quest acceptance requires exactly one giver")
         self._pending_decision = None
+        self._pending_ref = quest
         self.pending = PendingQuestAccept(
             quest_id=quest.id,
             title=quest.title.strip(),
@@ -111,7 +117,7 @@ class QuestIntakeRuntime:
                 f"quest_accept_npc_snapshot:{exc}",
                 str(exc),
             ) from exc
-        if not observed.location_id or not observed.npc_id or not observed.npc_name or not observed.area_snapshot_id:
+        if not observed.location_id or not observed.npc_id or not observed.npc_name or not observed.area_snapshot_id or observed.area_generated_at is None:
             raise QuestIntakeDecisionError(
                 "quest_accept_npc_snapshot:quest giver NPC was not observed",
                 "quest giver NPC was not observed",
@@ -126,6 +132,7 @@ class QuestIntakeRuntime:
                 expected_name=observed.npc_name,
                 expected_dialog_name=observed.giver_name,
                 quest_id=observed.quest_id,
+                quest_title=observed.title,
             ),
             action_failure_reason="quest_accept_npc_open_failed",
             quest_id=observed.quest_id,
@@ -145,6 +152,9 @@ class QuestIntakeRuntime:
         snapshot_id = _bounded_text(snapshot.get("snapshotId"), max_length=120)
         if not snapshot_id.startswith("area-npcs-"):
             raise ValueError("area NPC snapshot identity is missing")
+        generated_at = snapshot_epoch_seconds(snapshot.get("generatedAt"))
+        if generated_at is None:
+            raise ValueError("area NPC snapshot timestamp is missing")
         location = snapshot.get("location")
         location_id = (
             _bounded_text(location.get("id"), max_length=80)
@@ -158,7 +168,7 @@ class QuestIntakeRuntime:
             raise ValueError("area NPC items are missing")
         match = resolve_unique_giver(pending.giver_name, raw_items)
         npc_id = _bounded_text(match.get("dataId"), max_length=80)
-        if not npc_id.isdecimal() or int(npc_id) <= 0:
+        if not npc_id.isdecimal() or int(npc_id) < 0:
             raise ValueError("quest giver NPC identity is invalid")
         npc_name = _bounded_text(match.get("name"), max_length=180)
         if not npc_name or len(pending.giver_name) > 180:
@@ -169,6 +179,7 @@ class QuestIntakeRuntime:
             npc_id=npc_id,
             npc_name=npc_name,
             area_snapshot_id=snapshot_id,
+            area_generated_at=generated_at,
         )
         return self.pending
 
@@ -197,7 +208,7 @@ class QuestIntakeRuntime:
                 "quest_accept_dialog_snapshot_invalid",
                 "NPC dialog snapshot identity is missing",
             )
-        if not pending.npc_id or not pending.npc_id.isdecimal() or int(pending.npc_id) <= 0:
+        if not pending.npc_id or not pending.npc_id.isdecimal() or int(pending.npc_id) < 0:
             raise QuestIntakeDecisionError(
                 "quest_accept_dialog_identity_mismatch",
                 "pending NPC identity is invalid",
@@ -207,9 +218,15 @@ class QuestIntakeRuntime:
         observed_actions = _observed_action_texts(snapshot.get("actions"))
         common = {
             "expected_snapshot_id": snapshot_id,
+            "expected_generated_at": snapshot.get("generatedAt"),
+            "source_semantic_fingerprint": dialog_semantic_fingerprint(snapshot),
+            "expected_href": snapshot.get("href"),
+            "giver_name": pending.giver_name,
             "npc_id": pending.npc_id,
             "quest_id": pending.quest_id,
             "expected_title": pending.title,
+            "quest_opened": pending.quest_opened,
+            "dialog_steps": pending.dialog_steps,
         }
         if not pending.quest_opened:
             candidates = _matching_actions(
@@ -242,11 +259,7 @@ class QuestIntakeRuntime:
             npc_id=pending.npc_id,
             action="answer",
         )
-        selected_dialog_action = (
-            dialog_actions[0]
-            if len(dialog_actions) == 1
-            else select_progress_dialogue_action(dialog_actions)
-        )
+        selected_dialog_action = select_progress_dialogue_action(dialog_actions)
         if selected_dialog_action is not None:
             if pending.dialog_steps >= max_steps:
                 raise QuestIntakeDecisionError(
@@ -278,7 +291,7 @@ class QuestIntakeRuntime:
                     observed_actions=observed_actions,
                 )
             )
-        if len(dialog_actions) > 1:
+        if dialog_actions:
             raise QuestIntakeDecisionError(
                 "quest_accept_dialog_action_ambiguous",
                 "quest dialog answer action is ambiguous",
@@ -350,10 +363,43 @@ class QuestIntakeRuntime:
 
     def mark_npc_opened(self) -> PendingQuestAccept:
         pending = self._require(QuestAcceptPhase.NPC_LOOKUP)
-        if not pending.location_id or not pending.npc_id or not pending.npc_name or not pending.area_snapshot_id:
+        if not pending.location_id or not pending.npc_id or not pending.npc_name or not pending.area_snapshot_id or pending.area_generated_at is None:
             raise RuntimeError("quest giver NPC was not observed")
         self._pending_decision = None
         self.pending = replace(pending, phase=QuestAcceptPhase.NPC_DIALOG)
+        return self.pending
+
+    def restore_npc_open(
+        self, staged: PendingNpcOpen, *, confirmed: bool,
+    ) -> PendingQuestAccept:
+        """Restore the bounded pre- or post-settlement NPC-open phase."""
+
+        if self.pending is not None or self._pending_ref is not None:
+            raise RuntimeError("quest acceptance is already in progress")
+        quest = QuestRef(
+            id=staged.quest_id,
+            title=staged.quest_title,
+            accept_ref=staged.quest_accept_ref,
+            location=staged.location_name,
+            giver_names=(staged.giver_name,),
+            catalog_page=staged.quest_catalog_page,
+        )
+        self._pending_ref = quest
+        self._pending_decision = None
+        self.pending = PendingQuestAccept(
+            quest_id=staged.quest_id,
+            title=staged.quest_title,
+            location=staged.location_name,
+            giver_name=staged.giver_name,
+            phase=QuestAcceptPhase.NPC_DIALOG if confirmed else QuestAcceptPhase.NPC_LOOKUP,
+            location_id=staged.location_id,
+            npc_id=staged.npc_id,
+            npc_name=staged.npc_name,
+            area_snapshot_id=staged.area_snapshot_id,
+            area_generated_at=staged.area_generated_at,
+            quest_opened=staged.quest_opened,
+            dialog_steps=staged.dialog_steps,
+        )
         return self.pending
 
     def mark_quest_opened(self) -> PendingQuestAccept:
@@ -391,7 +437,41 @@ class QuestIntakeRuntime:
         if not pending.accept_submitted or pending.quest_id != quest_id:
             raise RuntimeError("quest acceptance verification does not match pending quest")
         self._pending_decision = None
+        self._pending_ref = None
         self.pending = None
+
+    def recover_confirmed_active(self, expected_ref: QuestRef) -> None:
+        """Clear a restored local intake after durable active-catalog confirmation."""
+
+        if not self.matches_pending(expected_ref):
+            raise RuntimeError("confirmed active quest does not match pending intake")
+        self._pending_decision = None
+        self._pending_ref = None
+        self.pending = None
+
+    def abandon(self, expected_ref: QuestRef) -> None:
+        """Clear one exact unconfirmed intake locally without performing an action."""
+
+        if not self.matches_pending(expected_ref):
+            raise RuntimeError("abandoned quest does not match pending intake")
+        self._pending_decision = None
+        self._pending_ref = None
+        self.pending = None
+
+    def matches_pending(self, expected_ref: QuestRef) -> bool:
+        """Prevalidate an exact local intake without changing its state."""
+
+        pending = self.pending
+        return bool(
+            pending is not None
+            and self._pending_ref == expected_ref
+            and pending.quest_id == expected_ref.id
+            and pending.title == expected_ref.title
+            and pending.location == expected_ref.location
+            and (pending.giver_name,) == expected_ref.giver_names
+            and pending.phase not in {QuestAcceptPhase.VERIFY_STARTED}
+            and not pending.accept_submitted
+        )
 
     def _remember_decision(self, decision: QuestIntakeDecision) -> QuestIntakeDecision:
         self._pending_decision = decision

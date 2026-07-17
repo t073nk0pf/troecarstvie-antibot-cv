@@ -125,7 +125,9 @@ class WorldRegistry:
             self.save()
         return changed
 
-    def observe_npc_dialog(self, snapshot: dict[str, Any]) -> bool:
+    def observe_npc_dialog(
+        self, snapshot: dict[str, Any], *, location_id: object = None
+    ) -> bool:
         area_object_id = _identity(snapshot.get("npcId"))
         if not area_object_id:
             return False
@@ -135,10 +137,20 @@ class WorldRegistry:
             if isinstance(action, dict)
         }
         instance_ids.discard("")
+        wanted_location_id = _identity(location_id)
+        candidates = [
+            value for value in self.data["npcs"].values()
+            if isinstance(value, dict)
+            and value.get("areaObjectId") == area_object_id
+            and (not wanted_location_id or value.get("locationId") == wanted_location_id)
+        ]
+        # Area object IDs are local to a location.  Without the parent
+        # identity, update only a globally unique observation; otherwise an
+        # object ``0`` could contaminate unrelated NPCs across the world.
+        if len(candidates) != 1:
+            return False
         changed = False
-        for value in self.data["npcs"].values():
-            if not isinstance(value, dict) or value.get("areaObjectId") != area_object_id:
-                continue
+        for value in candidates:
             if instance_ids:
                 npc_instance_id = sorted(instance_ids, key=int)[0]
                 if value.get("npcInstanceId") != npc_instance_id:

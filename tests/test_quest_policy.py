@@ -81,6 +81,13 @@ def test_one_fresh_active_combat_quest_is_selected() -> None:
     assert Intent is QuestIntent
 
 
+def test_nonpositive_explicit_goal_remains_fail_closed() -> None:
+    for goal_level in (0, -1):
+        result = decide(goal_level=goal_level)
+        assert result.intent is QuestIntent.STOP_UNSAFE
+        assert result.reason == "invalid_or_mismatched_player_observation"
+
+
 def test_available_completed_and_unknown_quests_do_not_become_active_targets() -> None:
     for status in (QuestStatus.AVAILABLE, QuestStatus.COMPLETED, QuestStatus.UNKNOWN):
         result = decide(quest_state=snapshot(combat_quest(status=status)))

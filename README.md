@@ -47,13 +47,13 @@ PATH.
 Calibration:
 
 ```bash
-python -m src.antibot_cv.automation.controller calibrate
+python -m src.antibot_cv.automation.controller_cli calibrate
 ```
 
 Dry-run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.example.json \
   --preview
 ```
@@ -61,7 +61,7 @@ python -m src.antibot_cv.automation.controller run \
 Live limited run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.example.json \
   --live \
   --max-cycles 3
@@ -70,7 +70,7 @@ python -m src.antibot_cv.automation.controller run \
 Long local run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.local.json \
   --live \
   --max-session-minutes 480 \
@@ -90,7 +90,7 @@ not accidentally inspect or click the Codex window.
 Chrome injector check:
 
 ```bash
-python -m src.antibot_cv.automation.controller injector-status --timeout 10
+python -m src.antibot_cv.automation.controller_cli injector-status --timeout 10
 ```
 
 If this prints `"ok": false`, load the unpacked extension from
@@ -102,7 +102,7 @@ access.
 Resource ROI check:
 
 ```bash
-python -m src.antibot_cv.automation.controller inspect-resources \
+python -m src.antibot_cv.automation.controller_cli inspect-resources \
   --config config/automation.local.json
 ```
 
@@ -110,7 +110,7 @@ For calibration, save a raw capture and an overlay with configured and detected
 resource boxes:
 
 ```bash
-python -m src.antibot_cv.automation.controller inspect-resources \
+python -m src.antibot_cv.automation.controller_cli inspect-resources \
   --config config/automation.local.json \
   --output-frame runs/resource-frame.png \
   --output-overlay runs/resource-overlay.png
@@ -119,14 +119,14 @@ python -m src.antibot_cv.automation.controller inspect-resources \
 Template validation:
 
 ```bash
-python -m src.antibot_cv.automation.controller validate-templates \
+python -m src.antibot_cv.automation.controller_cli validate-templates \
   --config config/automation.example.json
 ```
 
 Replay:
 
 ```bash
-python -m src.antibot_cv.automation.controller replay \
+python -m src.antibot_cv.automation.controller_cli replay \
   --input tests/fixtures/session_frames/
 ```
 

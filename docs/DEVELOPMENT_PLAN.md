@@ -29,12 +29,13 @@ Target behavior:
 
 ## Current Stage
 
-The project completed an architecture modularization gate before continuing
-**Stage 1: survival and return after death**.
+The project completed an architecture modularization gate and is advancing the
+current bounded quest-autonomy slice while retaining the open Stage 1 live
+recovery gate.
 
 The former 5867-line Python controller is now a bounded orchestrator plus
 screen, leveling/death, navigation, combat, resource, and CLI modules. The
-former 4642-line editable page bridge is now generated from six bounded source
+former 4642-line editable page bridge is now generated from ten bounded source
 modules. Architecture tests prevent authored runtime files from growing beyond
 1500 lines.
 
@@ -44,7 +45,7 @@ inventory item actions, free resurrection, and compass route construction.
 
 The modularization gate is enforced by automated architecture tests. Authored
 runtime files remain below 1500 lines, while the Chrome bundle is reproducibly
-generated from six ordered domain modules.
+generated from ten ordered domain modules.
 
 The main controller now executes every confirmed marked route transition,
 preserves the destination across PvP or death, and waits for proven arrival
@@ -57,7 +58,7 @@ nine-phase recovery evidence chain, and a read-only offline validator
 identifies missing or out-of-order phases from a run log. Offline readiness is
 diagnostic only and does not satisfy the live exit gate.
 
-The local v52 bridge includes bounded quest observation and exact NPC intake:
+The local v61 bridge includes bounded quest observation and exact NPC intake:
 active and available cards are parsed across all pages; the bot can travel to a
 unique giver, open the exact quest, click `Взять задание`, and acknowledge
 success only after the quest ID appears in a fresh active catalogue. The first
@@ -67,13 +68,56 @@ victory and resurrection. It stops after a bounded ten victories without
 observable progress. A bounded dialogue executor now handles one exact NPC and
 snapshot-bound progression actions, with fresh active-catalogue verification
 and fail-closed handling for ambiguous or malformed reply alternatives.
-Completed objectives stop before turn-in; turn-in remains outside the completed
-slice. Persisted quest leases, a bounded work scheduler, world/instance routing,
-and deferred gathering groundwork are also present offline. Gathering node
-discovery and a complete gathering mutation loop are not yet implemented.
-A pure turn-in safety runtime now defines the required identity, action, and
-fresh-catalogue contract, but it is not connected to the controller until
-authoritative quest-reference persistence is available.
+Completed supported steps now enter a bounded turn-in coordinator. Intake
+persists an authoritative reference before mutation, exact giver/dialogue
+actions remain snapshot-bound, and a newer complete active catalogue either
+releases a terminal quest or advances the same pinned multi-step chain. Legacy
+leases without an authoritative reference remain fail-closed. The intake giver
+reference is fingerprint-scoped and is not reused for a later chain step; that
+step needs new authoritative giver/location evidence before another turn-in.
+Pre-mutation completion evidence and the resulting terminal/continuation
+reconciliation survive restart. Persisted quest leases, a bounded work
+scheduler, world/instance routing, and deferred gathering groundwork are also
+present offline. Gathering node discovery and a complete gathering mutation
+loop are not yet implemented.
+
+A bounded two-cycle v53 live run now proves the repeated monster-quest loop:
+complete active-catalogue refresh, pinned objective selection, exact Navigator
+handoff, target attack, battle, exit, and the same sequence again without
+manual input. All configured combat slots 1-5 are selected. Slots 1, 3, 4, and
+5 have current-character live confirmation; slot 2 (`Смена позиции I`) still
+fails closed because the bridge has no reliable post-action signal for this
+stance-like skill. Numeric quest-progress telemetry and live terminal turn-in
+remain open acceptance evidence.
+
+The spellbook-aware policy is connected through a guarded adapter. It
+distinguishes instant setup, conditional defense, and turn-consuming attacks,
+prefers the strongest explicitly ready attack, and remembers confirmed setup
+within each battle. Complete identity and authoritative readiness/turn evidence
+are mandatory; eight unknown observations stop unsafe.
+
+The current status is **PARTIAL**. Exact dialogue selection and acceptance of
+quest `263` are live-confirmed. Run `4e5b3e3a00ed4a7b95fbdf441545227d`
+proved complete available/active catalogues, durable local-dialog quarantine for
+quest `236`, bounded giver-not-observed quarantine for quest `267`, and
+scheduler continuation plus routing for quest `269`. Its final exact NPC open
+returned a false-negative postcondition even though the intended dialogue was
+later observed open.
+
+v61 journals exact `OPEN`, `ANSWER`, and final `ACCEPT` before dispatch. Restart
+settles from read-only causal evidence with zero reissue; expiry, exact
+client/profile/tab and quest/NPC/action identity, canonical schema, unique
+successor evidence, complete active-catalogue proof, and CAS rollback are
+covered by P0/P1/P2 tests. Durable NPC acknowledgement, legacy recovery,
+mixed-card eligibility, and expired-stage recovery also pass offline. The
+independent critic passed.
+
+Registered extension tabs remain on v59, so manual extension Reload and exact
+v61/0.3.30 registration are required before the next bounded live slice. The
+exact quest-269 legacy recovery must be evaluated before a bounded journal live
+proof. The composite three-NPC objective of quest `263` has not been executed.
+Procurement remains observation and action-free exact-deficit planning only;
+no purchase mutation is implemented or proven.
 
 ## Main Current Milestone
 
@@ -129,7 +173,8 @@ controlled without affecting another tab.
 ### Stage 1 - Survival And Route Recovery
 
 Status: implementation complete; live acceptance is at `1/3` consecutive
-natural recoveries. This remains the current priority.
+natural recoveries. This remains an open formal safety gate alongside the
+bounded quest-autonomy slice; it is not a live PASS.
 
 - death detection;
 - free resurrection;
@@ -167,6 +212,11 @@ without manual input, resource starvation, or an unintended target.
 
 Status: basic skill and item controls exist; policy is incomplete.
 
+The current rotation covers every configured skill slot, but stance-like
+actions need a typed confirmation contract before an attempted slot can be
+reported as successfully used. The live two-cycle evidence currently confirms
+slots 1, 3, 4, and 5 and rejects unconfirmed slot 2.
+
 - scan all currently available skills and their readiness;
 - store skill cost, cooldown, and observed effectiveness when available;
 - prefer stronger efficient skills as the character level increases;
@@ -180,13 +230,18 @@ hard-coded fixed skill set and never uses a non-allowlisted item.
 
 ### Stage 4 - Quest Line Module
 
-Status: catalogue discovery, scheduling, travel-to-giver, and exact NPC
-acceptance are implemented and live-confirmed. Exact monster-objective
-selection, route handoff, preferred-quest intake, and the first dialogue
-executor are implemented offline. Persisted pinned chains and deferred work
-scheduling preserve ownership across refreshes; live proof, completed-quest
-turn-in integration, and other objective types are next. The standalone turn-in
-safety contract is implemented and tested offline.
+Status: **PARTIAL**. Catalogue discovery, scheduling, travel-to-giver, exact
+NPC acceptance, and quest-263 dialogue selection are implemented and
+live-confirmed. Exact monster-objective
+selection, route handoff, preferred-quest intake, the first dialogue executor,
+and the first fingerprint-scoped completed-step turn-in are integrated offline.
+Persisted pinned chains, bounded objective/intake quarantines, and deferred work
+scheduling preserve ownership across refreshes. Causal catalogue ACK,
+mixed-card eligibility, finite/client validation, and expired-stage recovery
+are proven offline. Durable `OPEN`/`ANSWER`/`ACCEPT` journaling, restart
+zero-reissue, systemic compare-and-swap rollback, and legacy false-negative
+recovery are also offline PASS. Their combined live proof and other objective
+types are next.
 
 This module accelerates leveling but must use the stable travel, combat,
 inventory, and death-recovery modules instead of duplicating them.
@@ -200,10 +255,12 @@ Responsibilities:
 - accept a quest through an exact page action; implemented and live-confirmed;
 - convert objectives into route/combat/inventory tasks; exact monster route and
   combat targeting implemented offline;
-- track progress and turn completed quests in; full refresh after each monster
-  victory and dialogue progression implemented, completed-quest turn-in
-  pending;
+- track progress and turn completed steps in; full refresh after each monster
+  victory and dialogue progression plus bounded terminal/next-step turn-in
+  reconciliation implemented offline;
 - skip blocked, unsafe, unaffordable, or explicitly denied quests;
+- quarantine `stop_unsafe` work durably without cancelling the quest, then
+  continue with another eligible quest when the catalogue remains authoritative;
 - re-plan when a quest target or location is unavailable.
 
 Current guarded boundary: discovery produces an ordered intake queue, resolves
@@ -212,9 +269,15 @@ confirms acceptance from the complete active list. It can then select one exact
 monster-hunt or dialogue step, route through the shared navigation runtime, and
 re-read all active pages after each verified mutation. Dialogue alternatives
 must have one conservative progression choice; malformed or ambiguous choices
-fail closed. Changed, completed, unknown, or unsupported steps stop before a
-new mutation. The fallback farm intent is allowed only after a fresh empty
-catalogue and active list.
+fail closed. Completed supported steps may be submitted to the exact persisted
+giver and must reconcile against a newer complete active list. Unknown or
+unsupported steps stop before a new mutation and are preserved in a bounded
+durable quarantine. The fallback farm intent is allowed only after a fresh
+empty catalogue and active list.
+
+Procurement is deliberately not an execution claim: the current policy can
+compute an exact quest deficit from bounded, identity-bound shop/auction
+observations, but there is no guarded purchase mutation or live purchase proof.
 
 Exit gate: complete a configured level-range quest chain from a clean level 1
 post-tutorial character without manual navigation.
@@ -267,12 +330,19 @@ but it must not bypass the guarded action interface or invent page actions.
 
 ## Priority Order
 
-1. Complete the remaining two consecutive M1 natural recovery validations.
-2. Revalidate the complete farm loop and sequential burdjuk recovery.
-3. Stabilize adaptive skills and battle consumables.
-4. Build the quest line module on top of those stable modules.
-5. Add the level-goal planner and post-goal farm mode.
-6. Run multi-window and long-duration hardening.
+1. Manually Reload the extension and confirm v61/0.3.30 on exactly one primary
+   game tab. Evaluate the exact quest-269 legacy recovery proof, apply only on
+   exact identity, then prove one bounded journal acknowledgement with zero
+   repeated mutation.
+2. Add typed executors for the composite quest-263 NPC/location objective and
+   prove them one bounded mutation at a time.
+3. Complete the remaining two consecutive M1 natural recovery validations.
+4. Revalidate the complete farm loop, adaptive skills, and sequential resource
+   recovery.
+5. Add guarded exact-deficit procurement only behind explicit spending limits,
+   then obtain a separate bounded live proof.
+6. Add the level-goal planner and multi-window/long-duration hardening.
 
-Do not begin broad quest automation while M1 is incomplete. A quest planner
-cannot be reliable if the character cannot return to its objective after death.
+Quest work must continue to reuse recovery, route, combat, and resource
+services. Neither offline readiness nor a partial live slice closes the M1 or
+full autonomous-chain exit gates.

@@ -14,12 +14,18 @@ from src.antibot_cv.automation.combat_policy import (
     BattleSnapshot as PolicyBattleSnapshot,
     CombatIntent,
     CombatPolicy,
+    CombatDecision as PolicyCombatDecision,
+)
+from src.antibot_cv.automation.combat_skill_mutation import (
+    bind_skill_mutation,
+    refresh_skill_mutation_binding,
 )
 from src.antibot_cv.automation.runtime_constants import (
     ATTACK_RETRY_DELAY_MS,
     HUNT_RETRY_DELAY_MS,
     JS_BATTLE_PROBE_INTERVAL_MS,
 )
+from src.antibot_cv.automation.spellbook_combat_adapter import decide_current_spellbook_action
 from src.antibot_cv.automation.runtime_helpers import (
     attack_click_point as _attack_click_point,
     game_shell_present as _game_shell_present,
@@ -30,430 +36,12 @@ from src.antibot_cv.automation.runtime_helpers import (
     same_location_name as _same_location_name,
 )
 from src.antibot_cv.automation.state_machine import GameState
+from src.antibot_cv.automation.combat_policy_runtime import CombatPolicyRuntimeMixin
 from src.antibot_cv.detection.resources import ResourceStatus
 from src.antibot_cv.viewport.coordinates import Rect
 
 
-class CombatRuntimeMixin:
-    def _live_combat_slot_for_current_resources(self, frame: np.ndarray) -> int | None:
-        if not self.config.resources.enabled:
-            return self._next_live_combat_slot()
-        status = self._detect_current_resources(frame)
-        missing = self._resource_missing(status)
-        if missing:
-            self._log_resource_status("combat_resources_missing", status, missing=missing)
-            return self._next_live_combat_slot()
-        battle_snapshot = self._last_battle_snapshot_cache
-        last_battle = self._last_battle_snapshot_success_monotonic
-        if battle_snapshot is None or last_battle is None or time.monotonic() - last_battle > 2.0:
-            battle_snapshot = self._battle_snapshot_via_injector(force=True)
-        if not isinstance(battle_snapshot, dict):
-            self.logger.log_event(
-                "combat_policy_skipped",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                reason="battle_snapshot_unavailable",
-            )
-            return self._legacy_live_combat_slot(frame, status)
-        decision = self._combat_policy_decision(status, battle_snapshot)
-        self.logger.log_event(
-            "combat_policy_decision",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            intent=decision.intent.value,
-            reason=decision.reason,
-            skill_slot=None if decision.skill is None else decision.skill.slot,
-            item_name=None if decision.item is None else decision.item.name,
-            item_slot=None if decision.item is None else decision.item.slot,
-        )
-        if decision.intent is CombatIntent.USE_ITEM and decision.item is not None:
-            kind = decision.item.kind.value if isinstance(decision.item.kind, BattleItemKind) else str(decision.item.kind)
-            if self._try_battle_item_recovery(
-                frame,
-                status,
-                kind_override=kind,
-                selected_slot=decision.item.slot,
-                selected_name=decision.item.name,
-            ):
-                return None
-            if self.state_machine.state == GameState.STOPPED:
-                return None
-            return self._next_live_combat_slot()
-        if decision.intent is CombatIntent.USE_SKILL and decision.skill is not None:
-            self._combat_slot_sequence_index += 1
-            return decision.skill.slot
-        if decision.intent is CombatIntent.STOP_UNSAFE:
-            self._stop_leveling_unsafe(f"combat_policy:{decision.reason}")
-        return None
-
-    def _legacy_live_combat_slot(self, frame: np.ndarray, status: ResourceStatus) -> int | None:
-        """Compatibility path; every resulting JS action still verifies its postcondition."""
-        if self._try_battle_item_recovery(frame, status):
-            return None
-        low = self._resource_gaps(status, recover=False)
-        if not low:
-            self._log_resource_status("combat_resources_ok", status)
-            return self._next_live_combat_slot()
-        prowess = status.prowess.percent
-        fallback_threshold = max(0.0, float(self.config.combat.low_resource_fallback_percent))
-        if (
-            self.config.resources.wait_in_battle_when_low
-            and self.config.combat.low_resource_fallback_enabled
-            and prowess is not None
-            and prowess <= fallback_threshold
-        ):
-            fallback_slot = max(0, int(self.config.combat.low_resource_fallback_slot_index))
-            self._log_resource_status(
-                "combat_low_resource_fallback",
-                status,
-                low_resources=low,
-                fallback_slot=fallback_slot,
-                force=True,
-            )
-            return fallback_slot
-        self._log_resource_status("combat_low_resource_continuing", status, low_resources=low, force=True)
-        return self._next_live_combat_slot()
-
-    def _combat_policy_decision(
-        self,
-        status: ResourceStatus,
-        battle_snapshot: dict[str, object],
-    ) -> object:
-        health_percent = status.health.percent
-        prowess_percent = status.prowess.percent
-        if health_percent is None or prowess_percent is None:
-            return CombatPolicy().decide(
-                PolicyBattleSnapshot(
-                    active=None,
-                    finished=None,
-                    turn=0,
-                    resources=PolicyBattleResources(None, None, None, None),
-                )
-            )
-        sequence = self._configured_live_combat_slots()
-        start = self._combat_slot_sequence_index % len(sequence)
-        rotated = sequence[start:] + sequence[:start]
-        allowed_slots = list(dict.fromkeys(rotated))
-        abilities: list[PolicySkill] = []
-        raw_abilities = battle_snapshot.get("abilities")
-        if isinstance(raw_abilities, list):
-            for raw in raw_abilities:
-                if not isinstance(raw, dict):
-                    continue
-                ability_id = _optional_int(raw.get("id"))
-                if ability_id is None or ability_id >= 0:
-                    continue
-                slot = _optional_int(raw.get("slot"))
-                if slot is None or slot not in allowed_slots:
-                    continue
-                raw_ready = raw.get("ready")
-                raw_cooldown = _optional_float(raw.get("cooldown"))
-                ready = raw_ready is True or (
-                    not self.config.combat.require_ready_confirmation
-                    and raw.get("disabled") is not True
-                    and (raw_cooldown is None or raw_cooldown == 0)
-                )
-                priority = len(rotated) - rotated.index(slot)
-                abilities.append(
-                    PolicySkill(
-                        name=str(raw.get("name") or f"slot:{slot}"),
-                        slot=slot,
-                        damage=float(priority),
-                        ready=ready,
-                        cooldown=0 if ready and raw_cooldown is None else raw_cooldown,
-                    )
-                )
-        if not abilities and battle_snapshot.get("useSkillAvailable") is True and not self.config.combat.require_ready_confirmation:
-            slot = rotated[0]
-            abilities.append(PolicySkill(f"slot:{slot}", slot, 1.0, True, 0))
-        fallback_threshold = max(0.0, float(self.config.combat.low_resource_fallback_percent))
-        fallback_slot = max(0, int(self.config.combat.low_resource_fallback_slot_index))
-        allow_zero = (
-            self.config.combat.low_resource_fallback_enabled
-            and prowess_percent <= fallback_threshold
-        )
-        if allow_zero and all(skill.slot != fallback_slot for skill in abilities):
-            abilities.append(PolicySkill("zero_resource_fallback", fallback_slot, 1000.0, True, 0))
-        if allow_zero and fallback_slot not in allowed_slots:
-            allowed_slots.append(fallback_slot)
-
-        item_config = self.config.battle_item_recovery
-        items_enabled = item_config.enabled
-        item_allow_names = {
-            BattleItemKind.HEALTH: tuple(item_config.health_names) if items_enabled else (),
-            BattleItemKind.PROWESS: tuple(item_config.prowess_names) if items_enabled else (),
-            BattleItemKind.DAMAGE_BOOST: tuple(item_config.damage_boost_names) if items_enabled else (),
-        }
-        item_allow_slots = {
-            BattleItemKind.HEALTH: tuple(item_config.health_slots) if items_enabled else (),
-            BattleItemKind.PROWESS: tuple(item_config.prowess_slots) if items_enabled else (),
-            BattleItemKind.DAMAGE_BOOST: tuple(item_config.damage_boost_slots) if items_enabled else (),
-        }
-        items: list[PolicyBattleItem] = []
-        raw_items = battle_snapshot.get("items")
-        if isinstance(raw_items, list):
-            for raw in raw_items:
-                if not isinstance(raw, dict):
-                    continue
-                slot = _optional_int(raw.get("slot"))
-                name = str(raw.get("name") or "").strip()
-                if slot is None or not name:
-                    continue
-                matched_kinds = [
-                    kind
-                    for kind in BattleItemKind
-                    if slot in item_allow_slots[kind]
-                    or any(_normalize_phrase(name) == _normalize_phrase(allowed) for allowed in item_allow_names[kind])
-                ]
-                if len(matched_kinds) != 1:
-                    continue
-                raw_quantity = _optional_int(raw.get("quantity"))
-                ready = raw.get("ready") is True and raw.get("disabled") is not True
-                cooldown = _optional_float(raw.get("cooldown"))
-                if ready and cooldown is None:
-                    cooldown = 0
-                items.append(
-                    PolicyBattleItem(
-                        name=name,
-                        slot=slot,
-                        kind=matched_kinds[0],
-                        count=raw_quantity if raw_quantity is not None else (1 if ready else 0),
-                        ready=ready,
-                        cooldown=cooldown,
-                    )
-                )
-
-        hp = int(round(max(0.0, min(100.0, health_percent)) * 100))
-        prowess = int(round(max(0.0, min(100.0, prowess_percent)) * 100))
-        battle_id = int(self.session.battle_id or 0)
-        policy = CombatPolicy(
-            skill_slot_allowlist=tuple(allowed_slots),
-            item_name_allowlist=item_allow_names,
-            item_slot_allowlist=item_allow_slots,
-            hp_threshold=max(0.0, min(1.0, item_config.health_use_when_below_percent / 100)),
-            prowess_threshold=max(0.0, min(1.0, item_config.prowess_use_when_below_percent / 100)),
-            damage_boost_enabled=item_config.enabled and item_config.damage_boost_enabled,
-            allow_zero_prowess_slot=allow_zero,
-        )
-        return policy.decide(
-            PolicyBattleSnapshot(
-                active=battle_snapshot.get("hasFight") if isinstance(battle_snapshot.get("hasFight"), bool) else None,
-                finished=battle_snapshot.get("finished") if isinstance(battle_snapshot.get("finished"), bool) else None,
-                turn=1 if battle_snapshot.get("myTurn") is True else 0,
-                resources=PolicyBattleResources(hp, 10000, prowess, 10000),
-                skills=tuple(abilities),
-                items=tuple(items),
-                damage_boost_active=self._battle_item_recovery_counts.get((battle_id, "damage_boost"), 0) > 0,
-            )
-        )
-
-    def _try_battle_item_recovery(
-        self,
-        frame: np.ndarray,
-        status: ResourceStatus,
-        *,
-        kind_override: str | None = None,
-        selected_slot: int | None = None,
-        selected_name: str | None = None,
-    ) -> bool:
-        config = self.config.battle_item_recovery
-        if self.config.dry_run or not config.enabled or self.session.battle_id is None:
-            return False
-        kind = kind_override or self._battle_item_recovery_kind(status)
-        if kind is None:
-            return False
-        if kind == "health":
-            slots = tuple(config.health_slots)
-            names = tuple(config.health_names)
-            threshold: float | None = config.health_use_when_below_percent
-        elif kind == "prowess":
-            slots = tuple(config.prowess_slots)
-            names = tuple(config.prowess_names)
-            threshold = config.prowess_use_when_below_percent
-        elif kind == "damage_boost" and config.damage_boost_enabled:
-            slots = tuple(config.damage_boost_slots)
-            names = tuple(config.damage_boost_names)
-            threshold = None
-        else:
-            return False
-        if selected_slot is not None:
-            slots = (selected_slot,)
-        if selected_name:
-            names = (selected_name,)
-        if not slots and not names:
-            self.logger.log_event(
-                "battle_item_recovery_skipped",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                kind=kind,
-                reason="no_slots_or_names",
-                health_percent=status.health.percent,
-                prowess_percent=status.prowess.percent,
-                frame_hash=self._last_frame_hash,
-            )
-            return False
-        now = time.monotonic()
-        cooldown_ms = max(0, int(config.cooldown_ms))
-        if self._last_battle_item_recovery_monotonic is not None:
-            elapsed_ms = (now - self._last_battle_item_recovery_monotonic) * 1000
-            if elapsed_ms < cooldown_ms:
-                return False
-        key = (int(self.session.battle_id), kind)
-        max_uses = max(1, int(config.max_uses_per_battle))
-        if self._battle_item_recovery_counts.get(key, 0) >= max_uses:
-            return False
-        self.logger.log_event(
-            "battle_item_recovery_intended",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            kind=kind,
-            slots=list(slots),
-            names=list(names),
-            threshold=threshold,
-            health_percent=status.health.percent,
-            prowess_percent=status.prowess.percent,
-            frame_hash=self._last_frame_hash,
-        )
-        request = ActionRequest(
-            "use_battle_item",
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata={
-                "kind": kind,
-                "slots": list(slots),
-                "names": list(names),
-                "threshold": threshold,
-                "health_percent": status.health.percent,
-                "prowess_percent": status.prowess.percent,
-                "frame_hash": self._last_frame_hash,
-                "pre_click_delay_ms": config.pre_click_delay_ms,
-                "click_hold_ms": config.click_hold_ms,
-            },
-        )
-        if not self.action_executor.execute(request):
-            self._last_battle_item_recovery_monotonic = now
-            if getattr(self.action_executor.sink, "last_ambiguous_action", None) == "use_battle_item":
-                self._stop_leveling_unsafe("battle_item_result_ambiguous")
-            return False
-        self._battle_item_recovery_counts[key] = self._battle_item_recovery_counts.get(key, 0) + 1
-        self._last_battle_item_recovery_monotonic = now
-        return True
-
-    def _battle_item_recovery_kind(self, status: ResourceStatus) -> str | None:
-        config = self.config.battle_item_recovery
-        if status.health.percent is not None and status.health.percent <= float(config.health_use_when_below_percent):
-            return "health"
-        if status.prowess.percent is not None and status.prowess.percent <= float(config.prowess_use_when_below_percent):
-            return "prowess"
-        return None
-
-    def _state_snapshot_via_injector(self, *, force: bool = False) -> dict[str, object] | None:
-        now = time.monotonic()
-        interval_ms = max(250, int(self.config.leveling.snapshot_interval_ms))
-        if not force and self._last_state_snapshot_monotonic is not None:
-            elapsed_ms = (now - self._last_state_snapshot_monotonic) * 1000
-            if elapsed_ms < interval_ms:
-                return self._state_snapshot_cache
-        self._last_state_snapshot_monotonic = now
-        try:
-            from src.antibot_cv.automation.browser_injector import global_browser_injector
-
-            result = global_browser_injector().execute(
-                "state_snapshot",
-                {"include": ["player", "location", "deathRevive", "battle", "hunt", "quests", "shopInventory"]},
-                timeout_s=2.5,
-                client_id=self.browser_client_id,
-            )
-        except Exception as exc:
-            self.logger.log_event(
-                "state_js_snapshot_failed",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                reason=str(exc),
-                frame_hash=self._last_frame_hash,
-            )
-            return self._state_snapshot_cache
-        if not result.ok:
-            self.logger.log_event(
-                "state_js_snapshot_failed",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                reason=result.message,
-                injector_client_id=result.client_id,
-                frame_hash=self._last_frame_hash,
-            )
-            return self._state_snapshot_cache
-        try:
-            payload = json.loads(result.message)
-        except json.JSONDecodeError:
-            return self._state_snapshot_cache
-        if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
-            return self._state_snapshot_cache
-        self._state_snapshot_cache = payload
-        self._last_state_snapshot_success_monotonic = time.monotonic()
-        self._last_state_snapshot_client_id = result.client_id or self.browser_client_id
-        return payload
-
-    def _observe_death_guard(self, *, force: bool = False) -> bool:
-        if self.config.dry_run:
-            return False
-        snapshot = self._state_snapshot_via_injector(force=True) if force else self._state_snapshot_via_injector()
-        if not isinstance(snapshot, dict):
-            return self.state_machine.state in {GameState.DEAD, GameState.REVIVE_PENDING}
-        self._current_state_snapshot_id = str(snapshot.get("snapshotId") or "") or None
-        sections = snapshot.get("sections")
-        if not isinstance(sections, dict):
-            return self.state_machine.state in {GameState.DEAD, GameState.REVIVE_PENDING}
-        player_section = sections.get("player")
-        player = player_section.get("data") if isinstance(player_section, dict) else None
-        if isinstance(player, dict):
-            name = str(player.get("name") or "").strip()
-            level = _optional_int(player.get("level"))
-            xp_percent = _optional_float(player.get("xpPercent"))
-            if name:
-                if self._bind_or_reject_character(name):
-                    return True
-                self.current_character_name = name
-            if level is not None:
-                self.current_level = level
-            if xp_percent is not None:
-                self.current_xp_percent = xp_percent
-        death_section = sections.get("deathRevive")
-        death_data = death_section.get("data") if isinstance(death_section, dict) else None
-        location_section = sections.get("location")
-        location = location_section.get("data") if isinstance(location_section, dict) else None
-        self._update_location_tracking(location, death_data, player)
-        if (
-            isinstance(death_data, dict)
-            and death_data.get("dead") is False
-            and death_data.get("resurrectionNoticeAvailable") is True
-        ):
-            self._log_recovery_phase("revive_confirmed", reason="resurrection_notice_available")
-            request = ActionRequest(
-                "close_resurrection_notice",
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                dry_run=self.config.dry_run,
-                metadata={
-                    "verify_delay_ms": 250,
-                    "reason": "post_revive_confirmation",
-                    "snapshot_id": self._current_state_snapshot_id,
-                    "recovery_id": self._active_recovery_id,
-                },
-            )
-            if not self.action_executor.execute(request):
-                return self._stop_leveling_unsafe("resurrection_notice_close_failed")
-            self._log_recovery_phase("notice_closed", reason="resurrection_notice_closed")
-            return True
-        return self._handle_leveling_death(death_data)
-
+class CombatRuntimeMixin(CombatPolicyRuntimeMixin):
     def _handle_battle_wait(self, frame: np.ndarray) -> None:
         if not self.config.dry_run and self._sync_battle_from_injector(frame):
             return
@@ -860,6 +448,29 @@ class CombatRuntimeMixin:
         return slot
 
     def _use_skill_slot_via_injector(self, action_type: str, slot_index: int, event_type: str) -> bool:
+        binding = self._pending_skill_mutation_binding
+        if binding is None or binding.slot != slot_index:
+            self._spellbook_battle_state.reject_pending(slot_index)
+            return False
+        fresh_snapshot = self._battle_snapshot_via_injector(force=True)
+        fresh_binding = (
+            refresh_skill_mutation_binding(fresh_snapshot, binding)
+            if isinstance(fresh_snapshot, dict)
+            else None
+        )
+        if fresh_binding is None:
+            self._pending_skill_mutation_binding = None
+            self._spellbook_battle_state.reject_pending(slot_index)
+            self.logger.log_event(
+                "skill_mutation_refresh_blocked",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                skill_slot=slot_index,
+            )
+            return False
+        binding = fresh_binding
+        self._pending_skill_mutation_binding = binding
         if action_type == "click_combat_slot":
             pre_click_delay_ms = self.config.combat.pre_click_delay_ms
             click_hold_ms = self.config.combat.click_hold_ms
@@ -878,6 +489,7 @@ class CombatRuntimeMixin:
                 "frame_hash": self._last_frame_hash,
                 "pre_click_delay_ms": pre_click_delay_ms,
                 "click_hold_ms": click_hold_ms,
+                **binding.metadata(),
             },
         )
         self.logger.log_event(
@@ -889,7 +501,20 @@ class CombatRuntimeMixin:
             js_slot=slot_index,
             frame_hash=self._last_frame_hash,
         )
-        return self.action_executor.execute(request)
+        confirmed = self.action_executor.execute(request)
+        self._pending_skill_mutation_binding = None
+        if confirmed:
+            self._spellbook_battle_state.confirm_pending(slot_index, battle_id=self.session.battle_id)
+            if (
+                self._pending_skill_expected_damage is not None
+                and self._pending_skill_expected_damage > 0
+                and self._damage_boost_armed_battle_id == self.session.battle_id
+            ):
+                self._damage_boost_armed_battle_id = None
+        else:
+            self._spellbook_battle_state.reject_pending(slot_index)
+        self._pending_skill_expected_damage = None
+        return confirmed
 
     def _handle_battle_end(self, frame: np.ndarray, result: object | None = None) -> None:
         if not self.config.dry_run:
@@ -1261,17 +886,36 @@ class CombatRuntimeMixin:
         self._last_hunt_click_monotonic = None
         if self._route_resume_target_name:
             resume_target = self._route_resume_target_name
+            resume_kind = self._route_resume_recovery_kind
             self._route_resume_target_name = None
+            self._route_resume_recovery_kind = None
             self.session.reset_cycle_attempt()
             self._reset_location_context()
+            if not self._validate_route_coordinator_binding(resume_kind, resume_target):
+                return
             if not _same_location_name(self.current_location_name, resume_target):
                 if self.state_machine.state is not GameState.LOCATION_SEARCH:
                     self._safe_transition(GameState.LOCATION_SEARCH, reason="route_battle_interruption_resolved")
                 self._start_location_route(
                     resume_target,
-                    kind="post_battle_route_resume",
+                    kind=resume_kind or "post_battle_route_resume",
                     reason="post_battle_route_resume",
                 )
+                return
+            if resume_kind in {
+                "quest_accept",
+                "quest_dialogue",
+                "quest_location",
+                "quest_turn_in",
+            }:
+                if self.state_machine.state is not GameState.LOCATION_SEARCH:
+                    self._safe_transition(
+                        GameState.LOCATION_SEARCH,
+                        reason="route_battle_destination_confirmed",
+                    )
+                self._route_recovery_kind = resume_kind
+                self._route_destination_name = resume_target
+                self._finish_route_arrival("route_battle_destination_confirmed")
                 return
         if not self.session.can_complete_cycle(require_victory=not self.config.dry_run):
             self.logger.log_event(

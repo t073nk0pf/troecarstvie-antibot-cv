@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 
 from src.antibot_cv.automation.capture import calibrate_capture
-from src.antibot_cv.automation.actions import ActionRequest, LiveMacActionSink
+from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, LiveMacActionSink
 from src.antibot_cv.automation.controller import (
     AutomationController,
     AutomationRunOptions,
@@ -19,6 +19,8 @@ from src.antibot_cv.automation.controller import (
     run_automation,
 )
 from src.antibot_cv.automation.preflight import run_preflight
+from src.antibot_cv.automation.safety import SafetyGuard
+from src.antibot_cv.automation.session import SessionState
 from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.detection.resources import ResourceDetector, ResourceStatus
 from src.antibot_cv.detection.templates import TemplateRegistry
@@ -43,6 +45,32 @@ DEFAULT_TEMPLATE_PATHS: dict[str, str] = {
     "steppe_jackal": "assets/templates/targets/steppe_jackal.png",
     "young_lynx": "assets/templates/targets/young_lynx.png",
 }
+
+
+class _ConfigResolvingArgumentParser(argparse.ArgumentParser):
+    """Resolve global/subcommand config flags without argparse shadowing."""
+
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        global_config = getattr(parsed, "_global_config", None)
+        command_config = getattr(parsed, "_command_config", None)
+        if (
+            global_config is not None
+            and command_config is not None
+            and global_config != command_config
+        ):
+            self.error("conflicting --config values before and after subcommand")
+        parsed.config = (
+            command_config
+            if command_config is not None
+            else global_config
+            if global_config is not None
+            else getattr(parsed, "_default_config", None)
+        )
+        for name in ("_global_config", "_command_config", "_default_config"):
+            if hasattr(parsed, name):
+                delattr(parsed, name)
+        return parsed
 
 def command_calibrate(args: argparse.Namespace) -> int:
     config = load_config(args.config).capture
@@ -146,6 +174,12 @@ def _parse_target_level_args(args: argparse.Namespace) -> tuple[int, ...] | None
     return tuple(sorted(levels))
 
 def command_run(args: argparse.Namespace) -> int:
+    runtime_overrides = None
+    if bool(getattr(args, "combat_only", False)):
+        runtime_overrides = {
+            "autoNavigateQuestTargets": False,
+            "autonomousQuestDirector": False,
+        }
     try:
         run_automation(
             AutomationRunOptions(
@@ -163,6 +197,7 @@ def command_run(args: argparse.Namespace) -> int:
                 hotkeys=bool(args.hotkeys),
                 open_hunt_on_start=bool(args.open_hunt_on_start),
                 browser_client_id=getattr(args, "client_id", None),
+                runtime_overrides=runtime_overrides,
             )
         )
     except RuntimeError as exc:
@@ -407,6 +442,142 @@ def command_injector_state_snapshot(args: argparse.Namespace) -> int:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result.ok else 1
 
+
+def command_recover_catalog_navigation(args: argparse.Namespace) -> int:
+    from src.antibot_cv.automation.browser_injector import global_browser_injector
+    from src.antibot_cv.automation.quest_catalog_recovery import (
+        catalog_recovery_chain_path,
+        evaluate_catalog_recovery,
+    )
+    from src.antibot_cv.automation.quest_chain_runtime import QuestChainRuntime
+
+    config = load_config(args.config)
+    try:
+        state_path = catalog_recovery_chain_path(
+            config.runs_dir, config.leveling.required_character_name
+        )
+        chain = QuestChainRuntime(state_path=state_path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({"ok": False, "applied": False, "reason": "catalog_recovery_checkpoint_invalid", "message": str(exc)[:300]}, ensure_ascii=False, sort_keys=True))
+        return 2
+    pending = chain.pending_catalog_navigation
+    if pending is None:
+        print(json.dumps({"ok": False, "applied": False, "reason": "catalog_recovery_pending_missing"}, ensure_ascii=False, sort_keys=True))
+        return 1
+    server = global_browser_injector()
+    server.start()
+    result = server.execute(
+        "state_snapshot",
+        {"include": ["quests"]},
+        timeout_s=max(0.1, min(30.0, float(args.timeout))),
+        client_id=args.client_id,
+    )
+    if not result.ok:
+        print(json.dumps({"ok": False, "applied": False, "reason": "catalog_recovery_snapshot_failed", "client_id": str(result.client_id or "")[:240], "message": str(result.message or "")[:300]}, ensure_ascii=False, sort_keys=True))
+        return 1
+    try:
+        snapshot = json.loads(result.message)
+    except (TypeError, json.JSONDecodeError):
+        snapshot = None
+    proof = evaluate_catalog_recovery(
+        pending,
+        client=server.client_snapshot(result.client_id),
+        result_client_id=result.client_id,
+        snapshot=snapshot,
+        now=time.time(),
+    )
+    applied = False
+    if proof.eligible and args.apply:
+        try:
+            chain.clear_catalog_navigation(pending)
+            applied = True
+        except (OSError, RuntimeError, ValueError) as exc:
+            payload = proof.receipt(applied=False)
+            payload.update({"ok": False, "reason": "catalog_recovery_checkpoint_write_failed", "message": str(exc)[:300]})
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return 2
+    payload = proof.receipt(applied=applied)
+    payload["mode"] = "apply" if args.apply else "plan"
+    payload["would_clear"] = bool(proof.eligible and not args.apply)
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0 if proof.eligible else 1
+
+
+def command_recover_legacy_npc_open(args: argparse.Namespace) -> int:
+    """Plan or apply one explicit local checkpoint recovery; never mutate the game."""
+
+    from src.antibot_cv.automation.browser_injector import global_browser_injector
+    from src.antibot_cv.automation.quest_catalog_recovery import catalog_recovery_chain_path
+    from src.antibot_cv.automation.quest_chain_runtime import QuestChainRuntime
+    from src.antibot_cv.automation.quest_npc_legacy_recovery import (
+        evaluate_legacy_npc_recovery,
+        load_legacy_npc_open_event,
+    )
+
+    config = load_config(args.config)
+    try:
+        state_path = catalog_recovery_chain_path(
+            config.runs_dir, config.leveling.required_character_name,
+        )
+        chain = QuestChainRuntime(state_path=state_path)
+        ref = chain.pending_accepted_ref
+        if (
+            ref is None or chain.lease is not None
+            or chain.pending_catalog_navigation is not None
+            or chain.pending_npc_open is not None or chain.pending_npc_dialog is not None
+            or any(item.quest_id == ref.id for item in chain.intake_quarantines)
+            or any(item.quest_id == ref.id for item in chain.quarantines)
+        ):
+            raise ValueError("legacy NPC recovery conflicts with chain state")
+        event = load_legacy_npc_open_event(
+            args.events, expected_ref=ref, client_id=args.client_id,
+        )
+        expected_disk_bytes = chain.capture_persisted_bytes()
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(json.dumps({
+            "ok": False, "eligible": False, "applied": False,
+            "reason": "legacy_npc_recovery_input_invalid", "message": str(exc)[:300],
+        }, ensure_ascii=False, sort_keys=True))
+        return 2
+    server = global_browser_injector()
+    server.start()
+    result = server.execute(
+        "npc_dialog_snapshot",
+        {"expectedName": event.giver_name, "expectedNpcId": event.npc_id},
+        timeout_s=max(0.1, min(30.0, float(args.timeout))), client_id=args.client_id,
+    )
+    try:
+        snapshot = json.loads(result.message) if result.ok else None
+    except (TypeError, json.JSONDecodeError):
+        snapshot = None
+    proof = evaluate_legacy_npc_recovery(
+        event, ref, client=server.client_snapshot(result.client_id),
+        current_client_id=args.client_id, result_client_id=result.client_id,
+        snapshot=snapshot, now=time.time(),
+    )
+    applied = False
+    if proof.eligible and args.apply:
+        try:
+            if proof.pending is None:
+                raise RuntimeError("legacy NPC recovery pending stage missing")
+            chain.recover_legacy_npc_dialog(
+                proof.pending, expected_disk_bytes=expected_disk_bytes,
+            )
+            applied = True
+        except (OSError, RuntimeError, ValueError) as exc:
+            payload = proof.receipt(applied=False)
+            payload.update({
+                "ok": False, "reason": "legacy_npc_recovery_checkpoint_write_failed",
+                "message": str(exc)[:300], "mode": "apply",
+            })
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return 2
+    payload = proof.receipt(applied=applied)
+    payload["mode"] = "apply" if args.apply else "plan"
+    payload["would_write_pending_npc_dialog"] = bool(proof.eligible and not args.apply)
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0 if proof.eligible else 1
+
 def command_injector_hunt_snapshot(args: argparse.Namespace) -> int:
     from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
 
@@ -565,15 +736,10 @@ def command_injector_inventory_snapshot(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 def command_injector_use_recovery_items(args: argparse.Namespace) -> int:
-    from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
-
     health_names = [name.strip() for item in args.health_names for name in item.split(",") if name.strip()]
     prowess_names = [name.strip() for item in args.prowess_names for name in item.split(",") if name.strip()]
-    server = global_browser_injector()
-    server.start()
-    logger = InMemoryEventLogger(dry_run=False)
-    sink = LiveMacActionSink(logger)
-    ok = sink.execute(
+    return _execute_cli_live_action(
+        args,
         ActionRequest(
             "use_recovery_items",
             dry_run=False,
@@ -592,73 +758,40 @@ def command_injector_use_recovery_items(args: argparse.Namespace) -> int:
                 "confirm_delay_ms": int(args.confirm_delay_ms),
                 "between_items_delay_ms": int(args.between_items_delay_ms),
             },
-        )
+        ),
     )
-    payload: dict[str, object] = {
-        "ok": ok,
-        "server_url": f"http://{DEFAULT_INJECTOR_HOST}:{server.port}",
-        "client_id": server.last_client_id,
-        "events": logger.events,
-    }
-    if not ok:
-        payload["extension_path"] = str((Path.cwd() / "browser_injector").resolve())
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if ok else 1
 
 def command_injector_attack_bot(args: argparse.Namespace) -> int:
-    from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
-
-    server = global_browser_injector()
-    server.start()
-    result = server.execute(
-        "attack_bot",
-        {"bot_id": int(args.bot_id), "confirmed": 1 if args.confirmed else 0},
-        timeout_s=max(0.1, float(args.timeout)),
+    return _execute_cli_live_action(
+        args,
+        ActionRequest(
+            "attack_visible_target",
+            dry_run=False,
+            metadata={
+                "allowed_bot_ids": [int(args.bot_id)],
+                "confirmed": 1 if args.confirmed else 0,
+                "timeout_s": max(0.1, float(args.timeout)),
+            },
+        ),
     )
-    payload: dict[str, object] = {
-        "ok": result.ok,
-        "server_url": f"http://{DEFAULT_INJECTOR_HOST}:{server.port}",
-        "client_id": result.client_id or server.last_client_id,
-    }
-    try:
-        payload["result"] = json.loads(result.message)
-    except json.JSONDecodeError:
-        payload["message"] = result.message
-    if not result.ok:
-        payload["extension_path"] = str((Path.cwd() / "browser_injector").resolve())
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result.ok else 1
 
 def command_injector_attack_visible(args: argparse.Namespace) -> int:
-    from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
-
     names = [name.strip() for item in args.names for name in item.split(",") if name.strip()]
     allowed_levels = _parse_target_level_args(args)
-    server = global_browser_injector()
-    server.start()
-    result = server.execute(
-        "attack_visible_bot",
-        {
-            "margin": int(args.margin),
-            "names": names,
-            "allowedLevels": list(allowed_levels or ()),
-            "confirmed": 1 if args.confirmed else 0,
-        },
-        timeout_s=max(0.1, float(args.timeout)),
+    return _execute_cli_live_action(
+        args,
+        ActionRequest(
+            "attack_visible_target",
+            dry_run=False,
+            metadata={
+                "margin": int(args.margin),
+                "names": names,
+                "allowed_levels": list(allowed_levels or ()),
+                "confirmed": 1 if args.confirmed else 0,
+                "timeout_s": max(0.1, float(args.timeout)),
+            },
+        ),
     )
-    payload: dict[str, object] = {
-        "ok": result.ok,
-        "server_url": f"http://{DEFAULT_INJECTOR_HOST}:{server.port}",
-        "client_id": result.client_id or server.last_client_id,
-    }
-    try:
-        payload["result"] = json.loads(result.message)
-    except json.JSONDecodeError:
-        payload["message"] = result.message
-    if not result.ok:
-        payload["extension_path"] = str((Path.cwd() / "browser_injector").resolve())
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result.ok else 1
 
 def command_injector_battle_snapshot(args: argparse.Namespace) -> int:
     from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
@@ -683,28 +816,58 @@ def command_injector_battle_snapshot(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 def command_injector_use_skill(args: argparse.Namespace) -> int:
+    return _execute_cli_live_action(
+        args,
+        ActionRequest(
+            "click_combat_slot",
+            dry_run=False,
+            metadata={
+                "use_js_skill": True,
+                "skill_slot": int(args.slot),
+                "timeout_s": max(0.1, float(args.timeout)),
+            },
+        ),
+    )
+
+
+def _execute_cli_live_action(args: argparse.Namespace, request: ActionRequest) -> int:
+    """Run one explicit CLI mutation through the shared safety/action path."""
+    if not bool(getattr(args, "live", False)):
+        print(
+            json.dumps(
+                {"ok": False, "blocked": True, "reason": "explicit_live_flag_required"},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+
     from src.antibot_cv.automation.browser_injector import DEFAULT_INJECTOR_HOST, global_browser_injector
 
+    config = load_config(getattr(args, "config", None)).with_overrides(dry_run=False)
+    logger = InMemoryEventLogger(dry_run=False)
     server = global_browser_injector()
     server.start()
-    result = server.execute(
-        "use_skill_slot",
-        {"slot": int(args.slot)},
-        timeout_s=max(0.1, float(args.timeout)),
+    session = SessionState(requested_cycles=max(1, int(config.max_cycles)))
+    executor = ActionExecutor(
+        guard=SafetyGuard(config),
+        session=session,
+        sink=LiveMacActionSink(logger, browser_client_id=getattr(args, "client_id", None)),
+        logger=logger,
     )
+    ok = executor.execute(request)
     payload: dict[str, object] = {
-        "ok": result.ok,
+        "ok": ok,
         "server_url": f"http://{DEFAULT_INJECTOR_HOST}:{server.port}",
-        "client_id": result.client_id or server.last_client_id,
+        "client_id": server.last_client_id,
+        "events": logger.events,
     }
-    try:
-        payload["result"] = json.loads(result.message)
-    except json.JSONDecodeError:
-        payload["message"] = result.message
-    if not result.ok:
+    if not ok:
         payload["extension_path"] = str((Path.cwd() / "browser_injector").resolve())
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if result.ok else 1
+    return 0 if ok else 1
 
 def _optional_float(value: object) -> float | None:
     if value is None:
@@ -794,17 +957,32 @@ def _iter_frame_paths(input_dir: Path) -> Iterable[Path]:
 def _add_client_id_arg(subparser: argparse.ArgumentParser) -> None:
     subparser.add_argument("--client-id", default=None, help="Target browser injector client id")
 
+
+def _add_live_action_args(subparser: argparse.ArgumentParser) -> None:
+    subparser.add_argument(
+        "--config", dest="_command_config", default=argparse.SUPPRESS
+    )
+    subparser.add_argument("--live", action="store_true", help="Explicitly authorize this live action")
+    _add_client_id_arg(subparser)
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Local bounded CV automation harness")
-    parser.add_argument("--config", default=None, help="Path to automation config JSON")
+    parser = _ConfigResolvingArgumentParser(
+        description="Local bounded CV automation harness"
+    )
+    parser.add_argument(
+        "--config",
+        dest="_global_config",
+        default=argparse.SUPPRESS,
+        help="Path to automation config JSON",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     calibrate = subparsers.add_parser("calibrate")
-    calibrate.add_argument("--config", default=None)
+    calibrate.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     calibrate.set_defaults(func=command_calibrate)
 
     run = subparsers.add_parser("run")
-    run.add_argument("--config", default=None)
+    run.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     run.add_argument("--preview", action="store_true")
     run.add_argument("--live", action="store_true")
     run.add_argument("--max-cycles", type=int, default=None)
@@ -818,16 +996,24 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--no-activate-app", action="store_true")
     run.add_argument("--hotkeys", action=argparse.BooleanOptionalAction, default=False)
     run.add_argument("--open-hunt-on-start", action=argparse.BooleanOptionalAction, default=False)
+    run.add_argument(
+        "--combat-only",
+        action="store_true",
+        help="Disable quest navigation/director for this bounded combat run",
+    )
     run.add_argument("--client-id", default=None, help="Target browser injector client id when several Chrome windows are connected")
     run.set_defaults(func=command_run)
 
     control_server = subparsers.add_parser("control-server")
-    control_server.add_argument("--config", default="config/automation.local.json")
+    control_server.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     control_server.add_argument("--live", action="store_true", help="Explicitly allow live runs requested by the extension")
-    control_server.set_defaults(func=command_control_server)
+    control_server.set_defaults(
+        func=command_control_server,
+        _default_config="config/automation.local.json",
+    )
 
     validate = subparsers.add_parser("validate-templates")
-    validate.add_argument("--config", default=None)
+    validate.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     validate.set_defaults(func=command_validate_templates)
 
     assess_recovery = subparsers.add_parser("assess-m1-recovery")
@@ -835,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     assess_recovery.set_defaults(func=command_assess_m1_recovery)
 
     inspect_resources = subparsers.add_parser("inspect-resources")
-    inspect_resources.add_argument("--config", default=None)
+    inspect_resources.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     inspect_resources.add_argument("--input", default=None)
     inspect_resources.add_argument("--output-frame", default=None)
     inspect_resources.add_argument("--output-overlay", default=None)
@@ -844,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_resources.set_defaults(func=command_inspect_resources)
 
     capture_template = subparsers.add_parser("capture-template")
-    capture_template.add_argument("--config", default=None)
+    capture_template.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     capture_template.add_argument("--template-id", required=True)
     capture_template.add_argument("--output", default=None)
     capture_template.add_argument("--templates-config", default=None)
@@ -854,7 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture_template.set_defaults(func=command_capture_template)
 
     replay = subparsers.add_parser("replay")
-    replay.add_argument("--config", default=None)
+    replay.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
     replay.add_argument("--input", required=True)
     replay.add_argument("--max-cycles", type=int, default=None)
     replay.add_argument("--max-session-minutes", type=int, default=None)
@@ -913,6 +1099,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_client_id_arg(injector_state_snapshot)
     injector_state_snapshot.set_defaults(func=command_injector_state_snapshot)
 
+    recover_catalog = subparsers.add_parser("recover-catalog-navigation")
+    recover_catalog.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
+    recover_catalog.add_argument("--client-id", required=True)
+    recover_catalog.add_argument("--timeout", type=float, default=10.0)
+    recover_catalog.add_argument("--apply", action="store_true")
+    recover_catalog.set_defaults(func=command_recover_catalog_navigation)
+
+    recover_legacy_npc = subparsers.add_parser("recover-legacy-npc-open")
+    recover_legacy_npc.add_argument("--config", dest="_command_config", default=argparse.SUPPRESS)
+    recover_legacy_npc.add_argument("--client-id", required=True)
+    recover_legacy_npc.add_argument("--events", required=True)
+    recover_legacy_npc.add_argument("--timeout", type=float, default=10.0)
+    recover_legacy_npc.add_argument("--apply", action="store_true")
+    recover_legacy_npc.set_defaults(func=command_recover_legacy_npc_open)
+
     injector_hunt_snapshot = subparsers.add_parser("injector-hunt-snapshot")
     injector_hunt_snapshot.add_argument("--timeout", type=float, default=10.0)
     _add_client_id_arg(injector_hunt_snapshot)
@@ -965,14 +1166,14 @@ def build_parser() -> argparse.ArgumentParser:
     injector_recovery_items.add_argument("--use-if-missing", action=argparse.BooleanOptionalAction, default=True)
     injector_recovery_items.add_argument("--open-hunt-after", action=argparse.BooleanOptionalAction, default=True)
     injector_recovery_items.add_argument("--timeout", type=float, default=8.0)
-    _add_client_id_arg(injector_recovery_items)
+    _add_live_action_args(injector_recovery_items)
     injector_recovery_items.set_defaults(func=command_injector_use_recovery_items)
 
     injector_attack_bot = subparsers.add_parser("injector-attack-bot")
     injector_attack_bot.add_argument("--bot-id", type=int, required=True)
     injector_attack_bot.add_argument("--confirmed", action="store_true")
     injector_attack_bot.add_argument("--timeout", type=float, default=10.0)
-    _add_client_id_arg(injector_attack_bot)
+    _add_live_action_args(injector_attack_bot)
     injector_attack_bot.set_defaults(func=command_injector_attack_bot)
 
     injector_attack_visible = subparsers.add_parser("injector-attack-visible")
@@ -982,7 +1183,7 @@ def build_parser() -> argparse.ArgumentParser:
     injector_attack_visible.add_argument("--target-levels", nargs="*", default=[])
     injector_attack_visible.add_argument("--confirmed", action=argparse.BooleanOptionalAction, default=True)
     injector_attack_visible.add_argument("--timeout", type=float, default=10.0)
-    _add_client_id_arg(injector_attack_visible)
+    _add_live_action_args(injector_attack_visible)
     injector_attack_visible.set_defaults(func=command_injector_attack_visible)
 
     injector_battle_snapshot = subparsers.add_parser("injector-battle-snapshot")
@@ -993,7 +1194,7 @@ def build_parser() -> argparse.ArgumentParser:
     injector_use_skill = subparsers.add_parser("injector-use-skill")
     injector_use_skill.add_argument("--slot", type=int, default=4)
     injector_use_skill.add_argument("--timeout", type=float, default=10.0)
-    _add_client_id_arg(injector_use_skill)
+    _add_live_action_args(injector_use_skill)
     injector_use_skill.set_defaults(func=command_injector_use_skill)
     return parser
 
@@ -1001,8 +1202,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     client_id = getattr(args, "client_id", None)
-    if client_id:
+    if client_id and (not hasattr(args, "live") or bool(args.live)):
         from src.antibot_cv.automation.browser_injector import global_browser_injector
 
         global_browser_injector().set_current_client_id(str(client_id))
     return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

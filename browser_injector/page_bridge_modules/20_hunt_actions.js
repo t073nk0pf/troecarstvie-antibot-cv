@@ -1,3 +1,13 @@
+  // Created once per injected document.  It is stable across snapshots and
+  // changes only when navigation/reload creates a new document.
+  const activeQuestNavigationRevision = (() => {
+    try {
+      const origin = window.performance && Number(window.performance.timeOrigin);
+      if (Number.isFinite(origin) && origin > 0) return `document-${origin}`;
+    } catch (_) {}
+    return `document-${Date.now()}`;
+  })();
+
   const huntDebug = () => {
     const hunt = findHuntApp();
     if (!hunt) {
@@ -663,17 +673,17 @@
     }
     if (!method) return { ok: false, message: "attack_function_missing" };
     const verifyTimeoutMs = Math.max(500, Math.min(6000, parseInt(payload && payload.verifyTimeoutMs, 10) || 3500));
-    const deadline = Date.now() + verifyTimeoutMs;
-    let battle = battleSnapshot();
-    let botInfo = huntBotInfo({ bot_id: botId });
+    let botInfo = null;
     const confirmedAttack = () =>
       Boolean(battle.hasFight) ||
       Boolean(botInfo && botInfo.ok && botInfo.bot && Number(botInfo.bot.fightId) > 0);
-    while (!confirmedAttack() && Date.now() < deadline) {
-      await delayMs(100);
-      battle = battleSnapshot();
-      botInfo = huntBotInfo({ bot_id: botId });
-    }
+    const verified = await adaptiveVerify(
+      () => ({ battle: battleSnapshot(), botInfo: huntBotInfo({ bot_id: botId }) }),
+      (value) => Boolean(value.battle.hasFight) || Boolean(value.botInfo && value.botInfo.ok && value.botInfo.bot && Number(value.botInfo.bot.fightId) > 0),
+      { timeoutMs: verifyTimeoutMs, fingerprint: (value) => `${value.battle.snapshotId || ""}:${value.botInfo && value.botInfo.bot ? value.botInfo.bot.fightId : 0}` },
+    );
+    const battle = verified.battle;
+    botInfo = verified.botInfo;
     const actionConfirmed = confirmedAttack();
     return {
       ok: actionConfirmed,
@@ -731,12 +741,11 @@
       return { ok: false, message: "open_hunt_control_missing", before };
     }
     const verifyTimeoutMs = Math.max(250, Math.min(5000, parseInt(payload && payload.verifyTimeoutMs, 10) || 2000));
-    const deadline = Date.now() + verifyTimeoutMs;
-    let after = huntNavigationSnapshot();
-    while (!after.hasHunt && !/\/hunt\.php(?:\?|$)/.test(after.mainHref) && Date.now() < deadline) {
-      await delayMs(100);
-      after = huntNavigationSnapshot();
-    }
+    const after = await adaptiveVerify(
+      huntNavigationSnapshot,
+      (value) => value.hasHunt || /\/hunt\.php(?:\?|$)/.test(value.mainHref),
+      { timeoutMs: verifyTimeoutMs, fingerprint: (value) => `${value.mainHref}:${value.hasHunt}` },
+    );
     const verified = after.hasHunt || /\/hunt\.php(?:\?|$)/.test(after.mainHref);
     return {
       ok: verified,
@@ -847,12 +856,11 @@
     }
     if (!clicked) return { ok: false, message: "quests_control_missing" };
     const verifyTimeoutMs = Math.max(250, Math.min(5000, parseInt(payload && payload.verifyTimeoutMs, 10) || 2000));
-    const deadline = Date.now() + verifyTimeoutMs;
-    let after = mainContentContext();
-    while (after.pageKind !== "quests" && Date.now() < deadline) {
-      await delayMs(100);
-      after = mainContentContext();
-    }
+    const after = await adaptiveVerify(
+      mainContentContext,
+      (value) => value.pageKind === "quests",
+      { timeoutMs: verifyTimeoutMs, fingerprint: (value) => `${value.pageKind}:${value.href}` },
+    );
     const confirmed = after.pageKind === "quests";
     return {
       ok: confirmed,
@@ -867,7 +875,7 @@
   const openQuestCatalog = async (payload = {}) => {
     const rawPage = payload && payload.page;
     if (typeof rawPage !== "number" || !Number.isInteger(rawPage) || rawPage < 0 || rawPage > 100) {
-      return { ok: false, message: "quest_catalog_page_invalid", page: rawPage == null ? null : safeString(rawPage, 40) };
+      return { ok: false, outcome: "NOT_ISSUED", mutationIssued: false, message: "quest_catalog_page_invalid", page: rawPage == null ? null : safeString(rawPage, 40) };
     }
     const page = rawPage;
     const root = window.top || window;
@@ -875,16 +883,21 @@
     const beforeMode = safeString((before.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
     const beforePageMatch = before.href.match(/[?&]page=(\d+)/i);
     const beforePage = beforePageMatch ? parseInt(beforePageMatch[1], 10) : 0;
-    if (before.pageKind === "quests" && beforeMode === "avail" && beforePage === page) {
+    const beforeShellLoaded = /Взятые[\s\S]*Повторяющиеся[\s\S]*Доступные[\s\S]*Завершенные/i.test(safeString(before.text, 20000));
+    const destination = `/user_quest.php?mode=avail&page=${page}`;
+    if (before.pageKind === "quests" && beforeMode === "avail" && beforePage === page && beforeShellLoaded) {
       return {
         ok: true,
+        outcome: "CONFIRMED",
+        mutationIssued: false,
         message: "quest_catalog_already_open",
         page,
+        destination,
+        shellLoaded: true,
         before: { pageKind: before.pageKind, href: before.href },
         after: { pageKind: before.pageKind, href: before.href, mode: beforeMode, page: beforePage },
       };
     }
-    const destination = `/user_quest.php?mode=avail&page=${page}`;
     let method = null;
     try {
       const mainWin = findMainContentWindow(root);
@@ -893,7 +906,7 @@
         method = "main_frame_direct";
       }
     } catch (_) {}
-    if (!method) return { ok: false, message: "quest_catalog_main_content_missing", page };
+    if (!method) return { ok: false, outcome: "NOT_ISSUED", mutationIssued: false, message: "quest_catalog_main_content_missing", page, destination };
     const verifyTimeoutMs = Math.max(250, Math.min(5000, Number(payload && payload.verifyTimeoutMs) || 2000));
     const deadline = Date.now() + verifyTimeoutMs;
     let after = mainContentContext();
@@ -911,13 +924,16 @@
     }
     const confirmed = after.pageKind === "quests" && afterMode === "avail" && afterPage === page && shellLoaded;
     return {
-      ok: confirmed,
+      ok: true,
+      outcome: confirmed ? "CONFIRMED" : "ACK_PENDING",
+      mutationIssued: true,
       message: confirmed ? "quest_catalog_opened_confirmed" : "quest_catalog_open_unconfirmed",
       page,
       destination,
       method,
       before: { pageKind: before.pageKind, href: before.href },
       after: { pageKind: after.pageKind, href: after.href, mode: afterMode, page: afterPage },
+      shellLoaded,
       verifyTimeoutMs,
     };
   };
@@ -925,34 +941,72 @@
   const openActiveQuestPage = async (payload = {}) => {
     const rawPage = payload && payload.page;
     if (typeof rawPage !== "number" || !Number.isInteger(rawPage) || rawPage < 0 || rawPage > 100) {
-      return { ok: false, message: "quest_active_page_invalid", page: rawPage == null ? null : safeString(rawPage, 40) };
+      return { ok: false, outcome: "NOT_ISSUED", mutationIssued: false, message: "quest_active_page_invalid", page: rawPage == null ? null : safeString(rawPage, 40) };
     }
     const page = rawPage;
     const before = mainContentContext();
     const beforeMode = safeString((before.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
     const beforePageMatch = before.href.match(/[?&]page=(\d+)/i);
     const beforePage = beforePageMatch ? parseInt(beforePageMatch[1], 10) : 0;
-    if (before.pageKind === "quests" && beforeMode === "started" && beforePage === page) {
-      return {
-        ok: true,
-        message: "quest_active_already_open",
-        page,
-        before: { pageKind: before.pageKind, href: before.href },
-        after: { pageKind: before.pageKind, href: before.href, mode: beforeMode, page: beforePage },
-      };
-    }
     const destination = `/user_quest.php?mode=started&page=${page}`;
     let method = null;
-    try {
-      const mainWin = findMainContentWindow(window.top || window);
-      if (mainWin && mainWin.location) {
-        mainWin.location.href = destination;
-        method = "main_frame_direct";
-      }
-    } catch (_) {}
-    if (!method) return { ok: false, message: "quest_active_main_content_missing", page };
+    const issuedAt = new Date().toISOString();
     const verifyTimeoutMs = Math.max(250, Math.min(5000, Number(payload && payload.verifyTimeoutMs) || 2000));
     const deadline = Date.now() + verifyTimeoutMs;
+    // From hunt/area pages the game's own top-bar control is authoritative:
+    // assigning the nested main-frame URL can be overwritten by a pending
+    // hunt -> area transition.  Enter the quest section through that control
+    // first, then use direct paging only after the quest shell owns the frame.
+    if (before.pageKind !== "quests") {
+      const root = window.top || window;
+      walkWindows(root, "top", 5, new Set(), (win) => {
+        if (method) return;
+        try {
+          const elements = Array.from(win.document.querySelectorAll("a,button,[onclick]")).slice(0, 1200);
+          for (const element of elements) {
+            if (safeString(elementText(element), 120).trim().toLowerCase() !== "квесты") continue;
+            const clickable = clickableElement(element);
+            if (!clickable || typeof clickable.click !== "function") continue;
+            clickable.click();
+            method = "quest_control";
+            break;
+          }
+        } catch (_) {}
+      });
+      if (method === "quest_control") {
+        let entered = mainContentContext();
+        const entryDeadline = Math.min(deadline, Date.now() + Math.min(2000, Math.floor(verifyTimeoutMs / 2)));
+        while (entered.pageKind !== "quests" && Date.now() < entryDeadline) {
+          await delayMs(100);
+          entered = mainContentContext();
+        }
+        const enteredMode = safeString((entered.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
+        const enteredPageMatch = entered.href.match(/[?&]page=(\d+)/i);
+        const enteredPage = enteredPageMatch ? parseInt(enteredPageMatch[1], 10) : 0;
+        if (entered.pageKind === "quests" && (enteredMode !== "started" || enteredPage !== page)) {
+          try {
+            const mainWin = findMainContentWindow(root);
+            if (mainWin && mainWin.location) {
+              mainWin.location.href = destination;
+              method = "quest_control_then_main_frame_direct";
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    try {
+      const mainWin = findMainContentWindow(window.top || window);
+      if (!method && mainWin && mainWin.location) {
+        if (before.pageKind === "quests" && beforeMode === "started" && beforePage === page) {
+          mainWin.location.reload();
+          method = "main_frame_reload";
+        } else {
+          mainWin.location.href = destination;
+          method = "main_frame_direct";
+        }
+      }
+    } catch (_) {}
+    if (!method) return { ok: false, outcome: "NOT_ISSUED", mutationIssued: false, message: "quest_active_main_content_missing", page, destination, issuedAt };
     let after = mainContentContext();
     let afterMode = safeString((after.href.match(/[?&]mode=([^&#]+)/i) || [])[1], 24).toLowerCase();
     let afterPageMatch = after.href.match(/[?&]page=(\d+)/i);
@@ -968,13 +1022,17 @@
     }
     const confirmed = after.pageKind === "quests" && afterMode === "started" && afterPage === page && shellLoaded;
     return {
-      ok: confirmed,
+      ok: true,
+      outcome: confirmed ? "CONFIRMED" : "ACK_PENDING",
+      mutationIssued: true,
       message: confirmed ? "quest_active_opened_confirmed" : "quest_active_open_unconfirmed",
       page,
       destination,
+      issuedAt,
       method,
       before: { pageKind: before.pageKind, href: before.href },
       after: { pageKind: after.pageKind, href: after.href, mode: afterMode, page: afterPage },
+      shellLoaded,
       verifyTimeoutMs,
     };
   };

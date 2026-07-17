@@ -5,6 +5,14 @@ from __future__ import annotations
 import re
 
 
+class QuestGiverMissingError(ValueError):
+    """No actionable actor can yet be bound to the expected giver."""
+
+
+class QuestGiverAmbiguousError(ValueError):
+    """More than one actionable actor matches the expected giver."""
+
+
 def resolve_unique_giver(expected: str, items: object) -> dict[str, object]:
     """Return one actionable NPC matching exact text or deterministic word stems."""
 
@@ -15,7 +23,7 @@ def resolve_unique_giver(expected: str, items: object) -> dict[str, object]:
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
-        raise ValueError("quest giver NPC is ambiguous")
+        raise QuestGiverAmbiguousError("quest giver NPC is ambiguous")
     expected_signature = _stem_signature(expected)
     if not expected_signature:
         raise ValueError("quest giver name is invalid")
@@ -27,7 +35,7 @@ def resolve_unique_giver(expected: str, items: object) -> dict[str, object]:
     if len(morphological) == 1:
         return morphological[0]
     if len(morphological) > 1:
-        raise ValueError("quest giver NPC is ambiguous")
+        raise QuestGiverAmbiguousError("quest giver NPC is ambiguous")
     # Some locations expose a building/proxy (for example ``Дом Франка``)
     # instead of the catalogue role (``Хранитель леса Франк``).  The final
     # proper-name stem is safe only when it identifies exactly one actionable
@@ -39,8 +47,10 @@ def resolve_unique_giver(expected: str, items: object) -> dict[str, object]:
         if len(proper_name_stem) >= 4
         and proper_name_stem in _stem_signature(str(item.get("name") or ""))
     ]
-    if len(proxy_matches) != 1:
-        raise ValueError("quest giver NPC is missing or ambiguous")
+    if len(proxy_matches) > 1:
+        raise QuestGiverAmbiguousError("quest giver NPC is missing or ambiguous")
+    if not proxy_matches:
+        raise QuestGiverMissingError("quest giver NPC is missing or ambiguous")
     return proxy_matches[0]
 
 

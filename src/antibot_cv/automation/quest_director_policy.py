@@ -54,6 +54,7 @@ class QuestDirectorState:
     active_quests: tuple[QuestRef, ...] = ()
     available_quests: tuple[QuestRef, ...] = ()
     intake_queue: tuple[QuestRef, ...] = ()
+    unsupported_available_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -67,8 +68,9 @@ class QuestDirectorDecision:
 class QuestDirectorPolicy:
     """Choose one deterministic next step for the autonomous quest loop."""
 
-    def __init__(self, *, refresh_every_completed: int = 5) -> None:
+    def __init__(self, *, refresh_every_completed: int = 5, prefer_active_quests: bool = False) -> None:
         self.refresh_every_completed = refresh_every_completed
+        self.prefer_active_quests = prefer_active_quests
 
     def decide(self, state: QuestDirectorState) -> QuestDirectorDecision:
         invalid = self._invalid_reason(state)
@@ -110,6 +112,14 @@ class QuestDirectorPolicy:
                 intake_queue=queue,
             )
 
+        if self.prefer_active_quests and state.active_quests:
+            return QuestDirectorDecision(
+                QuestDirectorIntent.EXECUTE_ACTIVE,
+                "active_quest_preferred_over_intake",
+                quest=state.active_quests[0],
+                intake_queue=queue,
+            )
+
         # Intake all newly discovered quests before choosing one to execute.
         # The integration removes the acknowledged head and calls decide again.
         if queue:
@@ -131,6 +141,12 @@ class QuestDirectorPolicy:
             return QuestDirectorDecision(
                 QuestDirectorIntent.REFRESH_AVAILABLE,
                 "active_queue_empty_refresh_required",
+            )
+
+        if state.unsupported_available_count:
+            return QuestDirectorDecision(
+                QuestDirectorIntent.WAIT,
+                "unsupported_available_quests_present",
             )
 
         # Farming is permitted only after one fresh observation proves that
@@ -160,6 +176,9 @@ class QuestDirectorPolicy:
             not isinstance(state.completed_since_refresh, int)
             or isinstance(state.completed_since_refresh, bool)
             or state.completed_since_refresh < 0
+            or not isinstance(state.unsupported_available_count, int)
+            or isinstance(state.unsupported_available_count, bool)
+            or state.unsupported_available_count < 0
         ):
             return "invalid_completed_quest_count"
         all_quests = (*state.active_quests, *state.available_quests, *state.intake_queue)

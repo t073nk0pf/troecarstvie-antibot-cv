@@ -13,15 +13,16 @@ const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
 const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
 
 function makeWindow(name, href) {
-  return {
+  const win = {
     name,
     location: { href },
     frames: [],
-    document: { title: "", querySelectorAll() { return []; } },
+    document: { title: "", querySelectorAllCalls: 0, querySelectorAll() { this.querySelectorAllCalls += 1; return []; } },
   };
+  return win;
 }
 
-function setupBridge(finished, resultText = null, resourceText = "") {
+function setupBridge(finished, resultText = null, resourceText = "", skillMode = "confirmed", abilityCount = 1, completeAbilityEvidence = true) {
   const messages = [];
   const listeners = {};
   const root = makeWindow("top", "https://3kingdoms.ru/main.php");
@@ -50,18 +51,54 @@ function setupBridge(finished, resultText = null, resourceText = "") {
   fightWin.fight = {
     model: {
       finished,
+      battleId: "fight-epoch-1",
       fightState: finished ? 2 : 1,
       oppId: finished ? 0 : 123,
       myTurn: !finished,
       enabledControl: true,
       totalDmg: 40,
+      player: { position: "front", stance: "attack" },
       abilities: {
-        all: [{ id: -4626, slot: 2, name: "skill" }],
+        all: Array.from({ length: abilityCount }, (_, index) => ({
+          id: -4626 - index, slot: 2 + index, name: `skill-${index}`, ready: true,
+          ...(completeAbilityEvidence ? { cooldownRemaining: 0 } : {}),
+        })),
       },
     },
   };
+  let omitAbilityIdentity = false;
+  const abilityElements = fightWin.fight.model.abilities.all.map((ability) => ({
+    disabled: false,
+    offsetWidth: 20,
+    offsetHeight: 20,
+    getClientRects() { return [{ width: 20, height: 20 }]; },
+    getAttribute(name) {
+      const values = {
+        "data-slot": String(ability.slot),
+        "data-ability-id": String(ability.id),
+        "data-ability-name": ability.name,
+        "data-ready": "true",
+        "data-cooldown": "0",
+      };
+      return omitAbilityIdentity && ["data-ability-id", "data-ability-name"].includes(name)
+        ? null
+        : values[name] ?? null;
+    },
+  }));
+  const abilityContainer = { querySelectorAll() { return abilityElements; } };
+  fightWin.document.querySelectorAll = function(selector) {
+    this.querySelectorAllCalls += 1;
+    return selector.includes("data-battle-abilities") ? [abilityContainer] : [];
+  };
   fightWin.useSkill = (slot) => {
     fightWin.usedSlot = slot;
+    if (skillMode === "stance-promise") {
+      fightWin.fight.model.player.position = "back";
+      return Promise.resolve("stance-applied");
+    }
+    if (skillMode === "opaque-object") {
+      return { confirmed: true, secret: "must-not-be-serialized" };
+    }
     fightWin.fight.model.totalDmg += 1;
     return true;
   };
@@ -90,8 +127,39 @@ function setupBridge(finished, resultText = null, resourceText = "") {
     };
   }
 
-  return { command };
+  return {
+    command,
+    setAbility(values) { Object.assign(fightWin.fight.model.abilities.all[0], values); },
+    setTurn(myTurn, enabledControl = true) {
+      fightWin.fight.model.myTurn = myTurn;
+      fightWin.fight.model.enabledControl = enabledControl;
+    },
+    setBattleId(value) { fightWin.fight.model.battleId = value; },
+    clearUsedSlot() { fightWin.usedSlot = undefined; },
+    removeFight() { fightWin.fight = null; },
+    abilityDomScanCount() { return fightWin.document.querySelectorAllCalls; },
+    removeAbilityDomEvidence() { fightWin.document.querySelectorAll = () => []; },
+    removeAbilityDomIdentity() { omitAbilityIdentity = true; },
+    addBattleItemAtSkillSlot() {
+      fightWin.fight.model.abilities.all.push({
+        id: 3581914081, slot: 2, name: "Превосходный нектар удали", ready: true, cooldownRemaining: 0,
+      });
+    },
+    resourceDomScanCount() { return mainFrame.document.querySelectorAllCalls; },
+  };
 }
+
+const mutationPayload = (snapshot, overrides = {}) => ({
+  slot: snapshot.abilities[0].slot,
+  expectedSkillId: snapshot.abilities[0].id,
+  expectedSkillName: snapshot.abilities[0].name,
+  expectedSkillSlot: snapshot.abilities[0].slot,
+  expectedBattleIdentity: snapshot.battleIdentity,
+  expectedSnapshotId: snapshot.snapshotId,
+  expectedObservationToken: snapshot.observationToken,
+  verifyTimeoutMs: 250,
+  ...overrides,
+});
 
 ;(async () => {
 const finished = setupBridge(true);
@@ -112,20 +180,185 @@ const finishedDeadSnapshot = await finishedDead.command("battle_snapshot");
 assert.strictEqual(finishedDeadSnapshot.message.outcome, "defeat");
 assert.strictEqual(finishedDeadSnapshot.message.outcomeEvidence, "finished_player_health_zero");
 
-const finishedUseSkill = await finished.command("use_skill_slot", { slot: 2 });
+const finishedUseSkill = await finished.command("use_skill_slot", mutationPayload(finishedSnapshot.message));
 assert.strictEqual(finishedUseSkill.ok, false);
-assert.strictEqual(finishedUseSkill.message.message, "fight_finished");
+assert.strictEqual(finishedUseSkill.message.message, "skill_mutation_binding_missing");
 
 const active = setupBridge(false);
 const activeSnapshot = await active.command("battle_snapshot");
 assert.strictEqual(activeSnapshot.message.hasFight, true);
 assert.strictEqual(activeSnapshot.message.finished, false);
 assert.strictEqual(activeSnapshot.message.useSkillAvailable, true);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(activeSnapshot.message.turnEvidence)),
+  {
+    authoritative: true,
+    myTurn: true,
+    enabledControl: true,
+    sources: ["model.myTurn", "model.enabledControl"],
+  }
+);
 
-const activeUseSkill = await active.command("use_skill_slot", { slot: 2, verifyTimeoutMs: 250 });
+const indexed = setupBridge(false, null, "", "confirmed", 6);
+const indexedSnapshot = await indexed.command("battle_snapshot");
+assert.strictEqual(indexedSnapshot.message.abilities.length, 6);
+assert.strictEqual(indexed.abilityDomScanCount(), 0);
+
+const indexedFallback = setupBridge(false, null, "", "confirmed", 6, false);
+const indexedFallbackSnapshot = await indexedFallback.command("battle_snapshot");
+assert.strictEqual(indexedFallbackSnapshot.message.abilities.length, 6);
+assert.strictEqual(indexedFallback.abilityDomScanCount(), 1);
+
+const cdOnly = setupBridge(false);
+cdOnly.setAbility({ ready: undefined, cooldownRemaining: undefined, cd: 0 });
+const cdOnlySnapshot = await cdOnly.command("battle_snapshot");
+assert.strictEqual(cdOnlySnapshot.message.abilities[0].readinessEvidence.authoritative, true);
+assert.strictEqual(cdOnlySnapshot.message.abilities[0].readinessEvidence.ready, true);
+assert.strictEqual(cdOnlySnapshot.message.abilities[0].readinessEvidence.cooldownRemaining, 0);
+assert.strictEqual(activeSnapshot.message.abilities[0].readinessEvidence.authoritative, true);
+assert.strictEqual(activeSnapshot.message.abilities[0].readinessEvidence.ready, true);
+assert.strictEqual(activeSnapshot.message.abilities[0].readinessEvidence.cooldownRemaining, 0);
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(activeSnapshot.message.playerStanceState)),
+  [
+    { path: "model.player.position", type: "string", value: "front" },
+    { path: "model.player.stance", type: "string", value: "attack" },
+  ]
+);
+
+const activeUseSkill = await active.command("use_skill_slot", mutationPayload(activeSnapshot.message));
 assert.strictEqual(activeUseSkill.ok, true);
 assert.strictEqual(activeUseSkill.usedSlot, 2);
 assert.strictEqual(activeUseSkill.message.message, "useSkill_confirmed");
+assert.strictEqual(active.resourceDomScanCount(), 1);
+
+const sharedSlot = setupBridge(false);
+sharedSlot.addBattleItemAtSkillSlot();
+const sharedSlotSnapshot = await sharedSlot.command("battle_snapshot");
+const sharedSlotUseSkill = await sharedSlot.command("use_skill_slot", mutationPayload(sharedSlotSnapshot.message));
+assert.strictEqual(sharedSlotUseSkill.ok, true);
+assert.strictEqual(sharedSlotUseSkill.usedSlot, 2);
+
+const missingDom = setupBridge(false);
+const missingDomSnapshot = await missingDom.command("battle_snapshot");
+missingDom.removeAbilityDomEvidence();
+const missingDomUseSkill = await missingDom.command("use_skill_slot", mutationPayload(missingDomSnapshot.message));
+assert.strictEqual(missingDomUseSkill.ok, true);
+assert.strictEqual(missingDomUseSkill.message.ability.readinessEvidence.bindingSource, "model");
+
+const genericDom = setupBridge(false);
+const genericDomSnapshot = await genericDom.command("battle_snapshot");
+genericDom.removeAbilityDomIdentity();
+const genericDomUseSkill = await genericDom.command("use_skill_slot", mutationPayload(genericDomSnapshot.message));
+assert.strictEqual(genericDomUseSkill.ok, true);
+assert.strictEqual(genericDomUseSkill.message.message, "useSkill_confirmed");
+
+const stance = setupBridge(false, null, "", "stance-promise");
+const stanceSnapshot = await stance.command("battle_snapshot");
+const stanceUseSkill = await stance.command("use_skill_slot", mutationPayload(stanceSnapshot.message));
+assert.strictEqual(stanceUseSkill.ok, false);
+assert.strictEqual(stanceUseSkill.message.message, "useSkill_unconfirmed");
+assert.strictEqual(stanceUseSkill.message.returnObservation.raw.type, "promise");
+assert.strictEqual(stanceUseSkill.message.returnObservation.promise.status, "resolved");
+assert.deepStrictEqual(
+  JSON.parse(JSON.stringify(stanceUseSkill.message.returnObservation.promise.result)),
+  { type: "string", length: 14 }
+);
+assert.strictEqual(JSON.stringify(stanceUseSkill.message).includes("stance-applied"), false);
+assert.strictEqual(stanceUseSkill.message.beforePlayerStanceState[0].value, "front");
+assert.strictEqual(stanceUseSkill.message.afterPlayerStanceState[0].value, "back");
+
+const opaque = setupBridge(false, null, "", "opaque-object");
+const opaqueSnapshot = await opaque.command("battle_snapshot");
+const opaqueUseSkill = await opaque.command("use_skill_slot", mutationPayload(opaqueSnapshot.message));
+assert.strictEqual(opaqueUseSkill.ok, false);
+assert.strictEqual(opaqueUseSkill.message.returnObservation.raw.type, "object");
+assert.strictEqual(JSON.stringify(opaqueUseSkill.message).includes("must-not-be-serialized"), false);
+
+for (const mutation of [
+  { values: { slot: 3 }, expected: "ability_slot_missing" },
+]) {
+  const guarded = setupBridge(false);
+  const observed = await guarded.command("battle_snapshot");
+  guarded.setAbility(mutation.values);
+  const rejected = await guarded.command("use_skill_slot", mutationPayload(observed.message));
+  assert.strictEqual(rejected.ok, false);
+  assert.strictEqual(rejected.message.message, mutation.expected);
+  assert.strictEqual(rejected.usedSlot, undefined);
+}
+
+for (const values of [
+  { ready: false, cooldownRemaining: 2 },
+  { ready: undefined, cooldownRemaining: undefined },
+]) {
+  const nonready = setupBridge(false);
+  const observed = await nonready.command("battle_snapshot");
+  nonready.setAbility(values);
+  const submitted = await nonready.command("use_skill_slot", mutationPayload(observed.message));
+  assert.strictEqual(submitted.ok, true);
+  assert.strictEqual(submitted.usedSlot, 2);
+}
+
+const fabricated = setupBridge(false);
+const fabricatedSnapshot = await fabricated.command("battle_snapshot");
+const fabricatedUse = await fabricated.command(
+  "use_skill_slot",
+  mutationPayload(fabricatedSnapshot.message, { expectedObservationToken: "fabricated-token" }),
+);
+assert.strictEqual(fabricatedUse.ok, false);
+assert.strictEqual(fabricatedUse.message.message, "skill_mutation_token_expired_or_unknown");
+assert.strictEqual(fabricatedUse.usedSlot, undefined);
+
+const reused = setupBridge(false);
+const reusedSnapshot = await reused.command("battle_snapshot");
+const firstUse = await reused.command("use_skill_slot", mutationPayload(reusedSnapshot.message));
+assert.strictEqual(firstUse.ok, true);
+reused.clearUsedSlot();
+const reusedUse = await reused.command("use_skill_slot", mutationPayload(reusedSnapshot.message));
+assert.strictEqual(reusedUse.ok, false);
+assert.strictEqual(reusedUse.message.message, "skill_mutation_token_expired_or_unknown");
+assert.strictEqual(reusedUse.usedSlot, undefined);
+
+const expired = setupBridge(false);
+const expiredSnapshot = await expired.command("battle_snapshot");
+await new Promise((resolve) => setTimeout(resolve, 1250));
+const expiredUse = await expired.command("use_skill_slot", mutationPayload(expiredSnapshot.message));
+assert.strictEqual(expiredUse.ok, false);
+assert.strictEqual(expiredUse.message.message, "skill_mutation_token_expired_or_unknown");
+assert.strictEqual(expiredUse.usedSlot, undefined);
+
+const newEpoch = setupBridge(false);
+const priorEpochSnapshot = await newEpoch.command("battle_snapshot");
+newEpoch.setBattleId("fight-epoch-2");
+const priorEpochUse = await newEpoch.command("use_skill_slot", mutationPayload(priorEpochSnapshot.message));
+assert.strictEqual(priorEpochUse.ok, false);
+assert.strictEqual(priorEpochUse.message.message, "skill_mutation_battle_mismatch");
+assert.strictEqual(priorEpochUse.usedSlot, undefined);
+
+const malformedEpoch = setupBridge(false);
+malformedEpoch.setBattleId(null);
+const malformedSnapshot = await malformedEpoch.command("battle_snapshot");
+assert.ok(malformedSnapshot.message.battleIdentity.includes("battle:1"));
+assert.ok(malformedSnapshot.message.observationToken);
+const malformedUse = await malformedEpoch.command("use_skill_slot", mutationPayload(malformedSnapshot.message));
+assert.strictEqual(malformedUse.ok, true);
+assert.strictEqual(malformedUse.usedSlot, 2);
+
+const turnFlip = setupBridge(false);
+const turnSnapshot = await turnFlip.command("battle_snapshot");
+turnFlip.setTurn(false, false);
+const turnUse = await turnFlip.command("use_skill_slot", mutationPayload(turnSnapshot.message));
+assert.strictEqual(turnUse.ok, false);
+assert.strictEqual(turnUse.message.message, "skill_mutation_turn_not_authoritative");
+assert.strictEqual(turnUse.usedSlot, undefined);
+
+const failedProbe = setupBridge(false);
+const failedProbeSnapshot = await failedProbe.command("battle_snapshot");
+failedProbe.removeFight();
+const failedProbeUse = await failedProbe.command("use_skill_slot", mutationPayload(failedProbeSnapshot.message));
+assert.strictEqual(failedProbeUse.ok, false);
+assert.strictEqual(failedProbeUse.message.message, "skill_mutation_battle_mismatch");
+assert.strictEqual(failedProbeUse.usedSlot, undefined);
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
@@ -600,6 +833,7 @@ assert.strictEqual(result.sections.hunt.data.hunt.deepHuntBranch, undefined);
 assert.strictEqual(result.sections.quests.status, "available");
 assert.strictEqual(result.sections.quests.data.loadStatus, "loaded");
 assert.strictEqual(result.sections.quests.data.snapshotId, result.snapshotId);
+assert.ok(result.sections.quests.data.navigationRevision);
 assert.strictEqual(result.sections.shopInventory.status, "not_loaded");
 assert.strictEqual(mutationCount, 0);
 """
@@ -913,6 +1147,88 @@ setImmediate(() => {
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_page_bridge_waits_for_delayed_catalog_shell_and_rejects_wrong_page() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+
+async function runCase({ wrongPage }) {
+  const messages = [];
+  const listeners = {};
+  let timerCalls = 0;
+  let fakeNow = 1000;
+  class FakeDate extends Date { static now() { fakeNow += 100; return fakeNow; } }
+  const body = {
+    innerText: wrongPage ? "Взятые Повторяющиеся Доступные Завершенные" : "Загрузка...",
+    textContent: wrongPage ? "Взятые Повторяющиеся Доступные Завершенные" : "Загрузка...",
+  };
+  const document = { title: "Квесты", body, querySelectorAll() { return []; } };
+  let href = "https://3kingdoms.ru/user_quest.php?mode=started&page=0";
+  const location = {};
+  Object.defineProperty(location, "href", {
+    get() { return href; },
+    set(value) {
+      href = wrongPage
+        ? "https://3kingdoms.ru/user_quest.php?mode=started&page=1"
+        : `https://3kingdoms.ru${value}`;
+    },
+  });
+  const root = {
+    name: "top", location, frames: [], document,
+    setTimeout(callback) {
+      timerCalls += 1;
+      if (!wrongPage && timerCalls === 3) {
+        body.innerText = body.textContent = "Взятые Повторяющиеся Доступные Завершенные";
+      }
+      callback();
+    },
+    clearTimeout() {},
+    addEventListener(type, callback) { listeners[type] = callback; },
+    removeEventListener() {}, postMessage(message) { messages.push(message); },
+  };
+  root.top = root; root.window = root;
+  vm.runInNewContext(source, { window: root, console, Date: FakeDate });
+  listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`,
+    token: wrongPage ? "catalog-wrong" : "catalog-delayed",
+    command: {
+      type: "open_quest_catalog",
+      payload: { page: 0, verifyTimeoutMs: wrongPage ? 500 : 5000 },
+    },
+  }});
+  await new Promise((resolve) => setImmediate(resolve));
+  return { result: JSON.parse(messages[0].message), timerCalls };
+}
+
+(async () => {
+  const delayed = await runCase({ wrongPage: false });
+  assert.strictEqual(delayed.result.ok, true);
+  assert.strictEqual(delayed.result.outcome, "CONFIRMED");
+  assert.strictEqual(delayed.result.mutationIssued, true);
+  assert.strictEqual(delayed.result.shellLoaded, true);
+  assert.strictEqual(delayed.result.message, "quest_catalog_opened_confirmed");
+  assert.strictEqual(delayed.result.after.mode, "avail");
+  assert.strictEqual(delayed.result.after.page, 0);
+  assert.ok(delayed.timerCalls >= 3);
+
+  const wrong = await runCase({ wrongPage: true });
+  assert.strictEqual(wrong.result.ok, true);
+  assert.strictEqual(wrong.result.outcome, "ACK_PENDING");
+  assert.strictEqual(wrong.result.mutationIssued, true);
+  assert.strictEqual(wrong.result.shellLoaded, true);
+  assert.strictEqual(wrong.result.message, "quest_catalog_open_unconfirmed");
+  assert.strictEqual(wrong.result.after.mode, "started");
+  assert.strictEqual(wrong.result.after.page, 1);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_page_bridge_opens_only_snapshot_bound_exact_npc() -> None:
     script = r"""
 const assert = require("assert");
@@ -947,7 +1263,7 @@ const npcElement = {
   getClientRects() { return [{ width: 40, height: 20 }]; },
   getAttribute(name) {
     if (name === "title") return "Моряк Кентур";
-    if (name === "data-id") return "6";
+    if (name === "data-id") return "0";
     if (name === "data-index") return "0";
     return null;
   },
@@ -975,14 +1291,14 @@ const questContainer = { innerText: "Письмо моряку Далее", text
 const questAction = {
   tagName: "A", innerText: "Далее", textContent: "Далее", disabled: false,
   getAttribute(name) {
-    if (name === "href") return "npc.php?f_id=6&npc_id=75&global_npc=0&quest_id=314&secret";
+    if (name === "href") return "npc.php?f_id=0&npc_id=75&global_npc=0&quest_id=314&secret";
     return null;
   },
   getClientRects() { return [{ width: 20, height: 10 }]; },
   closest() { return questContainer; },
   click() {
     questClicks += 1;
-    root.location.href = "https://3kingdoms.ru/npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400";
+    root.location.href = "https://3kingdoms.ru/npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400";
     root.document = detailDocument;
   },
 };
@@ -993,14 +1309,14 @@ const answerAction = {
   textContent: "Я доставлю письмо.",
   disabled: false,
   getAttribute(name) {
-    if (name === "onclick") return "location.href='npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401&secret'";
+    if (name === "onclick") return "location.href='npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401&secret'";
     return null;
   },
   getClientRects() { return [{ width: 100, height: 30 }]; },
   closest() { return this; },
   click() {
     answerClicks += 1;
-    root.location.href = "https://3kingdoms.ru/npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401";
+    root.location.href = "https://3kingdoms.ru/npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&action=answer&ref=401";
     root.document = terminalDocument;
   },
 };
@@ -1008,7 +1324,7 @@ const acceptImage = {
   getAttribute(name) { return name === "alt" ? "Взять задание" : null; },
 };
 const acceptForm = {
-  action: "npc.php?f_id=6&npc_id=75&quest_id=314&point_id=400&action=done&secret",
+  action: "npc.php?f_id=0&npc_id=75&quest_id=314&point_id=400&action=done&secret",
   getAttribute(name) { return name === "action" ? this.action : null; },
 };
 const acceptButton = {
@@ -1023,7 +1339,7 @@ const doneImage = {
   getAttribute(name) { return name === "alt" ? "Завершить задание" : null; },
 };
 const doneForm = {
-  action: "npc.php?f_id=6&npc_id=75&quest_id=315&point_id=402&action=done&secret",
+  action: "npc.php?f_id=0&npc_id=75&quest_id=315&point_id=402&action=done&secret",
   getAttribute(name) { return name === "action" ? this.action : null; },
 };
 const doneButton = {
@@ -1094,7 +1410,7 @@ async function command(type, payload = {}) {
   assert.strictEqual(observed.message.items[0].actionable, true);
 
   const stale = await command("open_exact_npc", {
-    expectedSnapshotId: "wrong", expectedLocationId: "125", npcId: "6", expectedName: "Моряк Кентур",
+    expectedSnapshotId: "wrong", expectedLocationId: "125", npcId: "0", expectedName: "Моряк Кентур",
   });
   assert.strictEqual(stale.ok, false);
   assert.strictEqual(stale.message.message, "area_npc_snapshot_stale");
@@ -1103,7 +1419,7 @@ async function command(type, payload = {}) {
   const opened = await command("open_exact_npc", {
     expectedSnapshotId: observed.message.snapshotId,
     expectedLocationId: "125",
-    npcId: "6",
+    npcId: "0",
     expectedName: "Моряк Кентур",
     expectedDialogName: "Моряка Кентура",
     verifyTimeoutMs: 250,
@@ -1111,27 +1427,53 @@ async function command(type, payload = {}) {
   assert.strictEqual(opened.ok, true);
   assert.strictEqual(opened.message.message, "npc_opened_confirmed");
   assert.strictEqual(clicks, 1);
-  assert.strictEqual(opened.message.observed.identityMatches, true);
-  assert.strictEqual(opened.message.observed.questActions[0].questId, "314");
+  assert.strictEqual(opened.message.outcome, "CONFIRMED");
+  assert.strictEqual(opened.message.after.identityMatches, true);
+  assert.strictEqual(opened.message.after.questActions[0].questId, "314");
 
   const submitted = await command("npc_quest_action", {
-    expectedSnapshotId: opened.message.observed.snapshotId,
-    npcId: "6",
+    expectedSnapshotId: opened.message.after.snapshotId,
+    npcId: "0",
     questId: "314",
     expectedTitle: "Письмо моряку",
     action: "open",
   });
   assert.strictEqual(submitted.ok, true);
   assert.strictEqual(submitted.message.message, "npc_quest_action_submitted");
+  assert.strictEqual(submitted.message.outcome, "ACK_PENDING");
+  assert.strictEqual(submitted.message.mutationIssued, true);
   assert.strictEqual(questClicks, 1);
 
-  const detail = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  const detail = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "0" });
   assert.strictEqual(detail.ok, true);
   assert.strictEqual(detail.message.dialogActions.length, 1);
   assert.strictEqual(detail.message.dialogActions[0].ref, "401");
+  const wrongName = await command("npc_dialog_snapshot", { expectedName: "Другой NPC", expectedNpcId: "0" });
+  assert.strictEqual(wrongName.message.npcId, "0");
+  assert.strictEqual(wrongName.message.identityMatches, false);
+  const rejectedWrongName = await command("npc_quest_action", {
+    expectedSnapshotId: wrongName.message.snapshotId,
+    npcId: "0", questId: "314", expectedTitle: "Письмо моряку",
+    action: "answer", expectedRef: "401", expectedText: "Я доставлю письмо.",
+  });
+  assert.strictEqual(rejectedWrongName.ok, false);
+  assert.strictEqual(rejectedWrongName.message.outcome, "NOT_ISSUED");
+  assert.strictEqual(rejectedWrongName.message.message, "npc_dialog_identity_mismatch");
+  assert.strictEqual(answerClicks, 0);
+  const answerSnapshot = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "0" });
+  const contradictedIdentity = await command("npc_quest_action", {
+    expectedSnapshotId: answerSnapshot.message.snapshotId,
+    npcId: "0", expectedName: "Другой NPC", questId: "314",
+    expectedTitle: "Письмо моряку", action: "answer",
+    expectedRef: "401", expectedText: "Я доставлю письмо.",
+  });
+  assert.strictEqual(contradictedIdentity.ok, false);
+  assert.strictEqual(contradictedIdentity.message.message, "npc_dialog_identity_mismatch");
+  assert.strictEqual(answerClicks, 0);
   const answered = await command("npc_quest_action", {
-    expectedSnapshotId: detail.message.snapshotId,
-    npcId: "6",
+    expectedSnapshotId: answerSnapshot.message.snapshotId,
+    npcId: "0",
+    expectedName: "Моряк Кентур",
     questId: "314",
     expectedTitle: "Письмо моряку",
     action: "answer",
@@ -1139,21 +1481,22 @@ async function command(type, payload = {}) {
     expectedText: "Я доставлю письмо.",
   });
   assert.strictEqual(answered.ok, true);
+  assert.strictEqual(answered.message.outcome, "ACK_PENDING");
   assert.strictEqual(answerClicks, 1);
-  const terminal = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+  const terminal = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "0" });
   assert.strictEqual(terminal.message.doneActions.length, 2);
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(terminal.message.doneActions[1])),
     {
       questId: "315", action: "done", pointId: "402", text: "Завершить задание",
-      npcId: "6", npcInstanceId: "75", visible: true, disabled: false,
+          npcId: "0", npcInstanceId: "75", visible: true, disabled: false,
     }
   );
   assert.strictEqual(terminal.message.acceptActions.length, 1);
   assert.strictEqual(terminal.message.acceptActions[0].text, "Взять задание");
   const wrongPoint = await command("npc_quest_action", {
     expectedSnapshotId: terminal.message.snapshotId,
-    npcId: "6",
+        npcId: "0",
     questId: "315",
     action: "done",
     expectedPointId: "401",
@@ -1164,25 +1507,43 @@ async function command(type, payload = {}) {
   assert.strictEqual(doneClicks, 0);
   const completed = await command("npc_quest_action", {
     expectedSnapshotId: terminal.message.snapshotId,
-    npcId: "6",
+        npcId: "0",
     questId: "315",
     action: "done",
     expectedPointId: "402",
     expectedText: "Завершить задание",
   });
   assert.strictEqual(completed.ok, true);
+  assert.strictEqual(completed.message.outcome, "ACK_PENDING");
+  assert.strictEqual(completed.message.mutationIssued, true);
+  assert.strictEqual(completed.message.message, "npc_quest_action_submitted");
+  assert.ok(completed.message.destination);
+  assert.ok(completed.message.issuedAt);
   assert.strictEqual(doneClicks, 1);
-  const acceptSnapshot = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "6" });
+      const acceptSnapshot = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "0" });
   const accepted = await command("npc_quest_action", {
     expectedSnapshotId: acceptSnapshot.message.snapshotId,
-    npcId: "6",
+        npcId: "0",
     questId: "314",
     expectedTitle: "Письмо моряку",
     action: "accept",
     expectedText: "Взять задание",
   });
   assert.strictEqual(accepted.ok, true);
+  assert.strictEqual(accepted.message.outcome, "ACK_PENDING");
   assert.strictEqual(acceptClicks, 1);
+  root.location.href = "https://3kingdoms.ru/area.php?location_id=125";
+  root.document = areaDocument;
+  npcElement.click = () => { clicks += 1; };
+  const observedAgain = await command("area_npc_snapshot", { expectedName: "Моряк Кентур" });
+  const delayed = await command("open_exact_npc", {
+    expectedSnapshotId: observedAgain.message.snapshotId,
+        expectedLocationId: "125", npcId: "0", expectedName: "Моряк Кентур",
+    verifyTimeoutMs: 100,
+  });
+  assert.strictEqual(delayed.ok, true);
+  assert.strictEqual(delayed.message.outcome, "ACK_PENDING");
+  assert.strictEqual(delayed.message.mutationIssued, true);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
@@ -1322,12 +1683,24 @@ async function command(type, payload = {}) {
 }
 
 (async () => {
+  const originalBody = document.body;
+  const originalQuerySelector = document.querySelector;
+  const originalQuerySelectorAll = document.querySelectorAll;
+  Object.defineProperty(document, "body", { configurable: true, get() { throw new Error("operational route touched body"); } });
+  document.querySelector = () => { throw new Error("operational route queried DOM"); };
+  document.querySelectorAll = () => { throw new Error("operational route scanned DOM"); };
   const snapshot = await command("location_route_snapshot");
   assert.strictEqual(snapshot.ok, true);
+  assert.strictEqual(snapshot.message.source, "area-model");
+  assert.strictEqual(snapshot.message.domNodesScanned, 0);
+  assert.ok(JSON.stringify(snapshot.message).length < 5000);
   assert.strictEqual(snapshot.message.location.semanticName, "Городская площадь Арсы");
   assert.strictEqual(snapshot.message.currentLocationId, "102");
   assert.strictEqual(snapshot.message.nextTransition.locId, "171");
   assert.strictEqual(snapshot.message.timerReady, true);
+  Object.defineProperty(document, "body", { configurable: true, value: originalBody, writable: true });
+  document.querySelector = originalQuerySelector;
+  document.querySelectorAll = originalQuerySelectorAll;
   const result = await command("location_route_step", { expectedCurrentLocationId: "102", navigationDelayMs: 25 });
   assert.strictEqual(result.ok, true);
   assert.strictEqual(result.message.submitted, true);
@@ -1827,6 +2200,66 @@ assert.strictEqual(clicks, 1);
         text=True,
         capture_output=True,
         check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_page_bridge_opens_active_catalog_through_quest_control_from_hunt() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+let clicks = 0;
+const icon = { getAttribute(name) { return name === "alt" ? "квесты" : null; } };
+const link = {
+  innerText: "", textContent: "",
+  getAttribute(name) { return name === "href" ? "#" : null; },
+  querySelectorAll(selector) { return selector === "img[alt],img[title]" ? [icon] : []; },
+  closest() { return this; },
+  click() {
+    clicks += 1;
+    root.location.href = "https://3kingdoms.ru/user_quest.php?mode=started&page=0";
+    root.document.title = "Квесты";
+    root.document.body = {
+      innerText: "Взятые Повторяющиеся Доступные Завершенные",
+      textContent: "Взятые Повторяющиеся Доступные Завершенные",
+    };
+  },
+};
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/hunt.php" }, frames: [],
+  document: {
+    title: "Охота", body: { innerText: "Охота", textContent: "Охота" },
+    querySelectorAll(selector) { return selector === "a,button,[onclick]" ? [link] : []; },
+  },
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); }, setTimeout,
+};
+root.top = root; root.window = root;
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+(async () => {
+  listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`, token: "active-from-hunt",
+    command: { type: "open_active_quest_page", payload: { page: 0, verifyTimeoutMs: 500 } },
+  } });
+  const deadline = Date.now() + 1500;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  const result = JSON.parse(messages[0].message);
+  assert.strictEqual(result.outcome, "CONFIRMED");
+  assert.strictEqual(result.method, "quest_control");
+  assert.strictEqual(result.after.page, 0);
+  assert.strictEqual(clicks, 1);
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    result = subprocess.run(
+        ["node", "-e", script], cwd=".", text=True, capture_output=True, check=False,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

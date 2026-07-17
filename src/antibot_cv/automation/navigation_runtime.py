@@ -7,6 +7,11 @@ import numpy as np
 
 from src.antibot_cv.automation.actions import ActionRequest
 from src.antibot_cv.automation.route_planner import RouteAction, validate_navigator_route
+from src.antibot_cv.automation.route_recovery_policy import (
+    ROUTE_ABSOLUTE_BUDGET_MS,
+    ROUTE_MINIMUM_BUDGET_MS,
+    ROUTE_STEP_PROGRESS_DEADLINE_S,
+)
 from src.antibot_cv.automation.runtime_constants import JS_VISIBLE_ATTACK_INTERVAL_MS
 from src.antibot_cv.automation.runtime_helpers import (
     detect_direction_pad_roi as _detect_direction_pad_roi,
@@ -21,9 +26,49 @@ from src.antibot_cv.viewport.coordinates import Point, Rect
 from src.antibot_cv.viewport.scrollbar import ScrollDirection
 
 NAVIGATOR_TARGET_INPUT_SETTLE_S = 4.0
+NAVIGATOR_SELECTION_MIN_SEARCH_MS = 250
+NAVIGATOR_SELECTION_MIN_ROUTE_MS = 100
+NAVIGATOR_SELECTION_INTERNAL_OVERHEAD_MS = 2000
+NAVIGATOR_SELECTION_TRANSPORT_OVERHEAD_MS = 500
+NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS = 250
+NAVIGATOR_SELECTION_MAX_ATTEMPTS = 2
+NAVIGATOR_ROUTE_MAX_REHYDRATES = 1
+NAVIGATOR_AREA_HANDOFF_KINDS = {
+    "quest_accept",
+    "quest_dialogue",
+    "quest_location",
+    "quest_ordered_handoff",
+    "quest_turn_in",
+}
 
 
 class NavigationRuntimeMixin:
+    def _clear_location_route_tracking(self) -> None:
+        """Clear controller-local route ownership after a terminal handoff."""
+
+        self._navigator_target_name = None
+        self._navigator_target_kind = None
+        self._navigator_opened_monotonic = None
+        self._navigator_client_id = None
+        self._navigator_client_bound_monotonic = None
+        self._navigator_requires_target_selection = False
+        self._route_recovery_kind = None
+        self._route_go_submitted_monotonic = None
+        self._route_destination_name = None
+        self._route_destination_id = None
+        self._route_expected_transitions = None
+        self._navigator_arrived_confirmed = False
+        self._route_step_submitted_from_id = None
+        self._route_step_expected_to_id = None
+        self._route_step_submitted_snapshot_id = None
+        self._route_step_submitted_monotonic = None
+        self._route_started_monotonic = None
+        self._route_deadline_monotonic = None
+        self._route_poll_cadence.reset()
+        self._route_visited_location_ids.clear()
+        self._route_rehydrate_attempts = 0
+        self._route_rehydrated_current_ids.clear()
+
     def _handle_location_frame(self, frame: np.ndarray) -> None:
         if not self.config.dry_run:
             if not self._resources_allow_search(frame):
@@ -79,8 +124,17 @@ class NavigationRuntimeMixin:
         self._move_viewport(frame)
 
     def _handle_navigator_pending(self) -> None:
+        now = time.monotonic()
+        if (
+            self._route_rehydrate_attempts > 0
+            and self._route_deadline_monotonic is not None
+            and now >= self._route_deadline_monotonic
+        ):
+            self._stop_leveling_unsafe("navigator_route_deadline_exhausted")
+            return
         started = self._navigator_opened_monotonic or time.monotonic()
         timeout_ms = max(1000, int(self.config.leveling.navigator_timeout_ms))
+        snapshot_deadline = self._route_deadline_monotonic or (started + timeout_ms / 1000)
         child = self._find_navigator_client()
         if child is None:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
@@ -92,10 +146,55 @@ class NavigationRuntimeMixin:
             self._navigator_client_bound_monotonic = time.monotonic()
         if not self._navigator_client_id:
             return
+        if self._route_recovery_kind in {"quest_location", "quest_ordered_handoff"} and not self._validate_route_coordinator_binding(
+            self._route_recovery_kind,
+            self._navigator_target_name or "",
+        ):
+            return
         if self._navigator_requires_target_selection:
+            if (time.monotonic() - started) * 1000 >= timeout_ms:
+                self._stop_leveling_unsafe("navigator_target_selection_timeout")
+                return
             bound = self._navigator_client_bound_monotonic or time.monotonic()
             if time.monotonic() - bound < NAVIGATOR_TARGET_INPUT_SETTLE_S:
                 return
+            remaining_ms = int(timeout_ms - (time.monotonic() - started) * 1000)
+            if self._route_rehydrate_attempts > 0 and self._route_deadline_monotonic is not None:
+                remaining_ms = min(
+                    remaining_ms,
+                    int((self._route_deadline_monotonic - time.monotonic()) * 1000),
+                )
+            minimum_command_ms = (
+                NAVIGATOR_SELECTION_MIN_SEARCH_MS
+                + NAVIGATOR_SELECTION_MIN_ROUTE_MS
+                + NAVIGATOR_SELECTION_INTERNAL_OVERHEAD_MS
+            )
+            one_attempt_budget_ms = (
+                minimum_command_ms
+                + NAVIGATOR_SELECTION_TRANSPORT_OVERHEAD_MS
+                + NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS
+            )
+            two_attempt_budget_ms = (
+                NAVIGATOR_SELECTION_MAX_ATTEMPTS
+                * (minimum_command_ms + NAVIGATOR_SELECTION_TRANSPORT_OVERHEAD_MS)
+                + NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS
+            )
+            if remaining_ms < one_attempt_budget_ms:
+                self._stop_leveling_unsafe("navigator_target_selection_budget_exhausted")
+                return
+            attempt_count = NAVIGATOR_SELECTION_MAX_ATTEMPTS if remaining_ms >= two_attempt_budget_ms else 1
+            command_timeout_ms = min(
+                25000,
+                (remaining_ms - NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS)
+                // attempt_count
+                - NAVIGATOR_SELECTION_TRANSPORT_OVERHEAD_MS,
+            )
+            interaction_budget_ms = command_timeout_ms - NAVIGATOR_SELECTION_INTERNAL_OVERHEAD_MS
+            route_delay_ms = min(8000, max(NAVIGATOR_SELECTION_MIN_ROUTE_MS, interaction_budget_ms * 2 // 5))
+            search_delay_ms = min(12000, interaction_budget_ms - route_delay_ms)
+            if search_delay_ms < NAVIGATOR_SELECTION_MIN_SEARCH_MS:
+                search_delay_ms = NAVIGATOR_SELECTION_MIN_SEARCH_MS
+                route_delay_ms = interaction_budget_ms - search_delay_ms
             request = ActionRequest(
                 "navigator_select_target",
                 cycle_id=self.session.cycle_id,
@@ -105,9 +204,14 @@ class NavigationRuntimeMixin:
                     "target": self._navigator_target_name or "",
                     "target_kind": self._navigator_target_kind,
                     "navigator_client_id": self._navigator_client_id,
-                    "search_delay_ms": 12000,
-                    "route_delay_ms": 8000,
-                    "retry_delay_ms": 500,
+                    "search_delay_ms": search_delay_ms,
+                    "route_delay_ms": route_delay_ms,
+                    "command_timeout_ms": command_timeout_ms,
+                    "retry_delay_ms": 0,
+                    "retry_limit": attempt_count - 1,
+                    "deadline_remaining_ms": remaining_ms,
+                    "deadline_reserve_ms": NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS,
+                    "transport_overhead_ms": NAVIGATOR_SELECTION_TRANSPORT_OVERHEAD_MS,
                     "reason": self._route_recovery_kind,
                 },
             )
@@ -128,6 +232,12 @@ class NavigationRuntimeMixin:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
                 self._stop_leveling_unsafe(f"navigator_snapshot_error:{exc}")
             return
+        if time.monotonic() >= snapshot_deadline:
+            self._stop_leveling_unsafe("navigator_snapshot_deadline_exhausted")
+            return
+        if result.client_id != self._navigator_client_id:
+            self._stop_leveling_unsafe("navigator_snapshot_client_mismatch")
+            return
         if not result.ok:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
                 self._stop_leveling_unsafe("navigator_snapshot_timeout")
@@ -135,8 +245,12 @@ class NavigationRuntimeMixin:
         try:
             snapshot = json.loads(result.message)
         except json.JSONDecodeError:
-            snapshot = None
+            if (time.monotonic() - started) * 1000 >= timeout_ms:
+                self._stop_leveling_unsafe("navigator_snapshot_invalid_json")
+            return
         if not isinstance(snapshot, dict):
+            if (time.monotonic() - started) * 1000 >= timeout_ms:
+                self._stop_leveling_unsafe("navigator_snapshot_not_object")
             return
         route_decision = validate_navigator_route(
             snapshot,
@@ -160,7 +274,7 @@ class NavigationRuntimeMixin:
             navigator_client_id=self._navigator_client_id,
         )
         if route_decision.action is RouteAction.ARRIVED:
-            if self._route_recovery_kind not in {"quest_accept", "quest_dialogue"}:
+            if self._route_recovery_kind not in NAVIGATOR_AREA_HANDOFF_KINDS:
                 self._finish_route_arrival("navigator_target_current_location")
                 return
             request = ActionRequest(
@@ -173,12 +287,21 @@ class NavigationRuntimeMixin:
             if not self.action_executor.execute(request):
                 self._stop_leveling_unsafe("navigator_current_location_area_open_failed")
                 return
+            self._navigator_arrived_confirmed = True
             self._route_go_submitted_monotonic = time.monotonic()
             self._route_destination_name = self._navigator_target_name
             self._route_destination_id = None
             self._route_expected_transitions = 0
             self._route_step_submitted_from_id = None
+            self._route_step_expected_to_id = None
+            self._route_step_submitted_snapshot_id = None
             self._route_step_submitted_monotonic = None
+            if self._route_started_monotonic is None:
+                self._route_started_monotonic = time.monotonic()
+            if self._route_deadline_monotonic is None:
+                self._route_deadline_monotonic = (
+                    self._route_started_monotonic + self._route_recovery_timeout_ms() / 1000
+                )
             self._safe_transition(GameState.ROUTE_RECOVERY, reason="navigator_current_location_verify")
             return
         if route_decision.action is RouteAction.REFRESH:
@@ -187,6 +310,13 @@ class NavigationRuntimeMixin:
             return
         if route_decision.action is not RouteAction.MOVE:
             self._stop_leveling_unsafe(f"navigator_route_unsafe:{route_decision.reason}")
+            return
+        if (
+            self._route_rehydrate_attempts > 0
+            and self._route_deadline_monotonic is not None
+            and time.monotonic() >= self._route_deadline_monotonic
+        ):
+            self._stop_leveling_unsafe("navigator_route_deadline_exhausted")
             return
         request = ActionRequest(
             "navigator_go",
@@ -203,9 +333,16 @@ class NavigationRuntimeMixin:
         if not self.action_executor.execute(request):
             self._stop_leveling_unsafe("navigator_go_failed_or_ambiguous")
             return
-        if self._route_recovery_kind in {"quest_accept", "quest_dialogue"}:
+        if time.monotonic() >= snapshot_deadline:
+            self._stop_leveling_unsafe("navigator_go_deadline_exhausted")
+            return
+        self._navigator_arrived_confirmed = False
+        if self._route_recovery_kind in NAVIGATOR_AREA_HANDOFF_KINDS:
             if not self.config.dry_run:
                 time.sleep(0.35)
+            if time.monotonic() >= snapshot_deadline:
+                self._stop_leveling_unsafe("navigator_area_handoff_deadline_exhausted")
+                return
             open_area = ActionRequest(
                 "open_area",
                 cycle_id=self.session.cycle_id,
@@ -218,10 +355,16 @@ class NavigationRuntimeMixin:
                 return
         now = time.monotonic()
         self._route_go_submitted_monotonic = now
+        if self._route_started_monotonic is None:
+            self._route_started_monotonic = now
         self._route_destination_name = self._navigator_target_name
         self._route_destination_id = None
         self._route_expected_transitions = route_decision.route_transitions
+        if self._route_deadline_monotonic is None:
+            self._route_deadline_monotonic = now + self._route_recovery_timeout_ms() / 1000
         self._route_step_submitted_from_id = None
+        self._route_step_expected_to_id = None
+        self._route_step_submitted_snapshot_id = None
         self._route_step_submitted_monotonic = None
         self._safe_transition(GameState.ROUTE_RECOVERY, reason="navigator_go_submitted")
 
@@ -241,11 +384,40 @@ class NavigationRuntimeMixin:
             for client in injector.client_snapshots(within_s=5.0)
             if client.get("client_seen")
             and client.get("version_ok")
-            and str(client.get("client_id") or "") not in self._navigator_existing_client_ids
             and str(client.get("profile_id") or "") == parent_profile
             and "/navigator.php" in str(client.get("href") or "")
+            and str(client.get("client_id") or "")
+            and (
+                client.get("opener_tab_id") == parent_tab_id
+                or client.get("opener_tab_id") is None
+            )
         ]
-        linked = [client for client in candidates if client.get("opener_tab_id") == parent_tab_id]
+        new_candidates = [
+            client
+            for client in candidates
+            if str(client.get("client_id")) not in self._navigator_existing_client_ids
+        ]
+        selected = self._select_navigator_candidate(new_candidates, parent_tab_id)
+        if selected is not None:
+            return selected
+        if new_candidates:
+            return None
+        existing_candidates = [
+            client
+            for client in candidates
+            if str(client.get("client_id")) in self._navigator_existing_client_ids
+            and client.get("opener_tab_id") == parent_tab_id
+        ]
+        return existing_candidates[0] if len(existing_candidates) == 1 else None
+
+    @staticmethod
+    def _select_navigator_candidate(
+        candidates: list[dict[str, object]],
+        parent_tab_id: object,
+    ) -> dict[str, object] | None:
+        linked = [
+            client for client in candidates if client.get("opener_tab_id") == parent_tab_id
+        ]
         if len(linked) == 1:
             return linked[0]
         if linked:
@@ -277,25 +449,56 @@ class NavigationRuntimeMixin:
             return set()
 
     def _handle_route_recovery(self) -> None:
+        if self.state_machine.state is not GameState.ROUTE_RECOVERY:
+            return
         submitted = self._route_go_submitted_monotonic
         if submitted is None:
             return
-        elapsed_ms = (time.monotonic() - submitted) * 1000
+        now = time.monotonic()
+        if not self._route_poll_cadence.ready(now):
+            return
+        elapsed_ms = (now - submitted) * 1000
         if elapsed_ms < max(500, int(self.config.leveling.route_settle_ms)):
             return
+        route_started = self._route_started_monotonic or submitted
+        route_elapsed_ms = (now - route_started) * 1000
+        if (
+            self._route_step_submitted_monotonic is not None
+            and now - self._route_step_submitted_monotonic >= ROUTE_STEP_PROGRESS_DEADLINE_S
+        ):
+            self._stop_leveling_unsafe("navigator_route_step_progress_deadline_exhausted")
+            return
+        previous_snapshot_success = self._last_state_snapshot_success_monotonic
         snapshot = self._state_snapshot_via_injector(force=True)
+        forced_snapshot_success = (
+            self._last_state_snapshot_success_monotonic is not None
+            and self._last_state_snapshot_success_monotonic
+            > (previous_snapshot_success if previous_snapshot_success is not None else float("-inf"))
+            and self._last_state_snapshot_client_id == self.browser_client_id
+        )
+        snapshot_id = str(snapshot.get("snapshotId") or "").strip() if isinstance(snapshot, dict) else ""
         sections = snapshot.get("sections") if isinstance(snapshot, dict) else None
         location_section = sections.get("location") if isinstance(sections, dict) else None
         location = location_section.get("data") if isinstance(location_section, dict) else None
         battle_section = sections.get("battle") if isinstance(sections, dict) else None
         battle = battle_section.get("data") if isinstance(battle_section, dict) else None
+        death_section = sections.get("deathRevive") if isinstance(sections, dict) else None
+        death = death_section.get("data") if isinstance(death_section, dict) else None
         page_kind = str(location.get("pageKind") or "") if isinstance(location, dict) else ""
         destination_name = self._route_destination_name or self._navigator_target_name
+        location_name = str(location.get("semanticName") or "") if isinstance(location, dict) else ""
+        base_fingerprint = (
+            page_kind,
+            location_name,
+            bool(isinstance(battle, dict) and (battle.get("rawHasFight") is True or battle.get("hasFight") is True)),
+            bool(isinstance(death, dict) and death.get("dead") is True),
+        )
         if isinstance(battle, dict) and (
             battle.get("rawHasFight") is True or battle.get("hasFight") is True
         ):
             if destination_name:
                 self._route_resume_target_name = destination_name
+                self._route_resume_recovery_kind = self._route_recovery_kind
             self._ensure_battle_context("route_interrupted_by_battle")
             self.session.mark_battle_detected()
             target_state = GameState.WAIT_BATTLE_END if battle.get("finished") is True else GameState.BATTLE_ACTIVE
@@ -310,9 +513,40 @@ class NavigationRuntimeMixin:
                 location_name=self.current_location_name,
             )
             return
+        timeout_ms = self._route_recovery_timeout_ms()
+        deadline_exceeded = (
+            now >= self._route_deadline_monotonic
+            if self._route_deadline_monotonic is not None
+            else route_elapsed_ms >= timeout_ms
+        )
+        if (
+            self._route_recovery_kind in NAVIGATOR_AREA_HANDOFF_KINDS
+            and page_kind not in {"area", "hunt", "main"}
+        ):
+            if self._observe_route_fingerprint(base_fingerprint, now):
+                return
+            if deadline_exceeded:
+                self._stop_leveling_unsafe("navigator_route_result_unconfirmed")
+            return
         if page_kind in {"area", "hunt", "main"}:
             self.current_page_kind = page_kind
             self.current_location_name = str(location.get("semanticName") or "") or None
+            if (
+                self._route_recovery_kind == "quest_location"
+                and self._navigator_arrived_confirmed
+            ):
+                self.logger.log_event(
+                    "navigator_route_confirmed",
+                    state=self.state_machine.state.value,
+                    cycle_id=self.session.cycle_id,
+                    page_kind=page_kind,
+                    location_name=self.current_location_name,
+                    target=destination_name,
+                    elapsed_ms=elapsed_ms,
+                    evidence="navigator_current_location",
+                )
+                self._finish_route_arrival("navigator_current_location_parent_area")
+                return
             if _same_location_name(self.current_location_name, destination_name):
                 self.logger.log_event(
                     "navigator_route_confirmed",
@@ -325,7 +559,21 @@ class NavigationRuntimeMixin:
                 )
                 self._finish_route_arrival("navigator_route_confirmed")
                 return
+        if deadline_exceeded:
+            self._stop_leveling_unsafe("navigator_route_result_unconfirmed")
+            return
         route_snapshot = self._location_route_snapshot_via_injector()
+        transition = route_snapshot.get("nextTransition") if isinstance(route_snapshot, dict) else None
+        found_path = route_snapshot.get("foundPath") if isinstance(route_snapshot, dict) else None
+        route_fingerprint = base_fingerprint + (
+            str(route_snapshot.get("currentLocationId") or "") if isinstance(route_snapshot, dict) else "",
+            str(route_snapshot.get("targetLocationId") or "") if isinstance(route_snapshot, dict) else "",
+            str(transition.get("locId") or "") if isinstance(transition, dict) else "",
+            tuple(str(value) for value in found_path) if isinstance(found_path, list) else (),
+            bool(route_snapshot.get("timerReady") is True) if isinstance(route_snapshot, dict) else False,
+        )
+        if self._observe_route_fingerprint(route_fingerprint, now):
+            return
         if isinstance(route_snapshot, dict) and route_snapshot.get("ok") is True:
             current_id = str(route_snapshot.get("currentLocationId") or "").strip()
             live_target_id = str(route_snapshot.get("targetLocationId") or "").strip()
@@ -334,12 +582,60 @@ class NavigationRuntimeMixin:
             if current_id and self._route_destination_id and current_id == self._route_destination_id:
                 self._finish_route_arrival("navigator_route_id_confirmed")
                 return
-            if self._route_step_submitted_from_id and current_id != self._route_step_submitted_from_id:
+            submitted_from_id = self._route_step_submitted_from_id
+            expected_to_id = self._route_step_expected_to_id
+            confirmed_progress = bool(
+                submitted_from_id
+                and expected_to_id
+                and current_id
+                and current_id == expected_to_id
+            )
+            if (
+                submitted_from_id
+                and expected_to_id
+                and current_id
+                and current_id not in {submitted_from_id, expected_to_id}
+            ):
+                self._stop_leveling_unsafe("navigator_route_unexpected_location_id")
+                return
+            if confirmed_progress:
+                if current_id in self._route_visited_location_ids:
+                    self._stop_leveling_unsafe("navigator_route_location_loop")
+                    return
+                self._route_visited_location_ids.add(current_id)
                 self._route_step_submitted_from_id = None
+                self._route_step_expected_to_id = None
                 self._route_step_submitted_monotonic = None
-                self._route_go_submitted_monotonic = time.monotonic()
             next_transition = route_snapshot.get("nextTransition")
             found_path = route_snapshot.get("foundPath")
+            if (
+                confirmed_progress
+                and destination_name
+                and page_kind in {"area", "hunt", "main"}
+                and isinstance(death, dict)
+                and death.get("dead") is False
+                and isinstance(battle, dict)
+                and battle.get("rawHasFight") is False
+                and battle.get("hasFight") is False
+                and snapshot_id
+                and snapshot_id != self._route_step_submitted_snapshot_id
+                and forced_snapshot_success
+                and live_target_id in {"", "0"}
+                and isinstance(found_path, list)
+                and not found_path
+                and next_transition is None
+            ):
+                if not self._validate_route_coordinator_binding(
+                    self._route_recovery_kind,
+                    destination_name,
+                ):
+                    return
+                self._rehydrate_location_route(
+                    destination_name,
+                    current_location_id=current_id,
+                    progressed_from_id=str(submitted_from_id),
+                )
+                return
             if (
                 route_snapshot.get("timerReady") is True
                 and current_id
@@ -366,7 +662,10 @@ class NavigationRuntimeMixin:
                     self._stop_leveling_unsafe("location_route_step_failed_or_ambiguous")
                     return
                 self._route_step_submitted_from_id = current_id
+                self._route_step_expected_to_id = str(next_transition.get("locId") or "")
+                self._route_step_submitted_snapshot_id = snapshot_id or None
                 self._route_step_submitted_monotonic = time.monotonic()
+                self._route_visited_location_ids.add(current_id)
                 self.logger.log_event(
                     "location_route_step_requested",
                     state=self.state_machine.state.value,
@@ -377,14 +676,92 @@ class NavigationRuntimeMixin:
                     target=destination_name,
                 )
                 return
+    def _route_recovery_timeout_ms(self) -> int:
         timeout_ms = max(
+            ROUTE_MINIMUM_BUDGET_MS,
             int(self.config.leveling.navigator_timeout_ms),
             int(self.config.leveling.route_settle_ms) + 1000,
         )
-        if self._route_expected_transitions is not None:
-            timeout_ms = max(timeout_ms, max(1, int(self._route_expected_transitions)) * 15000 + 10000)
-        if elapsed_ms >= timeout_ms:
-            self._stop_leveling_unsafe("navigator_route_result_unconfirmed")
+        return min(ROUTE_ABSOLUTE_BUDGET_MS, timeout_ms)
+
+    def _observe_route_fingerprint(self, fingerprint: tuple[object, ...], now: float) -> bool:
+        self._route_poll_cadence.observe(fingerprint, now)
+        if not self._route_poll_cadence.exhausted:
+            return False
+        self._stop_leveling_unsafe("navigator_route_unchanged_fingerprint_exhausted")
+        return True
+
+    def _rehydrate_location_route(
+        self,
+        destination_name: str,
+        *,
+        current_location_id: str,
+        progressed_from_id: str,
+    ) -> bool:
+        """Rebuild a route lost only after one confirmed location transition."""
+
+        if self.state_machine.state is GameState.NAVIGATOR_PENDING:
+            return True
+        if current_location_id in self._route_rehydrated_current_ids:
+            return self._stop_leveling_unsafe(
+                "navigator_route_rehydrate_repeated_location"
+            )
+        if self._route_rehydrate_attempts >= NAVIGATOR_ROUTE_MAX_REHYDRATES:
+            return self._stop_leveling_unsafe(
+                "navigator_route_rehydrate_budget_exhausted"
+            )
+        attempt = self._route_rehydrate_attempts + 1
+        request = ActionRequest(
+            "open_location_navigator",
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run,
+            metadata={
+                "reason": "navigator_route_rehydrate",
+                "target": destination_name,
+                "current_location": self.current_location_name,
+                "current_location_id": current_location_id,
+                "progressed_from_location_id": progressed_from_id,
+                "recovery_kind": self._route_recovery_kind,
+                "rehydrate_attempt": attempt,
+            },
+        )
+        self._navigator_existing_client_ids = self._navigator_client_ids_for_parent()
+        if not self.action_executor.execute(request):
+            return self._stop_leveling_unsafe(
+                "navigator_route_rehydrate_open_failed"
+            )
+        self._route_rehydrate_attempts = attempt
+        self._route_rehydrated_current_ids.add(current_location_id)
+        self._navigator_target_name = destination_name
+        self._navigator_target_kind = _navigator_target_kind(destination_name)
+        self._navigator_opened_monotonic = time.monotonic()
+        self._navigator_client_id = None
+        self._navigator_client_bound_monotonic = None
+        self._navigator_requires_target_selection = True
+        self._route_go_submitted_monotonic = None
+        self._route_destination_name = destination_name
+        self._route_destination_id = None
+        self._route_step_submitted_from_id = None
+        self._route_step_expected_to_id = None
+        self._route_step_submitted_snapshot_id = None
+        self._route_step_submitted_monotonic = None
+        self.logger.log_event(
+            "navigator_route_rehydrated",
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            target=destination_name,
+            current_location_id=current_location_id,
+            progressed_from_location_id=progressed_from_id,
+            recovery_kind=self._route_recovery_kind,
+            attempt=attempt,
+            max_attempts=NAVIGATOR_ROUTE_MAX_REHYDRATES,
+        )
+        self._safe_transition(
+            GameState.NAVIGATOR_PENDING,
+            reason="navigator_route_rehydrate_opened",
+        )
+        return self.state_machine.state is GameState.NAVIGATOR_PENDING
 
     def _location_route_snapshot_via_injector(self) -> dict[str, object] | None:
         if self.config.dry_run or not self.browser_client_id:
@@ -407,6 +784,15 @@ class NavigationRuntimeMixin:
             return None
         if not result.ok:
             return None
+        if result.client_id != self.browser_client_id:
+            self.logger.log_event(
+                "location_route_snapshot_client_mismatch",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                expected_client_id=self.browser_client_id,
+                observed_client_id=result.client_id,
+            )
+            return None
         try:
             payload = json.loads(result.message)
         except json.JSONDecodeError:
@@ -417,10 +803,17 @@ class NavigationRuntimeMixin:
         recovery_kind = self._route_recovery_kind
         arrival_target = self._route_destination_name or self._navigator_target_name
         resume_target = self._route_resume_target_name
+        binding_error = self._route_arrival_binding_error(recovery_kind, arrival_target)
+        if binding_error is not None:
+            return self._stop_leveling_unsafe(f"route_arrival_binding:{binding_error}")
         if recovery_kind == "quest_accept":
             return self._on_quest_accept_route_arrived(reason)
         if recovery_kind == "quest_dialogue":
             return self._on_quest_dialogue_route_arrived(reason)
+        if recovery_kind == "quest_turn_in":
+            return self._on_quest_turn_in_route_arrived(reason)
+        if recovery_kind == "quest_ordered_handoff":
+            return self._on_ordered_handoff_route_arrived(reason)
         if recovery_kind == "post_revive_location":
             self._log_recovery_phase(
                 "checkpoint_arrived",
@@ -428,10 +821,15 @@ class NavigationRuntimeMixin:
                 reason=reason,
             )
         if resume_target and not _same_location_name(self.current_location_name, resume_target):
+            resume_kind = self._route_resume_recovery_kind
+            binding_error = self._route_arrival_binding_error(resume_kind, resume_target)
+            if binding_error is not None:
+                return self._stop_leveling_unsafe(f"route_resume_binding:{binding_error}")
             self._route_resume_target_name = None
+            self._route_resume_recovery_kind = None
             return self._start_location_route(
                 resume_target,
-                kind="interrupted_route_resume",
+                kind=resume_kind or "interrupted_route_resume",
                 reason="interrupted_route_resume",
             )
         configured_target = str(self.config.leveling.target_location_name or "").strip()
@@ -482,8 +880,17 @@ class NavigationRuntimeMixin:
         self._route_destination_name = None
         self._route_destination_id = None
         self._route_expected_transitions = None
+        self._navigator_arrived_confirmed = False
         self._route_step_submitted_from_id = None
+        self._route_step_expected_to_id = None
+        self._route_step_submitted_snapshot_id = None
         self._route_step_submitted_monotonic = None
+        self._route_started_monotonic = None
+        self._route_deadline_monotonic = None
+        self._route_poll_cadence.reset()
+        self._route_visited_location_ids.clear()
+        self._route_rehydrate_attempts = 0
+        self._route_rehydrated_current_ids.clear()
         self._safe_transition(GameState.NAVIGATOR_PENDING, reason=f"{reason}_navigator_opened")
         return self.state_machine.state is GameState.NAVIGATOR_PENDING
 

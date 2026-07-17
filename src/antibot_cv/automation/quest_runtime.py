@@ -7,6 +7,29 @@ import time
 
 from src.antibot_cv.automation.actions import ActionRequest
 from src.antibot_cv.automation.quest_catalog import QuestCatalogError
+from src.antibot_cv.automation.quest_catalog_navigation import (
+    CatalogNavigationOutcome,
+    CatalogNavigationStatus,
+    CatalogSettleStatus,
+    CatalogSnapshotEvidence,
+    make_pending_catalog_navigation,
+    settle_catalog_snapshot,
+    snapshot_epoch_seconds,
+)
+from src.antibot_cv.automation.quest_active_catalog_navigation import (
+    settle_active_catalog_snapshot,
+)
+from src.antibot_cv.automation.quest_acceptance_coordinator import QuestAcceptanceCoordinatorMixin
+from src.antibot_cv.automation.quest_chat_progress_coordinator import (
+    QuestChatProgressCoordinatorMixin,
+)
+from src.antibot_cv.automation.quest_ordered_handoff_coordinator import (
+    QuestOrderedHandoffCoordinatorMixin,
+)
+from src.antibot_cv.automation.quest_ordered_npc_handoff import (
+    OrderedHandoffStatus,
+    parse_ordered_npc_handoff,
+)
 from src.antibot_cv.automation.quest_director_policy import QuestDirectorIntent
 from src.antibot_cv.automation.quest_director_runtime import QuestDirectorRuntime
 from src.antibot_cv.automation.quest_dialogue_runtime import (
@@ -15,12 +38,19 @@ from src.antibot_cv.automation.quest_dialogue_runtime import (
     QuestDialoguePhase,
     QuestDialogueRuntime,
 )
-from src.antibot_cv.automation.quest_intake_runtime import (
-    QuestAcceptPhase,
-    QuestIntakeDecisionError,
-    QuestIntakeIntent,
-    QuestIntakeRuntime,
+from src.antibot_cv.automation.quest_intake_runtime import QuestIntakeRuntime
+from src.antibot_cv.automation.quest_objective_router import (
+    ObjectiveRouteKind,
+    ObjectiveRouteStatus,
+    classify_objective,
 )
+from src.antibot_cv.automation.quest_objective_runtime import ObjectiveRefreshState
+from src.antibot_cv.automation.quest_route_binding import (
+    route_binding_evidence,
+    validate_quest_route_binding,
+)
+from src.antibot_cv.automation.quest_turnin_coordinator import QuestTurnInCoordinatorMixin
+from src.antibot_cv.automation.quest_turnin_runtime import QuestTurnInPhase
 from src.antibot_cv.automation.gathering_activity_runtime import (
     GatheringPlanStatus,
     parse_gathering_plan,
@@ -44,12 +74,50 @@ from src.antibot_cv.automation.runtime_helpers import (
     same_location_name as _same_location_name,
 )
 from src.antibot_cv.automation.state_machine import GameState
+from src.antibot_cv.automation.quest_npc_directory import QuestNpcDirectory
+from src.antibot_cv.automation.world_registry import WorldRegistry
+from src.antibot_cv.automation.quest_refresh_runtime import QuestRefreshRuntimeMixin
 
 
-class QuestRuntimeMixin:
+class QuestRuntimeMixin(
+    QuestRefreshRuntimeMixin,
+    QuestOrderedHandoffCoordinatorMixin,
+    QuestChatProgressCoordinatorMixin,
+    QuestTurnInCoordinatorMixin,
+    QuestAcceptanceCoordinatorMixin,
+):
     """Own quest observations, decisions, refreshes, and route handoff."""
 
     def _init_quest_runtime(self) -> None:
+        self._quest_world_registry = None
+        if not self.config.dry_run:
+            try:
+                self._quest_world_registry = WorldRegistry(self.config.world_registry_path)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                self.logger.log_event(
+                    "quest_world_registry_unavailable",
+                    state=self.state_machine.state.value,
+                    cycle_id=self.session.cycle_id,
+                    reason=str(exc),
+                )
+        try:
+            self._quest_npc_directory = QuestNpcDirectory.from_files(
+                self.config.npc_catalog_path,
+                self.config.world_registry_path,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # The directory is routing enrichment, never sole authorization.
+            # Runtime ID/name observations remain mandatory even if the local
+            # generated catalogue is absent or corrupt.
+            self._quest_npc_directory = QuestNpcDirectory()
+            self.logger.log_event(
+                "quest_npc_directory_unavailable",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                reason=str(exc),
+            )
+        self._init_quest_turn_in()
+        self._init_quest_ordered_handoff()
         self._quest_origin_location_name: str | None = None
         self._quest_target_names: tuple[str, ...] = ()
         self._quest_target_levels: tuple[int, ...] = ()
@@ -66,6 +134,8 @@ class QuestRuntimeMixin:
             else max(0, int(self.config.leveling.quest_refresh_every_cycles))
         )
         self._quest_refresh_requested_monotonic: float | None = None
+        self._quest_active_navigation_attempts = 0
+        self._quest_active_navigation_retry_monotonic = 0.0
         self._quest_policy_intent: QuestIntent | None = None
         self._active_quest_id: str | None = None
         self._last_quest_policy_key: tuple[object, ...] | None = None
@@ -74,6 +144,8 @@ class QuestRuntimeMixin:
                 refresh_every_completed=max(1, int(self.config.leveling.quest_refresh_every_completed)),
                 catalog_max_pages=max(1, int(self.config.leveling.quest_catalog_max_pages)),
                 pinned_quest_id=self.config.leveling.pinned_quest_id,
+                ignored_quest_ids=self.config.leveling.ignored_quest_ids,
+                prefer_active_quests=self.config.leveling.prefer_active_quests,
                 chain_state_path=(
                     None
                     if self.config.dry_run
@@ -88,13 +160,71 @@ class QuestRuntimeMixin:
         )
         self._quest_catalog_page_requested: int | None = None
         self._quest_catalog_request_snapshot_id: str | None = None
+        if self._quest_director is not None and self._quest_director.chain.pending_catalog_navigation is not None:
+            restored_navigation = self._quest_director.chain.pending_catalog_navigation
+            self._quest_director.begin_catalog_refresh()
+            self._quest_catalog_page_requested = restored_navigation.page
+            self._quest_catalog_request_snapshot_id = restored_navigation.baseline_snapshot_id
         self._quest_active_snapshot_requested = False
         self._quest_active_page_requested: int | None = None
         self._quest_active_request_snapshot_id: str | None = None
         self._quest_director_next_farm_refresh_cycle: int | None = None
         self._last_quest_director_key: tuple[object, ...] | None = None
         self._quest_intake = QuestIntakeRuntime()
+        if self._quest_director is not None:
+            staged_npc = (
+                self._quest_director.chain.pending_npc_open
+                or self._quest_director.chain.pending_npc_dialog
+            )
+            if staged_npc is not None:
+                self._quest_intake.restore_npc_open(
+                    staged_npc,
+                    confirmed=self._quest_director.chain.pending_npc_dialog is not None,
+                )
+        self._quest_accept_area_opened_monotonic: float | None = None
+        self._quest_accept_area_opened_epoch: float | None = None
+        self._quest_accept_area_snapshot_id: str | None = None
+        self._quest_accept_last_settle_reason: str | None = None
         self._quest_dialogue = QuestDialogueRuntime()
+        self._init_quest_chat_progress()
+
+    def _validate_route_coordinator_binding(
+        self,
+        recovery_kind: str | None,
+        destination_name: str,
+    ) -> bool:
+        """Require an exact typed coordinator lease before resuming a quest route."""
+
+        if recovery_kind not in {"quest_accept", "quest_dialogue", "quest_turn_in", "quest_ordered_handoff"}:
+            if recovery_kind != "quest_location":
+                return True
+        binding_error = self._route_arrival_binding_error(recovery_kind, destination_name)
+        if binding_error is None:
+            return True
+        reason = {
+            "quest_accept": "quest_accept_route_binding_mismatch",
+            "quest_dialogue": "quest_dialogue_route_binding_mismatch",
+            "quest_turn_in": "quest_turn_in_route_binding_mismatch",
+            "quest_ordered_handoff": "quest_ordered_handoff_route_binding_mismatch",
+            "quest_location": "quest_location_route_binding_mismatch",
+        }[recovery_kind]
+        self._stop_leveling_unsafe(reason)
+        return False
+
+    def _route_arrival_binding_error(self, recovery_kind: object, target: object) -> str | None:
+        evidence = route_binding_evidence(
+            recovery_kind,
+            target,
+            director=self._quest_director,
+            intake_pending=self._quest_intake.pending,
+            dialogue_pending=self._quest_dialogue.pending,
+            turn_in_pending=self._quest_turn_in.pending,
+            active_quest_id=self._active_quest_id,
+            route_link_label=self._quest_route_link_label,
+            target_routes_by_monster=self._quest_target_routes,
+            route_locations=self._quest_route_locations,
+        )
+        return validate_quest_route_binding(evidence)
 
     def _evaluate_quest_policy(
         self,
@@ -264,7 +394,7 @@ class QuestRuntimeMixin:
             character_name=self.current_character_name,
             current_level=self.current_level,
             current_xp=self.current_xp_percent,
-            goal_level=self.config.leveling.target_level,
+            goal_level=int(self.config.leveling.target_level or self.current_level + 1),
             quest_state=observed,
         )
         self._apply_quest_policy_decision(decision)
@@ -277,6 +407,35 @@ class QuestRuntimeMixin:
         mode = str(quest_data.get("mode") or "").strip().casefold()
         snapshot_id = str(quest_data.get("snapshotId") or "").strip()
         try:
+            pending_active_navigation = director.chain.pending_active_catalog_navigation
+            if pending_active_navigation is not None:
+                active_evidence = self._active_catalog_snapshot_evidence(
+                    quest_data, pending_active_navigation
+                )
+                active_settle = settle_active_catalog_snapshot(
+                    pending_active_navigation, active_evidence, now=time.time()
+                )
+                if active_settle.status in {
+                    CatalogSettleStatus.STOP_IDENTITY, CatalogSettleStatus.STOP_EXPIRED,
+                }:
+                    self._stop_leveling_unsafe(active_settle.reason)
+                    return
+                if active_settle.status is CatalogSettleStatus.WAIT:
+                    return
+            pending_navigation = director.chain.pending_catalog_navigation
+            if pending_navigation is not None:
+                evidence = self._catalog_snapshot_evidence(quest_data, pending_navigation)
+                settle = settle_catalog_snapshot(
+                    pending_navigation, evidence, now=time.time()
+                )
+                if settle.status is CatalogSettleStatus.STOP_IDENTITY:
+                    self._stop_leveling_unsafe(settle.reason)
+                    return
+                if settle.status is CatalogSettleStatus.STOP_EXPIRED:
+                    self._stop_leveling_unsafe(settle.reason)
+                    return
+                if settle.status is CatalogSettleStatus.WAIT:
+                    return
             if mode == "avail" and director.refresh_in_progress:
                 page = quest_data.get("currentPage")
                 if (
@@ -289,6 +448,8 @@ class QuestRuntimeMixin:
                 ):
                     return
                 next_page = director.ingest_catalog_page(quest_data)
+                if pending_navigation is not None:
+                    director.chain.clear_catalog_navigation(pending_navigation)
                 self._quest_catalog_page_requested = None
                 self._quest_catalog_request_snapshot_id = None
                 self.logger.log_event(
@@ -301,6 +462,11 @@ class QuestRuntimeMixin:
                     next_page=next_page,
                     complete=director.catalog.complete,
                     available_count=len(director.available_quests),
+                    unsupported_available_count=len(director.unsupported_available_entries),
+                    unsupported_available=[
+                        {"quest_id": item.quest_id, "reason": item.reason}
+                        for item in director.unsupported_available_entries
+                    ],
                 )
             elif mode == "started" and self._quest_active_snapshot_requested:
                 page = quest_data.get("currentPage")
@@ -314,10 +480,18 @@ class QuestRuntimeMixin:
                 ):
                     return
                 next_page = director.ingest_active_page(quest_data)
+                if pending_active_navigation is not None:
+                    director.chain.clear_active_catalog_navigation(pending_active_navigation)
                 self._quest_active_page_requested = None
                 self._quest_active_request_snapshot_id = None
+                self._quest_active_navigation_attempts = 0
+                self._quest_active_navigation_retry_monotonic = 0.0
                 if next_page is None:
                     self._quest_active_snapshot_requested = False
+                    generated_at = _snapshot_epoch_seconds(quest_data.get("generatedAt"))
+                    if generated_at is not None:
+                        self._ordered_handoff_active_snapshot_id = snapshot_id
+                        self._ordered_handoff_active_snapshot_generated_at = generated_at
                 self.logger.log_event(
                     "quest_active_page_observed",
                     state=self.state_machine.state.value,
@@ -329,7 +503,10 @@ class QuestRuntimeMixin:
                     complete=director.active_catalog.complete,
                     active_count=len(director.active_quests),
                 )
-        except (QuestCatalogError, RuntimeError, ValueError) as exc:
+                if next_page is None:
+                    self._reconcile_quest_chat_refresh()
+                    self._bound_quest_chat_step()
+        except (OSError, QuestCatalogError, RuntimeError, ValueError) as exc:
             self._stop_leveling_unsafe(f"quest_director_snapshot:{exc}")
 
     def _quest_director_decision(self):
@@ -337,6 +514,13 @@ class QuestRuntimeMixin:
         if director is None:
             return None
         decision = director.decision(current_level_cap=self.current_level)
+        if (
+            decision.reason == "staged_intake_confirmed_active"
+            and decision.quest is not None
+            and self._quest_intake.matches_pending(decision.quest)
+        ):
+            self._quest_intake.recover_confirmed_active(decision.quest)
+            self._quest_answer_stability = None
         key = (
             decision.intent.value,
             decision.reason,
@@ -543,591 +727,14 @@ class QuestRuntimeMixin:
             return self._quest_target_names
         return ()
 
-    def _maybe_start_quest_refresh(self) -> bool:
-        config = self.config.leveling
-        if not config.enabled:
-            return False
-        if self._quest_director is not None:
-            if (
-                self._quest_director.active_objective is not None
-                and self._quest_director.active_snapshot_fresh
-                and self.session.completed_cycles >= self._next_quest_refresh_cycle
-            ):
-                return self._request_active_quest_snapshot("quest_objective_victory_refresh")
-            decision = self._quest_director_decision()
-            if decision is None:
-                return False
-            if decision.intent is QuestDirectorIntent.STOP_UNSAFE:
-                return self._stop_leveling_unsafe(f"quest_director:{decision.reason}")
-            if decision.intent is QuestDirectorIntent.REFRESH_AVAILABLE:
-                if not self._quest_director.refresh_in_progress:
-                    self._quest_director.begin_catalog_refresh()
-                if self._quest_catalog_page_requested is not None:
-                    return True
-                page = self._quest_director.catalog.next_page
-                if page is None:
-                    return True
-                request = ActionRequest(
-                    "open_quest_catalog",
-                    cycle_id=self.session.cycle_id,
-                    battle_id=self.session.battle_id,
-                    dry_run=self.config.dry_run,
-                    metadata={"reason": decision.reason, "page": page},
-                )
-                self._quest_catalog_request_snapshot_id = self._current_state_snapshot_id
-                self._invalidate_quest_snapshot_cache()
-                if not self.action_executor.execute(request):
-                    return self._stop_leveling_unsafe("quest_catalog_open_failed")
-                self._quest_catalog_page_requested = page
-                self._quest_refresh_requested_monotonic = time.monotonic()
-                self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=decision.reason)
-                return True
-            if decision.intent is QuestDirectorIntent.REFRESH_ACTIVE:
-                return self._request_active_quest_snapshot(decision.reason)
-            if decision.intent is QuestDirectorIntent.ACCEPT_QUEST:
-                if decision.quest is None:
-                    return self._stop_leveling_unsafe("quest_accept_identity_missing")
-                return self._begin_quest_acceptance(decision.quest)
-            if decision.intent is QuestDirectorIntent.PROFIT_FARM:
-                interval = max(1, int(config.quest_refresh_every_cycles))
-                if self._quest_director_next_farm_refresh_cycle is None:
-                    self._quest_director_next_farm_refresh_cycle = self.session.completed_cycles + interval
-                elif self.session.completed_cycles >= self._quest_director_next_farm_refresh_cycle:
-                    self._quest_director.expire_available_snapshot()
-                    self._quest_director_next_farm_refresh_cycle = None
-                    return self._maybe_start_quest_refresh()
-                return False
-            if decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE:
-                if self.current_page_kind == "quests":
-                    if (
-                        self._quest_director.active_objective is None
-                        and decision.quest is not None
-                    ):
-                        return self._begin_non_combat_quest_executor(decision.quest.id)
-                    if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
-                        self._quest_refresh_requested_monotonic = time.monotonic()
-                        self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="quest_active_execution_ready")
-                    return True
-                return False
-            if decision.intent is QuestDirectorIntent.WAIT:
-                return True
-        if int(config.quest_refresh_every_cycles) <= 0:
-            return False
-        if self.session.completed_cycles < self._next_quest_refresh_cycle:
-            return False
-        if self.current_page_kind == "quests":
-            self._quest_refresh_requested_monotonic = time.monotonic()
-            self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="quest_page_already_open")
-            return True
-        if self.current_page_kind not in {"hunt", "area", "main"}:
-            return False
-        request = ActionRequest(
-            "open_quests",
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata={"reason": "periodic_quest_refresh"},
-        )
-        if not self.action_executor.execute(request):
-            if (
-                self.config.leveling.auto_navigate_quest_targets
-                or self.config.leveling.autonomous_quest_director
-            ):
-                return self._stop_leveling_unsafe("quest_refresh_open_failed")
-            interval = max(1, int(config.quest_refresh_every_cycles))
-            self._next_quest_refresh_cycle = self.session.completed_cycles + interval
-            self.logger.log_event(
-                "quest_refresh_skipped",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                reason="quest_control_missing_optional",
-                next_refresh_cycle=self._next_quest_refresh_cycle,
-            )
-            return False
-        self._quest_refresh_requested_monotonic = time.monotonic()
-        self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason="periodic_quest_refresh")
-        return True
-
-    def _request_active_quest_snapshot(self, reason: str) -> bool:
-        director = self._quest_director
-        if director is None:
-            return self._stop_leveling_unsafe("quest_director_missing")
-        if self._quest_active_page_requested is not None:
-            return True
-        if not self._quest_active_snapshot_requested:
-            director.begin_active_refresh(
-                after_confirmed_victory=reason == "quest_objective_victory_refresh"
-            )
-            self._quest_active_snapshot_requested = True
-        page = director.active_catalog.next_page
-        if page is None:
-            self._quest_active_snapshot_requested = False
-            return True
-        request = ActionRequest(
-            "open_active_quest_page",
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata={"reason": reason, "page": page},
-        )
-        self._quest_active_request_snapshot_id = self._current_state_snapshot_id
-        self._invalidate_quest_snapshot_cache()
-        if not self.action_executor.execute(request):
-            return self._stop_leveling_unsafe("quest_active_refresh_open_failed")
-        self._quest_active_page_requested = page
-        self._quest_refresh_requested_monotonic = time.monotonic()
-        if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
-            self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
-        return True
-
-    def _prepare_post_revive_active_quest_refresh(self) -> None:
-        """Require a complete fresh active catalogue before quest resumption."""
-
-        director = self._quest_director
-        if director is None:
-            return
-        director.begin_active_refresh()
-        self._quest_active_snapshot_requested = True
-        self._quest_active_page_requested = 0
-        self._quest_active_request_snapshot_id = self._current_state_snapshot_id
-
-    def _invalidate_quest_snapshot_cache(self) -> None:
-        self._state_snapshot_cache = None
-        self._last_state_snapshot_monotonic = None
-        self._last_state_snapshot_success_monotonic = None
-
-    def _begin_quest_acceptance(self, quest) -> bool:
-        director = self._quest_director
-        if director is None:
-            return self._stop_leveling_unsafe("quest_director_missing")
-        try:
-            director.begin_accept(quest.id)
-            already_at_location = (
-                _same_location_name(self.current_location_name, quest.location)
-                or _same_location_name(self._last_alive_location_name, quest.location)
-            )
-            pending = self._quest_intake.begin(quest, already_at_location=already_at_location)
-        except (RuntimeError, ValueError) as exc:
-            return self._stop_leveling_unsafe(f"quest_accept_begin:{exc}")
-        self.logger.log_event(
-            "quest_accept_started",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            quest_id=pending.quest_id,
-            quest_title=pending.title,
-            quest_location=pending.location,
-            giver_name=pending.giver_name,
-            already_at_location=already_at_location,
-        )
-        if not already_at_location:
-            return self._start_location_route(
-                pending.location,
-                kind="quest_accept",
-                reason="quest_accept_route",
-            )
-        return self._open_area_for_quest_accept("quest_accept_local_location")
-
-    def _open_area_for_quest_accept(self, reason: str) -> bool:
-        request = ActionRequest(
-            "open_area",
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata={"reason": reason},
-        )
-        if not self.action_executor.execute(request):
-            return self._stop_leveling_unsafe("quest_accept_area_open_failed")
-        self._invalidate_quest_snapshot_cache()
-        self._quest_refresh_requested_monotonic = time.monotonic()
-        if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
-            self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
-        return True
-
-    def _on_quest_accept_route_arrived(self, reason: str) -> bool:
-        try:
-            pending = self._quest_intake.mark_route_arrived()
-        except RuntimeError as exc:
-            return self._stop_leveling_unsafe(f"quest_accept_route_arrival:{exc}")
-        if not _same_location_name(self.current_location_name, pending.location):
-            return self._stop_leveling_unsafe("quest_accept_route_arrival_mismatch")
-        return self._open_area_for_quest_accept(reason)
-
-    def _begin_non_combat_quest_executor(self, quest_id: str) -> bool:
-        """Choose a bounded executor for a non-monster quest step."""
-
-        director = self._quest_director
-        if director is None:
-            return self._stop_leveling_unsafe("quest_executor_director_missing")
-        entry = next(
-            (candidate for candidate in director.active_catalog.result if candidate.id == quest_id),
-            None,
-        )
-        if entry is None:
-            return self._stop_leveling_unsafe("quest_executor_entry_missing")
-        if str(entry.data.get("objectiveKind") or "").strip().casefold() != "collect":
-            return self._begin_quest_dialogue(quest_id)
-        plan = parse_gathering_plan(entry)
-        self.logger.log_event(
-            "quest_gathering_plan",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            quest_id=quest_id,
-            quest_title=entry.title,
-            status=plan.status.value,
-            activity=plan.activity.value if plan.activity is not None else None,
-            requirements=[{"name": item.name, "required": item.required} for item in plan.requirements],
-            reason=plan.reason,
-        )
-        if plan.status is GatheringPlanStatus.READY:
-            return self._defer_active_quest(quest_id, "gathering_node_discovery_required")
-        return self._defer_active_quest(quest_id, f"gathering_plan:{plan.reason}")
-
-    def _defer_active_quest(self, quest_id: str, detail: str) -> bool:
-        """Keep a non-terminal blocker auditable while releasing the scheduler."""
-
-        director = self._quest_director
-        if director is None:
-            return self._stop_leveling_unsafe("quest_defer_director_missing")
-        normalized_detail = str(detail or "").strip()
-        if "ambiguous" in normalized_detail:
-            reason = "dialogue_choice_ambiguous"
-        elif normalized_detail.startswith("gathering_"):
-            reason = "gathering_unavailable"
-        elif normalized_detail.startswith("quest_dialogue"):
-            reason = "dialogue_unavailable"
-        else:
-            return self._stop_leveling_unsafe(f"quest_deferral_unclassified:{normalized_detail}")
-        try:
-            director.defer_active_quest(quest_id, reason)
-        except (RuntimeError, ValueError) as exc:
-            return self._stop_leveling_unsafe(f"quest_defer_failed:{exc}")
-        self._quest_dialogue.pending = None
-        self._quest_policy_intent = None
-        self.logger.log_event(
-            "quest_deferred",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            quest_id=quest_id,
-            reason=reason,
-            detail=normalized_detail[:500],
-            deferred_active=dict(director.deferred_active),
-        )
-        return self._finish_quest_refresh_to_hunt(f"quest_deferred:{reason}")
-
-    def _begin_quest_dialogue(self, quest_id: str) -> bool:
-        director = self._quest_director
-        if director is None:
-            return self._stop_leveling_unsafe("quest_dialogue_director_missing")
-        if self._quest_dialogue.pending is not None:
-            return True
-        entry = next(
-            (candidate for candidate in director.active_catalog.result if candidate.id == quest_id),
-            None,
-        )
-        if entry is None:
-            return self._stop_leveling_unsafe("quest_dialogue_entry_missing")
-        already_at_location = False
-        try:
-            parsed = self._quest_dialogue.begin(entry, already_at_location=False)
-            already_at_location = (
-                _same_location_name(self.current_location_name, parsed.objective.location)
-                or _same_location_name(self._last_alive_location_name, parsed.objective.location)
-            )
-            if already_at_location:
-                self._quest_dialogue.pending = None
-                parsed = self._quest_dialogue.begin(entry, already_at_location=True)
-        except (QuestDialogueError, RuntimeError, ValueError) as exc:
-            reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
-            return self._defer_active_quest(quest_id, f"quest_dialogue_begin:{reason}")
-        self.logger.log_event(
-            "quest_dialogue_started",
-            state=self.state_machine.state.value,
-            cycle_id=self.session.cycle_id,
-            quest_id=quest_id,
-            quest_title=parsed.objective.quest_title,
-            npc_query=parsed.objective.npc_query,
-            location=parsed.objective.location,
-            already_at_location=already_at_location,
-        )
-        if already_at_location:
-            return self._open_area_for_quest_dialogue("quest_dialogue_local_location")
-        return self._start_location_route(
-            parsed.objective.location,
-            kind="quest_dialogue",
-            reason="quest_dialogue_route",
-        )
-
-    def _open_area_for_quest_dialogue(self, reason: str) -> bool:
-        request = ActionRequest(
-            "open_area",
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata={"reason": reason},
-        )
-        if not self.action_executor.execute(request):
-            return self._stop_leveling_unsafe("quest_dialogue_area_open_failed")
-        self._invalidate_quest_snapshot_cache()
-        self._quest_refresh_requested_monotonic = time.monotonic()
-        if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
-            self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
-        return True
-
-    def _on_quest_dialogue_route_arrived(self, reason: str) -> bool:
-        try:
-            pending = self._quest_dialogue.mark_route_arrived()
-        except RuntimeError as exc:
-            return self._stop_leveling_unsafe(f"quest_dialogue_route_arrival:{exc}")
-        if not _same_location_name(self.current_location_name, pending.objective.location):
-            return self._stop_leveling_unsafe("quest_dialogue_route_arrival_mismatch")
-        return self._open_area_for_quest_dialogue(reason)
-
-    def _quest_dialogue_snapshot_pending(self, unsafe_reason: str) -> bool:
-        if unsafe_reason not in {
-            "dialogue_npc_snapshot_invalid",
-            "dialogue_snapshot_invalid",
-            "dialogue_action_missing",
-            "dialogue_action_not_advanced",
-        }:
-            return False
-        started = self._quest_refresh_requested_monotonic or time.monotonic()
-        timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
-        return (time.monotonic() - started) * 1000 < timeout_ms
-
-    def _handle_pending_quest_dialogue(self) -> bool:
-        pending = self._quest_dialogue.pending
-        if pending is None:
-            return False
-        if pending.phase is QuestDialoguePhase.ROUTE:
-            return True
-        if pending.phase is QuestDialoguePhase.VERIFY_ACTIVE:
-            director = self._quest_director
-            if director is None:
-                return self._stop_leveling_unsafe("quest_dialogue_director_missing")
-            if not director.active_snapshot_fresh:
-                if self._quest_active_page_requested is None:
-                    return self._request_active_quest_snapshot("quest_dialogue_verify_active")
-                return True
-            entry = next(
-                (
-                    candidate
-                    for candidate in director.active_catalog.result
-                    if candidate.id == pending.objective.quest_id
-                ),
-                None,
-            )
-            if entry is None:
-                try:
-                    director.confirm_terminal_removal(pending.objective.quest_id)
-                    self._quest_dialogue.finish_verified(
-                        quest_id=pending.objective.quest_id,
-                        previous_fingerprint=pending.objective.fingerprint,
-                    )
-                except RuntimeError as exc:
-                    return self._stop_leveling_unsafe(
-                        f"quest_dialogue_terminal_evidence_unverified:{exc}"
-                    )
-                self._quest_policy_intent = None
-                return True
-            from src.antibot_cv.automation.quest_objective_runtime import quest_step_fingerprint
-
-            refreshed_fingerprint, reason = quest_step_fingerprint(entry)
-            if refreshed_fingerprint is None or refreshed_fingerprint == pending.objective.fingerprint:
-                return self._stop_leveling_unsafe(
-                    f"quest_dialogue_step_not_advanced:{reason or 'fingerprint_unchanged'}"
-                )
-            self._quest_dialogue.finish_verified(
-                quest_id=pending.objective.quest_id,
-                previous_fingerprint=pending.objective.fingerprint,
-            )
-            self._quest_policy_intent = None
-            return True
-        if pending.phase is QuestDialoguePhase.NPC_LOOKUP:
-            if self.current_page_kind != "area":
-                return True
-            from src.antibot_cv.automation.browser_injector import global_browser_injector
-
-            result = global_browser_injector().execute(
-                "area_npc_snapshot",
-                {"expectedName": pending.objective.npc_query},
-                timeout_s=2.5,
-                client_id=self.browser_client_id,
-            )
-            try:
-                snapshot = json.loads(result.message) if result.ok else None
-                decision = self._quest_dialogue.decide_area_npc(snapshot)
-            except (json.JSONDecodeError, QuestDialogueError, RuntimeError, ValueError) as exc:
-                reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
-                if isinstance(exc, QuestDialogueError) and self._quest_dialogue_snapshot_pending(reason):
-                    return True
-                return self._stop_leveling_unsafe(f"quest_dialogue_npc:{reason}")
-        elif pending.phase is QuestDialoguePhase.NPC_DIALOG:
-            from src.antibot_cv.automation.browser_injector import global_browser_injector
-
-            result = global_browser_injector().execute(
-                "npc_dialog_snapshot",
-                {"expectedName": pending.npc_name, "expectedNpcId": pending.npc_id},
-                timeout_s=2.5,
-                client_id=self.browser_client_id,
-            )
-            try:
-                snapshot = json.loads(result.message) if result.ok else None
-                decision = self._quest_dialogue.decide_dialog(snapshot)
-            except (json.JSONDecodeError, QuestDialogueError, RuntimeError, ValueError) as exc:
-                reason = exc.unsafe_reason if isinstance(exc, QuestDialogueError) else str(exc)
-                if isinstance(exc, QuestDialogueError) and self._quest_dialogue_snapshot_pending(reason):
-                    return True
-                return self._stop_leveling_unsafe(f"quest_dialogue_action:{reason}")
-        else:
-            return self._stop_leveling_unsafe("quest_dialogue_phase_invalid")
-        request = ActionRequest(
-            decision.action_type,
-            cycle_id=self.session.cycle_id,
-            battle_id=self.session.battle_id,
-            dry_run=self.config.dry_run,
-            metadata=dict(decision.action_metadata),
-        )
-        if not self.action_executor.execute(request):
-            return self._stop_leveling_unsafe(decision.action_failure_reason)
-        updated = self._quest_dialogue.acknowledge(decision)
-        self._invalidate_quest_snapshot_cache()
-        self._quest_refresh_requested_monotonic = time.monotonic()
-        if decision.intent is QuestDialogueIntent.COMPLETE_STEP:
-            if self._quest_director is None:
-                return self._stop_leveling_unsafe("quest_dialogue_director_missing")
-            self._quest_director.invalidate_active_snapshot()
-            self._quest_active_snapshot_requested = False
-            self._quest_active_page_requested = None
-            self._quest_active_request_snapshot_id = None
-            if updated.phase is not QuestDialoguePhase.VERIFY_ACTIVE:
-                return self._stop_leveling_unsafe("quest_dialogue_verify_phase_missing")
-            return self._request_active_quest_snapshot("quest_dialogue_verify_active")
-        return True
-
-    def _handle_pending_quest_acceptance(self) -> bool:
-        pending = self._quest_intake.pending
-        if pending is None:
-            return False
-        if pending.phase is QuestAcceptPhase.ROUTE:
-            return True
-        if pending.phase is QuestAcceptPhase.NPC_LOOKUP:
-            if self.current_page_kind != "area":
-                return True
-            from src.antibot_cv.automation.browser_injector import global_browser_injector
-
-            result = global_browser_injector().execute(
-                "area_npc_snapshot",
-                {"expectedName": pending.giver_name},
-                timeout_s=2.5,
-                client_id=self.browser_client_id,
-            )
-            try:
-                snapshot = json.loads(result.message) if result.ok else None
-            except json.JSONDecodeError:
-                snapshot = None
-            try:
-                decision = self._quest_intake.decide_area_npc(snapshot)
-            except QuestIntakeDecisionError as exc:
-                return self._stop_leveling_unsafe(exc.unsafe_reason)
-            except RuntimeError as exc:
-                return self._stop_leveling_unsafe(f"quest_accept_npc_snapshot:{exc}")
-            request = ActionRequest(
-                decision.action_type,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                dry_run=self.config.dry_run,
-                metadata=dict(decision.action_metadata),
-            )
-            if not self.action_executor.execute(request):
-                return self._stop_leveling_unsafe(decision.action_failure_reason)
-            try:
-                self._quest_intake.acknowledge(decision)
-            except RuntimeError as exc:
-                return self._stop_leveling_unsafe(f"quest_accept_npc_open:{exc}")
-            self._invalidate_quest_snapshot_cache()
-            return True
-        if pending.phase is QuestAcceptPhase.NPC_DIALOG:
-            from src.antibot_cv.automation.browser_injector import global_browser_injector
-
-            result = global_browser_injector().execute(
-                "npc_dialog_snapshot",
-                {"expectedName": pending.giver_name, "expectedNpcId": pending.npc_id},
-                timeout_s=2.5,
-                client_id=self.browser_client_id,
-            )
-            try:
-                snapshot = json.loads(result.message) if result.ok else None
-            except json.JSONDecodeError:
-                snapshot = None
-            try:
-                decision = self._quest_intake.decide_dialog(snapshot)
-            except QuestIntakeDecisionError as exc:
-                return self._stop_leveling_unsafe(exc.unsafe_reason)
-            except RuntimeError as exc:
-                return self._stop_leveling_unsafe(f"quest_accept_dialog:{exc}")
-            self.logger.log_event(
-                "quest_accept_dialog_observed",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                quest_id=pending.quest_id,
-                giver_name=pending.giver_name,
-                headers=list(decision.observed_headers),
-                actions=list(decision.observed_actions),
-                intake_intent=decision.intent.value,
-            )
-            request = ActionRequest(
-                decision.action_type,
-                cycle_id=self.session.cycle_id,
-                battle_id=self.session.battle_id,
-                dry_run=self.config.dry_run,
-                metadata=dict(decision.action_metadata),
-            )
-            if not self.action_executor.execute(request):
-                return self._stop_leveling_unsafe(decision.action_failure_reason)
-            try:
-                updated = self._quest_intake.acknowledge(decision)
-                if decision.intent is not QuestIntakeIntent.ACCEPT_QUEST:
-                    self._invalidate_quest_snapshot_cache()
-                    return True
-                if self._quest_director is None:
-                    raise RuntimeError("quest director is missing")
-                self._quest_director.invalidate_active_snapshot()
-            except RuntimeError as exc:
-                return self._stop_leveling_unsafe(f"quest_accept_action:{exc}")
-            if updated.phase is not QuestAcceptPhase.VERIFY_STARTED:
-                return self._stop_leveling_unsafe("quest_accept_submit:verification phase missing")
-            self._quest_active_snapshot_requested = False
-            self._quest_active_page_requested = None
-            self._quest_active_request_snapshot_id = None
-            return self._request_active_quest_snapshot("quest_accept_verify_started")
-        if pending.phase is QuestAcceptPhase.VERIFY_STARTED:
-            director = self._quest_director
-            if director is None:
-                return self._stop_leveling_unsafe("quest_director_missing")
-            if not director.active_snapshot_fresh:
-                if self._quest_active_page_requested is None:
-                    return self._request_active_quest_snapshot("quest_accept_verify_started")
-                return True
-            try:
-                director.acknowledge_accept(pending.quest_id)
-                self._quest_intake.finish(pending.quest_id)
-            except RuntimeError as exc:
-                return self._stop_leveling_unsafe(f"quest_accept_verify:{exc}")
-            self.logger.log_event(
-                "quest_accept_confirmed",
-                state=self.state_machine.state.value,
-                cycle_id=self.session.cycle_id,
-                quest_id=pending.quest_id,
-                quest_title=pending.title,
-                active_count=len(director.active_quests),
-            )
-            return False
-        return True
-
     def _handle_quest_refresh(self) -> None:
+        if self._handle_pending_quest_turn_in():
+            return
         if self._handle_pending_quest_dialogue():
             return
         if self._handle_pending_quest_acceptance():
+            return
+        if self._handle_pending_quest_chat_refresh(allow_active_progress=True):
             return
         started = self._quest_refresh_requested_monotonic or time.monotonic()
         if self._quest_director is not None and self._quest_active_snapshot_requested:
@@ -1139,6 +746,8 @@ class QuestRuntimeMixin:
             if not self._quest_director.active_catalog.complete:
                 self._request_active_quest_snapshot("quest_active_next_page")
                 return
+        if self._maybe_begin_quest_turn_in():
+            return
         if self._quest_director is not None and self._quest_director.refresh_in_progress:
             if self._quest_catalog_page_requested is not None:
                 timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
@@ -1147,26 +756,25 @@ class QuestRuntimeMixin:
                 return
             page = self._quest_director.catalog.next_page
             if page is not None:
-                request = ActionRequest(
-                    "open_quest_catalog",
-                    cycle_id=self.session.cycle_id,
-                    battle_id=self.session.battle_id,
-                    dry_run=self.config.dry_run,
-                    metadata={"reason": "catalogue_next_page", "page": page},
+                self._request_available_quest_page(
+                    "catalogue_next_page",
+                    failure_reason="quest_catalog_next_page_failed",
                 )
-                self._quest_catalog_request_snapshot_id = self._current_state_snapshot_id
-                self._invalidate_quest_snapshot_cache()
-                if not self.action_executor.execute(request):
-                    self._stop_leveling_unsafe("quest_catalog_next_page_failed")
-                    return
-                self._quest_catalog_page_requested = page
-                self._quest_refresh_requested_monotonic = time.monotonic()
                 return
         if self._quest_director is not None and (
             self._quest_director.catalog.complete
             or self._quest_director.chain.lease is not None
+            or self._quest_director.active_catalog.complete
         ):
             decision = self._quest_director_decision()
+            if decision is not None and decision.intent is QuestDirectorIntent.REFRESH_AVAILABLE:
+                if not self._quest_director.refresh_in_progress:
+                    self._quest_director.begin_catalog_refresh()
+                self._request_available_quest_page(
+                    decision.reason,
+                    failure_reason="quest_catalog_open_failed",
+                )
+                return
             if decision is not None and decision.intent is QuestDirectorIntent.REFRESH_ACTIVE:
                 if self._quest_active_page_requested is None:
                     self._request_active_quest_snapshot(decision.reason)
@@ -1180,6 +788,19 @@ class QuestRuntimeMixin:
                     self._stop_leveling_unsafe("quest_accept_identity_missing")
                     return
                 self._begin_quest_acceptance(decision.quest)
+                return
+            if (
+                decision is not None
+                and decision.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+                and self._quest_director.active_objective is not None
+                and self._quest_director.objective_refresh is not None
+                and self._quest_director.objective_refresh.state
+                is ObjectiveRefreshState.SAME_STEP
+            ):
+                # One victory may yield only part of a multi-drop requirement.
+                # The authoritative catalogue still exposes the same combat
+                # step, so resume hunting rather than waiting on the refresh UI.
+                self._finish_quest_refresh_to_hunt("quest_combat_step_still_active")
                 return
             if decision is not None and decision.intent is QuestDirectorIntent.PROFIT_FARM:
                 self._quest_director_next_farm_refresh_cycle = (
@@ -1236,6 +857,8 @@ class QuestRuntimeMixin:
                     )
                     self._stop_leveling_unsafe("quest_route_target_missing_or_ambiguous")
                     return
+                if not self._validate_route_coordinator_binding("quest_location", target):
+                    return
                 request = ActionRequest(
                     "open_quest_navigator",
                     cycle_id=self.session.cycle_id,
@@ -1252,6 +875,7 @@ class QuestRuntimeMixin:
                         ),
                     },
                 )
+                self._navigator_existing_client_ids = self._navigator_client_ids_for_parent()
                 if not self.action_executor.execute(request):
                     self._stop_leveling_unsafe("quest_navigator_open_failed")
                     return
@@ -1265,8 +889,13 @@ class QuestRuntimeMixin:
                 self._navigator_opened_monotonic = time.monotonic()
                 self._navigator_client_id = None
                 self._navigator_client_bound_monotonic = None
-                self._navigator_requires_target_selection = False
+                self._navigator_requires_target_selection = True
                 self._route_recovery_kind = "quest_location"
+                self._route_started_monotonic = None
+                self._route_deadline_monotonic = None
+                self._route_visited_location_ids.clear()
+                self._route_rehydrate_attempts = 0
+                self._route_rehydrated_current_ids.clear()
                 self._safe_transition(GameState.NAVIGATOR_PENDING, reason="quest_navigator_opened")
                 return
             self._finish_quest_refresh_to_hunt("quest_refresh_complete")
@@ -1285,8 +914,12 @@ class QuestRuntimeMixin:
         )
         if not self.action_executor.execute(request):
             return self._stop_leveling_unsafe("quest_refresh_return_failed")
+        # A combat-drop objective must not reopen the paginated quest UI after
+        # every kill.  Exact chat completion evidence provides the immediate
+        # stop signal; this configured interval is only a bounded fallback for
+        # objectives whose server message was unavailable.
         interval = (
-            1
+            max(1, int(self.config.leveling.quest_refresh_every_completed))
             if self._quest_director is not None
             and self._quest_director.active_objective is not None
             else max(1, int(self.config.leveling.quest_refresh_every_cycles))
@@ -1305,9 +938,18 @@ class QuestRuntimeMixin:
         self._route_destination_name = None
         self._route_destination_id = None
         self._route_expected_transitions = None
+        self._navigator_arrived_confirmed = False
         self._route_step_submitted_from_id = None
+        self._route_step_expected_to_id = None
+        self._route_step_submitted_snapshot_id = None
         self._route_step_submitted_monotonic = None
+        self._route_started_monotonic = None
+        self._route_deadline_monotonic = None
+        self._route_visited_location_ids.clear()
+        self._route_rehydrate_attempts = 0
+        self._route_rehydrated_current_ids.clear()
         self._route_resume_target_name = None
+        self._route_resume_recovery_kind = None
         self._reset_location_context()
         self._search_pause_until_monotonic = (
             time.monotonic() + self.config.recovery.viewport_exhausted_pause_ms / 1000

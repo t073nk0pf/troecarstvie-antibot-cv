@@ -103,6 +103,10 @@ class LevelingRuntimeMixin:
         player = player_section.get("data") if isinstance(player_section, dict) else None
         quest_section = sections.get("quests") if isinstance(sections, dict) else None
         quest_data = quest_section.get("data") if isinstance(quest_section, dict) else None
+        chat_progress_section = (
+            sections.get("questChatProgress") if isinstance(sections, dict) else None
+        )
+        self._observe_quest_chat_progress(snapshot, chat_progress_section)
         death_section = sections.get("deathRevive") if isinstance(sections, dict) else None
         death_data = death_section.get("data") if isinstance(death_section, dict) else None
         location_section = sections.get("location") if isinstance(sections, dict) else None
@@ -208,6 +212,43 @@ class LevelingRuntimeMixin:
             )
             self._record_leveling_wait(reason)
             return False
+        recovery_transition = bool(
+            self.current_page_kind == "other"
+            and self.state_machine.state in {GameState.LOCATION_SEARCH, GameState.VIEWPORT_SCAN}
+            and self._last_item_recovery_attempt_monotonic is not None
+            and time.monotonic() - self._last_item_recovery_attempt_monotonic
+            < max(3.0, float(self.config.item_recovery.timeout_s) + 1.0)
+        )
+        if recovery_transition and (
+            self._search_pause_until_monotonic is not None
+            and time.monotonic() < self._search_pause_until_monotonic
+        ):
+            self._record_leveling_wait("item_recovery_page_settling")
+            return False
+        if (
+            (
+                self.current_page_kind in {"inventory", "shop", "statistics"}
+                or recovery_transition
+            )
+            and self.state_machine.state in {GameState.LOCATION_SEARCH, GameState.VIEWPORT_SCAN}
+        ):
+            request = ActionRequest(
+                "open_hunt",
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                dry_run=self.config.dry_run,
+                metadata={
+                    "reason": (
+                        "recover_from_item_recovery_transition"
+                        if recovery_transition
+                        else "recover_from_non_hunt_page"
+                    )
+                },
+            )
+            if not self.action_executor.execute(request):
+                return self._stop_leveling_unsafe("non_hunt_page_recovery_failed")
+            self._search_pause_until_monotonic = time.monotonic() + 0.5
+            return True
         if self.config.leveling.autonomous_quest_director and self._maybe_start_quest_refresh():
             return True
         if self._maybe_start_configured_location_route():
@@ -477,6 +518,9 @@ class LevelingRuntimeMixin:
                     route_target = self._route_destination_name or self._navigator_target_name
                     if route_target and not self._route_resume_target_name:
                         self._route_resume_target_name = route_target
+                        self._route_resume_recovery_kind = (
+                            self._route_recovery_kind or "interrupted_route_resume"
+                        )
                 previous_activity = self.state_machine.state.value
                 previous_location = self._confirmed_recovery_location()
                 event_id = self._current_state_snapshot_id or f"death:{self.session.cycle_id}:{self.deaths_observed + 1}"
@@ -641,15 +685,23 @@ class LevelingRuntimeMixin:
             location_name=self.current_location_name,
             reason="post_revive_checkpoint_already_current",
         )
-        if self._route_resume_target_name and not _same_location_name(
-            self.current_location_name,
-            self._route_resume_target_name,
-        ):
-            return self._start_location_route(
-                self._route_resume_target_name,
-                kind="post_revive_route_resume",
-                reason="post_revive_route_resume",
-            )
+        if self._route_resume_target_name:
+            resume_target = self._route_resume_target_name
+            resume_kind = self._route_resume_recovery_kind
+            binding_error = self._route_arrival_binding_error(resume_kind, resume_target)
+            if binding_error is not None:
+                return self._stop_leveling_unsafe(f"post_revive_route_binding:{binding_error}")
+            self._route_resume_target_name = None
+            self._route_resume_recovery_kind = None
+            if not _same_location_name(self.current_location_name, resume_target):
+                return self._start_location_route(
+                    resume_target,
+                    kind=resume_kind or "post_revive_route_resume",
+                    reason="post_revive_route_resume",
+                )
+            self._route_recovery_kind = resume_kind
+            self._route_destination_name = resume_target
+            return self._finish_route_arrival("post_revive_route_resume_arrived")
         if (
             (
                 self.config.leveling.auto_navigate_quest_targets

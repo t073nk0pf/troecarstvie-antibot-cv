@@ -38,13 +38,17 @@
     "slot_confidence_threshold": 0.4,
     "slot_index": 4,
     "slot_sequence": [
+      1,
       2,
-      3
+      3,
+      4,
+      5
     ]
   },
   "dry_run": true,
   "max_cycles": 100000,
   "max_session_minutes": 480,
+  "npc_catalog_path": "docs/3kingdoms/NPC_CATALOG.json",
   "runs_dir": "runs",
   "resources": {
     "enabled": true,
@@ -101,28 +105,35 @@
     ]
   },
   "battle_item_recovery": {
-    "enabled": false,
-    "health_use_when_below_percent": 35,
-    "prowess_use_when_below_percent": 15,
+    "enabled": true,
+    "health_use_when_below_percent": 45,
+    "prowess_use_when_below_percent": 20,
     "health_slots": [],
     "prowess_slots": [],
-    "health_names": [],
-    "prowess_names": [],
-    "damage_boost_enabled": false,
+    "health_names": [
+      "Превосходный нектар жизни"
+    ],
+    "prowess_names": [
+      "Превосходный нектар удали"
+    ],
+    "damage_boost_enabled": true,
     "damage_boost_slots": [],
-    "damage_boost_names": [],
-    "cooldown_ms": 3000,
-    "max_uses_per_battle": 1,
+    "damage_boost_names": [
+      "Могучая сфера мощи"
+    ],
+    "damage_boost_use_chance_percent": 100,
+    "cooldown_ms": 1000,
+    "max_uses_per_battle": 10,
     "pre_click_delay_ms": 0,
     "click_hold_ms": 0
   },
   "leveling": {
-    "enabled": false,
-    "target_level": null,
-    "required_character_name": "v3g45",
+    "enabled": true,
+    "target_level": 6,
+    "required_character_name": "",
     "snapshot_interval_ms": 1000,
     "snapshot_stale_timeout_ms": 15000,
-    "max_deaths_per_session": 3,
+    "max_deaths_per_session": 0,
     "target_location_name": "",
     "auto_target_level_offsets": [
       0
@@ -137,7 +148,9 @@
     "auto_navigate_quest_targets": false,
     "autonomous_quest_director": false,
     "pinned_quest_id": "",
-    "navigator_timeout_ms": 10000,
+    "ignored_quest_ids": ["269"],
+    "prefer_active_quests": true,
+    "navigator_timeout_ms": 30000,
     "navigator_max_transitions": 50,
     "route_settle_ms": 3000,
     "allow_soft_currency_purchases": false,
@@ -233,6 +246,7 @@
     "stable_frames": 1
   },
   "templates_path": "config/templates.example.json",
+  "world_registry_path": "config/world_registry.json",
   "viewport": {
     "direction_pad_points": {
       "EAST": [

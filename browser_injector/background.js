@@ -1,7 +1,7 @@
 importScripts("update_runtime.js");
 
 const ENDPOINT = "http://127.0.0.1:17654";
-const BRIDGE_VERSION = "2026-07-13-quest-scope-v52";
+const BRIDGE_VERSION = "2026-07-17-chat-delivery-retention-v74";
 const PROFILE_ID_KEY = "antibotCvProfileId";
 let profileIdPromise = null;
 const tabSessionNonceById = new Map();
@@ -50,7 +50,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "antibot-cv-local-fetch") {
     return false;
   }
-  void extensionUpdateMonitor.checkNow();
   localFetch(message.request || {})
     .then((response) => sendResponse(response))
     .catch((error) =>

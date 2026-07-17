@@ -129,6 +129,7 @@ class BattleItemRecoveryConfig:
     damage_boost_enabled: bool = False
     damage_boost_slots: tuple[int, ...] = ()
     damage_boost_names: tuple[str, ...] = ()
+    damage_boost_use_chance_percent: float = 100.0
     cooldown_ms: int = 3000
     max_uses_per_battle: int = 1
     pre_click_delay_ms: int = 0
@@ -155,6 +156,8 @@ class LevelingConfig:
     auto_navigate_quest_targets: bool = False
     autonomous_quest_director: bool = False
     pinned_quest_id: str = ""
+    ignored_quest_ids: tuple[str, ...] = ()
+    prefer_active_quests: bool = False
     quest_refresh_every_completed: int = 5
     quest_catalog_max_pages: int = 20
     navigator_timeout_ms: int = 10000
@@ -227,6 +230,15 @@ class SafetyConfig:
 
 
 @dataclass(frozen=True)
+class RunRetentionConfig:
+    enabled: bool = False
+    max_age_days: int = 30
+    max_runs: int = 100
+    max_total_bytes: int = 2_000_000_000
+    min_keep: int = 3
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool = True
     allow_live_toggle: bool = False
@@ -248,7 +260,10 @@ class AutomationConfig:
     leveling: LevelingConfig = field(default_factory=LevelingConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    run_retention: RunRetentionConfig = field(default_factory=RunRetentionConfig)
     templates_path: str = "config/templates.example.json"
+    npc_catalog_path: str = "docs/3kingdoms/NPC_CATALOG.json"
+    world_registry_path: str = "config/world_registry.json"
     runs_dir: str = "runs"
 
     @classmethod
@@ -334,6 +349,8 @@ def _build_dataclass(cls: type[Any], raw: Any) -> Any:
             values[item.name] = _build_dataclass(RecoveryConfig, value)
         elif item.name == "safety":
             values[item.name] = _build_dataclass(SafetyConfig, value)
+        elif item.name == "run_retention":
+            values[item.name] = _build_dataclass(RunRetentionConfig, value)
         else:
             values[item.name] = value
     return cls(**values)
@@ -368,6 +385,8 @@ def _build_leveling_config(raw: dict[str, Any]) -> LevelingConfig:
     data = dict(raw)
     if "auto_target_level_offsets" in data:
         data["auto_target_level_offsets"] = tuple(int(value) for value in data["auto_target_level_offsets"])
+    if "ignored_quest_ids" in data:
+        data["ignored_quest_ids"] = tuple(str(value).strip() for value in data["ignored_quest_ids"] if str(value).strip())
     return LevelingConfig(**data)
 
 
@@ -447,7 +466,11 @@ def _build_battle_item_recovery_config(raw: dict[str, Any]) -> BattleItemRecover
     for key in ("cooldown_ms", "max_uses_per_battle", "pre_click_delay_ms", "click_hold_ms"):
         if key in data:
             data[key] = int(data[key])
-    for key in ("health_use_when_below_percent", "prowess_use_when_below_percent"):
+    for key in (
+        "health_use_when_below_percent",
+        "prowess_use_when_below_percent",
+        "damage_boost_use_chance_percent",
+    ):
         if key in data:
             data[key] = float(data[key])
     return BattleItemRecoveryConfig(**data)

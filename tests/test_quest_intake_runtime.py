@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import pytest
 
 from src.antibot_cv.automation.quest_director_policy import QuestRef
@@ -19,6 +20,7 @@ def area_snapshot(*items: dict[str, object]) -> dict[str, object]:
     return {
         "ok": True,
         "snapshotId": "area-npcs-1",
+        "generatedAt": time.time(),
         "location": {"id": "125", "name": "Порт"},
         "items": list(items),
         "truncated": False,
@@ -31,6 +33,8 @@ def dialog_snapshot(**updates: object) -> dict[str, object]:
         "truncated": False,
         "identityMatches": True,
         "snapshotId": "npc-dialog-1",
+        "generatedAt": time.time(),
+        "href": "https://3kingdoms.ru/npc.php?f_id=6",
         "headers": [],
         "actions": [],
         "questActions": [],
@@ -72,8 +76,9 @@ def test_intake_requires_one_giver_and_returns_snapshot_bound_npc_intent() -> No
         "expected_location_id": "125",
         "npc_id": "6",
         "expected_name": "Моряк Кентур",
-        "expected_dialog_name": "Моряк Кентур",
-        "quest_id": "314",
+            "expected_dialog_name": "Моряк Кентур",
+            "quest_id": "314",
+            "quest_title": "Письмо моряку",
     }
     with pytest.raises(TypeError):
         decision.action_metadata["npc_id"] = "7"  # type: ignore[index]
@@ -119,10 +124,16 @@ def test_dialog_decisions_normalize_title_and_choose_open_answer_then_accept() -
     assert opened.intent is QuestIntakeIntent.OPEN_QUEST
     assert dict(opened.action_metadata) == {
         "expected_snapshot_id": "npc-dialog-1",
+        "expected_generated_at": opened.action_metadata["expected_generated_at"],
+        "source_semantic_fingerprint": opened.action_metadata["source_semantic_fingerprint"],
+        "expected_href": "https://3kingdoms.ru/npc.php?f_id=6",
+        "giver_name": "Моряк Кентур",
         "npc_id": "6",
         "quest_id": "314",
         "expected_title": "Письмо моряку",
         "action": "open",
+        "quest_opened": False,
+        "dialog_steps": 0,
     }
     runtime.acknowledge(opened)
 
@@ -215,6 +226,68 @@ def test_dialog_prefers_the_only_reply_without_refusal_language() -> None:
 
     assert decision.intent is QuestIntakeIntent.ANSWER_DIALOG
     assert decision.action_metadata["expected_ref"] == "401"
+
+
+@pytest.mark.parametrize(
+    "dialog_actions",
+    (
+        [
+            {
+                "questId": "314",
+                "npcId": "6",
+                "action": "answer",
+                "visible": True,
+                "disabled": False,
+                "ref": "501",
+                "text": "Я не выполню это поручение.",
+            }
+        ],
+        [
+            {
+                "questId": "314",
+                "npcId": "6",
+                "action": "answer",
+                "visible": True,
+                "disabled": False,
+                "ref": "502",
+                "text": "Далее",
+            },
+            {
+                "questId": "314",
+                "npcId": "6",
+                "action": "answer",
+                "visible": True,
+                "disabled": False,
+                "ref": "502",
+                "text": "Далее",
+            },
+        ],
+    ),
+)
+def test_dialog_policy_blocks_sole_refusal_and_duplicate_controls(
+    dialog_actions: list[dict[str, object]],
+) -> None:
+    runtime = ready_dialog_runtime()
+    runtime.acknowledge(
+        runtime.decide_dialog(
+            dialog_snapshot(
+                questActions=[
+                    {
+                        "questId": "314",
+                        "title": "Письмо моряку",
+                        "action": "open",
+                        "visible": True,
+                        "disabled": False,
+                    }
+                ]
+            )
+        )
+    )
+
+    with pytest.raises(QuestIntakeDecisionError) as exc_info:
+        runtime.decide_dialog(dialog_snapshot(dialogActions=dialog_actions))
+
+    assert exc_info.value.unsafe_reason == "quest_accept_dialog_action_ambiguous"
 
 
 @pytest.mark.parametrize(

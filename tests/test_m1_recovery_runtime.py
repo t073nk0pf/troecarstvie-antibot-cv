@@ -133,12 +133,9 @@ def _run_route_leg(
     )
     controller._location_route_snapshot_via_injector = lambda: next(route_snapshots)
 
-    controller._handle_route_recovery()
-    controller._handle_route_recovery()
-    controller._handle_route_recovery()
-    controller._handle_route_recovery()
-    controller._handle_route_recovery()
-    controller._handle_route_recovery()
+    for _ in range(6):
+        controller._route_poll_cadence.next_poll_at = 0
+        controller._handle_route_recovery()
 
 
 def _advance_through_recovery_routes(controller: AutomationController, monkeypatch) -> None:

@@ -42,6 +42,9 @@ class SessionState:
     attack_click_counts_by_battle_id: dict[int, int] = field(default_factory=dict)
 
     def new_battle(self) -> int:
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
         self.battle_id = self.next_battle_id
         self.next_battle_id += 1
         return self.battle_id
@@ -117,6 +120,9 @@ class SessionState:
         self.cycle_had_combat_action = False
         self.cycle_battle_outcome = None
         self.hunt_click_counts_by_cycle_id.pop(self.cycle_id, None)
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
 
     def mark_incomplete_cycle(self) -> None:
         self.incomplete_cycles += 1
@@ -129,6 +135,10 @@ class SessionState:
         self.cycle_had_battle = False
         self.cycle_had_combat_action = False
         self.cycle_battle_outcome = None
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
+        self.hunt_click_counts_by_cycle_id.clear()
 
     @property
     def elapsed_s(self) -> float:

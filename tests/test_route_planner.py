@@ -101,7 +101,20 @@ def test_navigator_route_requires_fresh_exact_unambiguous_observation() -> None:
     assert decision.route_transitions == 2
     assert decision.snapshot_id == "nav-1"
 
-    assert validate_navigator_route({**observed, "target": "Дикий предел II"}, "Дикий предел", now=lambda: 1001.0).reason == "navigator_target_mismatch"
+    target_pending = validate_navigator_route(
+        {**observed, "target": None},
+        "Дикий предел",
+        now=lambda: 1001.0,
+    )
+    assert target_pending.action is RouteAction.REFRESH
+    assert target_pending.reason == "navigator_target_selection_pending"
+    wrong_target = validate_navigator_route(
+        {**observed, "target": "Дикий предел II"},
+        "Дикий предел",
+        now=lambda: 1001.0,
+    )
+    assert wrong_target.action is RouteAction.STOP_UNSAFE
+    assert wrong_target.reason == "navigator_target_mismatch"
     assert validate_navigator_route({**observed, "visibleGoButtonCount": 2}, "Дикий предел", now=lambda: 1001.0).reason == "navigator_route_ambiguous"
     assert validate_navigator_route({**observed, "routeTransitions": 51}, "Дикий предел", max_transitions=50, now=lambda: 1001.0).reason == "navigator_route_length_invalid"
     rendering = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
@@ -105,6 +106,37 @@ def test_completed_identity_routes_to_exact_snapshot_bound_npc() -> None:
     }
 
 
+def test_terminal_collection_evidence_can_begin_when_catalogue_has_no_progress() -> None:
+    entry = completed_entry(complete=False)
+    lease, quest_ref = identities(entry)
+    runtime = QuestTurnInRuntime()
+
+    with pytest.raises(QuestTurnInError, match="not confirmed complete"):
+        runtime.begin(entry, lease=lease, quest_ref=quest_ref, already_at_location=False)
+
+    assert runtime.begin(
+        entry,
+        lease=lease,
+        quest_ref=quest_ref,
+        already_at_location=False,
+        terminal_collection_confirmed=True,
+    ).phase is QuestTurnInPhase.ROUTE
+
+
+def test_turn_in_proxy_click_keeps_quest_giver_as_dialog_identity() -> None:
+    entry = completed_entry()
+    lease, quest_ref = identities(entry)
+    runtime = QuestTurnInRuntime()
+    runtime.begin(entry, lease=lease, quest_ref=quest_ref, already_at_location=True)
+
+    decision = runtime.decide_area_npc(
+        area({"dataId": "0", "name": "Дом Ратмира", "actionable": True})
+    )
+
+    assert decision.action_metadata["npc_id"] == "0"
+    assert decision.action_metadata["expected_name"] == "Дом Ратмира"
+    assert decision.action_metadata["expected_dialog_name"] == "Воевода Ратмир"
+
 def test_dialogue_emits_existing_guarded_actions_and_requires_terminal_refresh() -> None:
     runtime = begun()
     opened = runtime.decide_dialog(
@@ -145,6 +177,83 @@ def test_dialogue_emits_existing_guarded_actions_and_requires_terminal_refresh()
         runtime.verify_terminal((completed_entry(),), catalog_complete=True, catalog_revision=8)
     assert runtime.verify_terminal((), catalog_complete=True, catalog_revision=8) == "246"
     assert runtime.pending is None
+
+
+def test_open_action_is_selected_by_quest_id_when_dialogue_title_differs() -> None:
+    runtime = begun()
+
+    decision = runtime.decide_dialog(dialog(questActions=[
+        {
+            "questId": "999",
+            "title": "Мечта разбойника",
+            "action": "open",
+            "visible": True,
+            "disabled": False,
+        },
+        {
+            "questId": "246",
+            "title": "Разговор с Ратмиром о дневнике бандита",
+            "action": "open",
+            "visible": True,
+            "disabled": False,
+        },
+    ]))
+
+    assert decision.intent is QuestTurnInIntent.OPEN_QUEST
+    assert decision.action_metadata["quest_id"] == "246"
+    assert decision.action_metadata["expected_title"] == (
+        "Разговор с Ратмиром о дневнике бандита"
+    )
+
+
+def test_fresh_advanced_step_continues_same_quest_chain() -> None:
+    runtime = begun()
+    assert runtime.pending is not None
+    runtime.pending = replace(
+        runtime.pending,
+        phase=QuestTurnInPhase.VERIFY_ACTIVE,
+        completion_after_revision=7,
+    )
+    advanced = ActiveQuestEntry(
+        "246",
+        "Охота на волка",
+        MappingProxyType({
+            "id": "246",
+            "title": "Охота на волка",
+            "status": "active",
+            "objective": "Убить Лиса 0/3",
+            "navigation": (
+                MappingProxyType({"text": "Лиса", "target": "Лиса [5]"}),
+            ),
+            "progress": MappingProxyType(
+                {"current": 0, "required": 3, "complete": False}
+            ),
+        }),
+    )
+
+    assert runtime.verify_continuation(
+        (advanced,), catalog_complete=True, catalog_revision=8
+    ) == advanced
+    runtime.confirm_continuation()
+    assert runtime.pending is None
+
+
+def test_same_completed_step_is_not_accepted_as_continuation() -> None:
+    runtime = begun()
+    assert runtime.pending is not None
+    runtime.pending = replace(
+        runtime.pending,
+        phase=QuestTurnInPhase.VERIFY_ACTIVE,
+        completion_after_revision=7,
+    )
+
+    with pytest.raises(QuestTurnInError) as exc_info:
+        runtime.verify_continuation(
+            (completed_entry(),), catalog_complete=True, catalog_revision=8
+        )
+
+    assert exc_info.value.unsafe_reason == "turn_in_step_not_advanced"
+    assert runtime.pending is not None
 
 
 @pytest.mark.parametrize(

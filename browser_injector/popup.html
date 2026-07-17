@@ -156,7 +156,7 @@
         </label>
         <label class="checkbox-line">
           <input id="battleDamageBoostEnabled" type="checkbox" />
-          <span>Усиление урона в начале боя</span>
+          <span>Сферы мощи перед ударами</span>
         </label>
         <label>
           <span>Усиление: слоты</span>
@@ -165,6 +165,10 @@
         <label>
           <span>Усиление: имена</span>
           <input id="battleDamageBoostNames" type="text" placeholder="эликсир силы" />
+        </label>
+        <label class="wide range-field">
+          <span>Шанс сферы перед ударом: <output id="battleDamageBoostChanceValue">100%</output></span>
+          <input id="battleDamageBoostChancePercent" type="range" min="0" max="100" step="5" value="100" />
         </label>
         <label>
           <span>КД банок, мс</span>
@@ -186,6 +190,7 @@
       <section class="actions">
         <button id="startButton" type="button">Старт</button>
         <button id="stopButton" type="button">Стоп</button>
+        <button id="questRunButton" class="wide-action" type="button">Выполнять квесты</button>
         <button id="refreshButton" type="button">Статус</button>
         <button id="updateExtensionButton" type="button" disabled>Обновить bridge</button>
       </section>

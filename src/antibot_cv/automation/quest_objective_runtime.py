@@ -146,6 +146,12 @@ def quest_step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
     return _step_fingerprint(entry)
 
 
+def legacy_quest_step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
+    """Return the pre-router signature solely for persisted-checkpoint migration."""
+
+    return _step_fingerprint(entry, legacy=True)
+
+
 def compare_refreshed_objective(
     previous: QuestObjective,
     refreshed_entries: Sequence[ActiveQuestEntry],
@@ -291,7 +297,9 @@ def _parse_monster_objective(
     )
 
 
-def _step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
+def _step_fingerprint(
+    entry: ActiveQuestEntry, *, legacy: bool = False
+) -> tuple[str | None, str]:
     """Fingerprint one current step independently from its supported executor."""
 
     data = entry.data
@@ -319,14 +327,25 @@ def _step_fingerprint(entry: ActiveQuestEntry) -> tuple[str | None, str]:
     _, required, _, progress_reason = _parse_progress(data.get("progress"))
     if progress_reason:
         return None, progress_reason
-    encoded = json.dumps(
-        {
+    payload: dict[str, object] = {
             "quest_id": entry.id,
             "quest_title": entry.title,
             "objective": _PROGRESS_RATIO.sub("#/#", objective),
             "navigation": fingerprint_navigation,
             "required": required,
-        },
+    }
+    if not legacy:
+        raw_kind = data.get("objectiveKind")
+        if raw_kind is not None and (
+            not isinstance(raw_kind, str)
+            or raw_kind != raw_kind.strip()
+            or not raw_kind
+        ):
+            return None, "unsafe_objective_kind"
+        payload["schema"] = 2
+        payload["objective_kind"] = raw_kind.casefold() if isinstance(raw_kind, str) else None
+    encoded = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

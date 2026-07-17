@@ -323,7 +323,11 @@ def validate_navigator_route(
     age = now() - generated_at
     if age < 0 or age > max_snapshot_age_s:
         return NavigatorRouteDecision(RouteAction.REFRESH, "navigator_snapshot_stale", target, snapshot_id=snapshot_id)
-    if not _text(expected_target) or not target or normalize_location_name(target) != normalize_location_name(expected_target):
+    if not _text(expected_target):
+        return NavigatorRouteDecision(RouteAction.STOP_UNSAFE, "navigator_target_mismatch", target, snapshot_id=snapshot_id)
+    if not target:
+        return NavigatorRouteDecision(RouteAction.REFRESH, "navigator_target_selection_pending", target, snapshot_id=snapshot_id)
+    if normalize_location_name(target) != normalize_location_name(expected_target):
         return NavigatorRouteDecision(RouteAction.STOP_UNSAFE, "navigator_target_mismatch", target, snapshot_id=snapshot_id)
     current_location = snapshot.get("currentLocation")
     if current_location is True:

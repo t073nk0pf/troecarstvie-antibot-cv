@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-13-quest-scope-v52";
+  const bridgeVersion = "2026-07-17-chat-delivery-retention-v74";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";
@@ -105,6 +105,7 @@
       if (clientIdentity && clientIdentity.profileId) params.set("profile", String(clientIdentity.profileId));
       if (clientIdentity && Number.isInteger(clientIdentity.tabId)) params.set("tab", String(clientIdentity.tabId));
       if (clientIdentity && Number.isInteger(clientIdentity.openerTabId)) params.set("opener", String(clientIdentity.openerTabId));
+      params.set("wait", "25");
       const data = await localFetch(`/next?${params.toString()}`);
       const command = data && data.command;
       if (command && command.id && command.id !== lastCommandId) {
@@ -120,6 +121,9 @@
       // The Python controller is not running. Keep polling quietly.
     } finally {
       busy = false;
+      // Keep one continuous long-poll outstanding. Waiting for the periodic
+      // interval here creates a delivery gap as long as the server wait.
+      window.setTimeout(poll, 0);
     }
   }
 
@@ -175,7 +179,7 @@
     const commandTimeout = Number.isFinite(rawCommandTimeout) ? Math.max(0, Math.min(25000, rawCommandTimeout)) : 0;
     return Math.max(
       2000,
-      Math.min(25000, Math.max(inventoryDelay + 5000, verifyTimeout + 2500, commandTimeout))
+      Math.min(25000, Math.max(inventoryDelay > 0 ? inventoryDelay + 5000 : 0, verifyTimeout + 2500, commandTimeout))
     );
   }
 
@@ -184,7 +188,13 @@
       () =>
         new Promise((resolve) => {
           const token = `antibot-cv-${command.id}`;
-          const payload = command.payload || {};
+          const payload = command.payload && typeof command.payload === "object" && !Array.isArray(command.payload)
+            ? command.payload
+            : {};
+          const transportPayload = {
+            ...payload,
+            transport: { clientId },
+          };
           const commandTimeoutMs = timeoutForPageCommand(payload);
           const timeout = window.setTimeout(() => {
             cleanup();
@@ -215,7 +225,7 @@
               token,
               command: {
                 type: command.type,
-                payload,
+                payload: transportPayload,
               },
             },
             "*"
@@ -224,6 +234,6 @@
     );
   }
 
-  window.setInterval(poll, 350);
+  window.setInterval(poll, 25000);
   poll();
 })();

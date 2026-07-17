@@ -73,6 +73,7 @@ class ResourceRuntimeMixin:
                 prowess_percent=status.prowess.percent,
             )
             self._state_snapshot_cache = None
+            self._state_snapshot_cache_sections = None
             self._last_state_snapshot_monotonic = None
             self._last_state_snapshot_success_monotonic = None
             return
@@ -312,7 +313,23 @@ class ResourceRuntimeMixin:
             prowess_threshold=self._item_recovery_threshold("prowess"),
             frame_hash=self._last_frame_hash,
         )
-        return self._use_item_recovery_after_cycle(frame, reason=reason, require_after_cycle=False)
+        recovered = self._use_item_recovery_after_cycle(
+            frame, reason=reason, require_after_cycle=False
+        )
+        if recovered:
+            # The item action may briefly expose an inventory/transition frame
+            # before its open_hunt_after navigation settles.  Keep general
+            # leveling policy from classifying that frame as unknown.
+            settle_s = max(
+                0.75,
+                (
+                    self.config.item_recovery.confirm_delay_ms
+                    + self.config.item_recovery.between_items_delay_ms
+                )
+                / 1000,
+            )
+            self._search_pause_until_monotonic = time.monotonic() + settle_s
+        return recovered
 
     def _log_resource_status(
         self,

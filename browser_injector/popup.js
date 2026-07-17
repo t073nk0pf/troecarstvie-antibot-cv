@@ -36,6 +36,7 @@ const fields = [
   "battleDamageBoostEnabled",
   "battleDamageBoostSlots",
   "battleDamageBoostNames",
+  "battleDamageBoostChancePercent",
   "battleItemCooldownMs",
   "battleItemMaxUsesPerBattle",
   "live",
@@ -80,6 +81,7 @@ const defaults = {
   battleDamageBoostEnabled: false,
   battleDamageBoostSlots: "",
   battleDamageBoostNames: "",
+  battleDamageBoostChancePercent: 100,
   battleItemCooldownMs: 3000,
   battleItemMaxUsesPerBattle: 1,
   goalLevel: null,
@@ -133,7 +135,7 @@ function readSettings() {
     }
     if (input.type === "checkbox") {
       settings[id] = input.checked;
-    } else if (input.type === "number") {
+    } else if (input.type === "number" || input.type === "range") {
       settings[id] = input.value === "" ? null : Number(input.value);
     } else {
       settings[id] = input.value.trim();
@@ -221,6 +223,14 @@ async function saveSettings() {
 async function loadSettings() {
   const stored = await chrome.storage.local.get("antibotCvSettings");
   writeSettings(stored.antibotCvSettings || defaults);
+}
+
+function renderDamageBoostChance() {
+  const value = Math.max(0, Math.min(100, Number($("battleDamageBoostChancePercent")?.value || 0)));
+  const output = $("battleDamageBoostChanceValue");
+  if (output) {
+    output.textContent = `${value}%`;
+  }
 }
 
 function setStatusText(id, text) {
@@ -338,6 +348,7 @@ function renderStatus(status, currentClient) {
   $("runBadge").textContent = running ? "running" : "idle";
   $("runBadge").classList.toggle("running", running);
   $("startButton").disabled = running || !hasCurrentClient;
+  $("questRunButton").disabled = running || !hasCurrentClient;
   $("stopButton").disabled = !running || !hasCurrentClient;
   $("updateExtensionButton").disabled = Boolean(status.any_running);
 
@@ -395,6 +406,7 @@ async function refreshStatus() {
     $("runBadge").textContent = "offline";
     $("runBadge").classList.remove("running");
     $("startButton").disabled = true;
+    $("questRunButton").disabled = true;
     $("stopButton").disabled = true;
     $("updateExtensionButton").disabled = true;
     setStatusText("serverStatus", "Сначала запусти control-server в терминале");
@@ -413,6 +425,29 @@ async function startBot() {
   if (!settings.clientId) {
     throw new Error("Открой поп-ап на нужной вкладке игры, чтобы привязать текущий client_id.");
   }
+  settings.autonomousQuestDirector = false;
+  settings.autoNavigateQuestTargets = false;
+  settings.openHuntOnStart = true;
+  await api("/start", { method: "POST", body: settings });
+  await refreshStatus();
+}
+
+async function startQuestBot() {
+  await saveSettings();
+  const settings = readSettings();
+  settings.clientId = selectedClientId();
+  if (!settings.clientId) {
+    throw new Error("Открой поп-ап на нужной вкладке игры, чтобы привязать текущий client_id.");
+  }
+  if (settings.live !== true) {
+    throw new Error("Для реального выполнения квестов включи live.");
+  }
+  settings.autonomousQuestDirector = true;
+  settings.autoNavigateQuestTargets = true;
+  settings.openHuntOnStart = false;
+  settings.requiredCharacterName = "";
+  settings.goalLevel = null;
+  settings.targetLocationName = "";
   await api("/start", { method: "POST", body: settings });
   await refreshStatus();
 }
@@ -471,6 +506,7 @@ async function scanSkills() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadSettings();
+  renderDamageBoostChance();
   await loadCurrentClient().catch(() => {});
   for (const id of fields) {
     const input = $(id);
@@ -478,7 +514,9 @@ document.addEventListener("DOMContentLoaded", async () => {
       input.addEventListener("change", saveSettings);
     }
   }
+  $("battleDamageBoostChancePercent")?.addEventListener("input", renderDamageBoostChance);
   $("startButton").addEventListener("click", () => startBot().catch((error) => setStatusText("errorStatus", error.message)));
+  $("questRunButton").addEventListener("click", () => startQuestBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("stopButton").addEventListener("click", () => stopBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("refreshButton").addEventListener("click", refreshStatus);
   $("updateExtensionButton").addEventListener("click", () => {

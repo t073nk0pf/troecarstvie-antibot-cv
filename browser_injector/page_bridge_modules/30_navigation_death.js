@@ -551,7 +551,11 @@
         });
       } catch (_) {}
     });
-    const best = candidates.find((candidate) => candidate.level != null && candidate.name) || candidates[0] || null;
+    const observedNames = Array.from(new Set(candidates.map((candidate) => candidate.name).filter(Boolean)));
+    const identityAmbiguous = observedNames.length > 1;
+    const best = identityAmbiguous
+      ? null
+      : candidates.find((candidate) => candidate.level != null && candidate.name) || candidates[0] || null;
     const data = {
       name: best ? best.name || null : null,
       level: best ? best.level : null,
@@ -561,10 +565,10 @@
       rawControl: best ? best.rawControl : { xp: null, xpMax: null },
     };
     const present = data.name || data.level != null || data.xpPercent != null || data.hpPercent != null || data.prowessPercent != null;
-    const complete = data.name && data.level != null && data.xpPercent != null && data.hpPercent != null && data.prowessPercent != null;
+    const complete = !identityAmbiguous && data.name && data.level != null && data.xpPercent != null && data.hpPercent != null && data.prowessPercent != null;
     return {
-      status: complete ? "available" : present ? "partial" : "not_loaded",
-      reason: present ? null : "player_control_missing",
+      status: complete ? "available" : present || identityAmbiguous ? "partial" : "not_loaded",
+      reason: identityAmbiguous ? "player_identity_ambiguous" : present ? null : "player_control_missing",
       source: best ? { framePath: best.path, href: best.href } : null,
       data,
     };
@@ -619,6 +623,83 @@
   };
 
   const locationRouteSnapshot = () => {
+    const root = window.top || window;
+    const win = findMainContentWindow(root);
+    let href = "";
+    let title = "";
+    try {
+      href = safeString(win && win.location && win.location.href, 240);
+      title = safeString(win && win.document && win.document.title, 160);
+    } catch (_) {}
+    const pageKind = pageKindFromHref(href);
+    const areaObject = win && win.area ? win.area : null;
+    const areaModel = areaObject && areaObject.model && areaObject.model.area ? areaObject.model.area : null;
+    const compass = areaObject && areaObject.controller ? areaObject.controller.compass : null;
+    const compassData = compass && compass.data ? compass.data : null;
+    const compassLocation = areaModel && areaModel.compassLocation ? areaModel.compassLocation : null;
+    const transitionDeadlineMs = Number(areaModel && areaModel.finishTimeLocal);
+    const deadlineSeconds = Number.isFinite(transitionDeadlineMs)
+      ? Math.max(0, Math.ceil((transitionDeadlineMs - Date.now()) / 1000))
+      : null;
+    const waitValues = compassLocation
+      ? [compassLocation.ltime, compassLocation.dtime, deadlineSeconds]
+          .map((value) => Number(value))
+          .filter((value) => Number.isFinite(value) && value >= 0)
+      : [];
+    const transitionTimerSeconds = waitValues.length ? Math.max(...waitValues) : null;
+    const idMatch = href.match(/[?&](?:location_id|loc_id|area_id)=([^&#]+)/i);
+    const currentLocationId = compassData && compassData.location != null
+      ? safeString(compassData.location, 80) || null
+      : safeString(idMatch && decodeURIComponent(idMatch[1]), 80) || null;
+    const semanticName = safeString(areaModel && areaModel.title, 160) || null;
+    const modelReady = Boolean(areaObject && areaModel && compassData);
+    return {
+      ok: pageKind === "area" && modelReady,
+      message: pageKind !== "area"
+        ? "location_route_page_missing"
+        : modelReady
+          ? "location_route_snapshot"
+          : "location_route_model_missing",
+      schemaVersion: 1,
+      source: "area-model",
+      fallbackReason: modelReady ? null : "area_model_or_compass_missing",
+      durationMs: 0,
+      domNodesScanned: 0,
+      href,
+      pageKind,
+      location: {
+        semanticName,
+        id: currentLocationId,
+        pageKind,
+        viewHref: href,
+        title,
+      },
+      transitionTimerSeconds,
+      timerReady: Boolean(compassLocation) && transitionTimerSeconds === 0,
+      currentLocationId,
+      targetLocationId:
+        compassData && compassData.target != null ? safeString(compassData.target, 80) || null : null,
+      foundPath:
+        compassData && Array.isArray(compassData.foundPath)
+          ? compassData.foundPath.slice(0, 100).map((value) => safeString(value, 80))
+          : [],
+      nextTransition: compassLocation
+        ? {
+            id: safeString(compassLocation.id, 80) || null,
+            name: safeString(compassLocation.name, 160) || null,
+            locId: safeString(compassLocation.locId, 80) || null,
+            href: safeString(compassLocation.href, 400) || null,
+            mode: safeString(compassLocation.mode, 80) || null,
+            confirm: Number(compassLocation.confirm || 0),
+            hidden: Boolean(compassLocation.hidden),
+            ltime: Number(compassLocation.ltime || 0),
+            dtime: Number(compassLocation.dtime || 0),
+          }
+        : null,
+    };
+  };
+
+  const locationRouteDebugSnapshot = () => {
     const context = mainContentContext();
     const location = locationSnapshot();
     const rawText = String(
@@ -771,7 +852,7 @@
     };
     return {
       ok: context.pageKind === "area" && Boolean(context.doc),
-      message: context.pageKind === "area" ? "location_route_snapshot" : "location_route_page_missing",
+      message: context.pageKind === "area" ? "location_route_debug_snapshot" : "location_route_page_missing",
       href: context.href,
       pageKind: context.pageKind,
       location: location.data,

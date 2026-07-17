@@ -79,7 +79,14 @@ ALLOWED_TRANSITIONS: dict[GameState, frozenset[GameState]] = {
     GameState.BATTLE_END_DETECTED: frozenset({GameState.EXIT_BATTLE, GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}),
     GameState.EXIT_BATTLE: frozenset({GameState.STATISTICS_WAIT, GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}),
     GameState.STATISTICS_WAIT: frozenset(
-        {GameState.STATISTICS_DETECTED, GameState.STATISTICS_WAIT, GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}
+        {
+            GameState.STATISTICS_DETECTED,
+            GameState.STATISTICS_WAIT,
+            GameState.LOCATION_SEARCH,
+            GameState.QUEST_REFRESH_PENDING,
+            GameState.STOPPED,
+            GameState.ERROR,
+        }
     ),
     GameState.STATISTICS_DETECTED: frozenset({GameState.RETURN_TO_HUNT, GameState.LOCATION_SEARCH, GameState.STOPPED, GameState.ERROR}),
     GameState.RETURN_TO_HUNT: frozenset({GameState.COOLDOWN, GameState.STOPPED, GameState.ERROR}),

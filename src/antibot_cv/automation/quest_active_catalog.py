@@ -163,6 +163,23 @@ def _freeze_value(value: object) -> object:
     raise ActiveQuestCatalogError("active quest payload contains an unsupported value")
 
 
+def json_safe_active_value(value: object) -> object:
+    """Return a JSON-compatible copy of an immutable active-quest value.
+
+    Active catalogue entries deliberately expose nested read-only mappings.
+    Persistence and telemetry boundaries must copy those mappings instead of
+    leaking ``MappingProxyType`` into ``json.dumps``.
+    """
+
+    if isinstance(value, Mapping):
+        return {str(key): json_safe_active_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [json_safe_active_value(item) for item in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise ActiveQuestCatalogError("active quest value is not JSON-compatible")
+
+
 def _non_negative_int(value: object, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ActiveQuestCatalogError(f"{field} must be a non-negative integer")

@@ -293,6 +293,7 @@
         loadStatus: "loaded",
         snapshotId: metadata.snapshotId || null,
         generatedAt: metadata.generatedAt || null,
+        navigationRevision: activeQuestNavigationRevision,
         pageKind: context.pageKind,
         href: context.href,
         mode,
@@ -347,7 +348,7 @@
     const generatedAt = new Date().toISOString();
     stateSnapshotSequence += 1;
     const snapshotId = `${Date.now().toString(36)}-${stateSnapshotSequence.toString(36)}`;
-    const allowed = new Set(["player", "location", "deathRevive", "battle", "hunt", "quests", "shopInventory"]);
+    const allowed = new Set(["player", "location", "deathRevive", "battle", "hunt", "quests", "questChatProgress", "shopInventory"]);
     const includeProvided = Array.isArray(payload && payload.include);
     const requested = includeProvided
       ? payload.include.map((value) => safeString(value, 40)).filter((value) => allowed.has(value))
@@ -361,6 +362,7 @@
       else if (name === "battle") sections.battle = { status: "available", reason: null, data: battleSnapshot() };
       else if (name === "hunt") sections.hunt = { status: "available", reason: null, data: huntSnapshot(true) };
       else if (name === "quests") sections.quests = questSnapshot({ snapshotId, generatedAt });
+      else if (name === "questChatProgress") sections.questChatProgress = questChatProgressSnapshot({ snapshotId, generatedAt });
       else if (name === "shopInventory") sections.shopInventory = shopInventorySnapshot();
     }
     return {
@@ -613,6 +615,32 @@
     return { ok: true, message: "layout_applied", mode: "wide", chatHeightPx, changed, contentStretch };
   };
 
+  let observationSnapshotSequence = 0;
+  const mintObservationMetadata = (payload, prefix) => {
+    const requestMetadata = payload && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+      ? payload.metadata
+      : {};
+    const generatedAt = new Date().toISOString();
+    const player = playerSnapshot();
+    const observedCharacterName = player && player.status === "available" && player.data
+      ? safeString(player.data.name, 120) || null
+      : null;
+    observationSnapshotSequence = (observationSnapshotSequence % 999999) + 1;
+    const snapshotId = prefix === "gather"
+      ? `gather-${generatedAt}-${observationSnapshotSequence}`
+      : `${safeString(prefix, 24)}-${Date.now().toString(36)}-${observationSnapshotSequence.toString(36)}`;
+    return {
+      snapshotId,
+      generatedAt,
+      transportClientId: safeString(payload && payload.transport && payload.transport.clientId, 180) || null,
+      expectedCharacterName: safeString(requestMetadata.expectedCharacterName, 120) || null,
+      observedCharacterName,
+      characterStatus: safeString(player && player.status, 40) || null,
+      questId: safeString(requestMetadata.questId, 120) || null,
+      questFingerprint: safeString(requestMetadata.questFingerprint, 240) || null,
+    };
+  };
+
   window.addEventListener("message", (event) => {
     if (event.source !== window) {
       return;
@@ -684,6 +712,11 @@
       }
       if (data.command.type === "location_route_snapshot") {
         const result = locationRouteSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "location_route_debug_snapshot") {
+        const result = locationRouteDebugSnapshot();
         send(data.token, Boolean(result.ok), result);
         return;
       }
@@ -765,12 +798,24 @@
         return;
       }
       if (data.command.type === "gathering_node_snapshot") {
-        const result = gatheringNodeSnapshot();
-        send(data.token, Boolean(result.ok), result);
+        const metadata = mintObservationMetadata(data.command.payload || {}, "gather");
+        const result = gatheringNodeSnapshot(metadata);
+        send(data.token, true, result);
+        return;
+      }
+      if (data.command.type === "procurement_observation_snapshot") {
+        const metadata = mintObservationMetadata(data.command.payload || {}, "procurement");
+        const result = procurementObservationSnapshot(metadata);
+        send(data.token, true, result);
         return;
       }
       if (data.command.type === "resource_snapshot") {
         const result = resourceSnapshot();
+        send(data.token, Boolean(result.ok), result);
+        return;
+      }
+      if (data.command.type === "resource_model_capabilities") {
+        const result = resourceModelCapabilities();
         send(data.token, Boolean(result.ok), result);
         return;
       }

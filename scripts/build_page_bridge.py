@@ -9,11 +9,14 @@ OUTPUT = ROOT / "browser_injector" / "page_bridge.js"
 MODULES = (
     "00_core_combat.js",
     "10_hunt_inventory.js",
+    "11_resource_capabilities.js",
     "20_hunt_actions.js",
     "21_gathering_activity.js",
     "30_navigation_death.js",
     "32_instance_actions.js",
     "35_npc_quests.js",
+    "36_quest_chat_progress.js",
+    "37_shop_observer.js",
     "40_state_layout_dispatch.js",
 )
 

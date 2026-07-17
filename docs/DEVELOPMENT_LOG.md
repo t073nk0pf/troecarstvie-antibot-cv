@@ -1,5 +1,228 @@
 # Development Log
 
+## 2026-07-17 - Durable NPC Quest Action Journal (v61)
+
+- Aligned bridge `2026-07-17-npc-action-journal-v61` and extension `0.3.30`.
+  The generated ten-module bundle is byte-reproducible at SHA-256
+  `13b6fa8e0ec8efd3f70ee81864526afda9d3337c8aedf15c89013084c8a2ae73`
+  and is `286292` bytes.
+- Added one durable causal journal for every intake mutation kind: exact
+  `OPEN`, `ANSWER`, and final `ACCEPT`. Each action is staged before dispatch;
+  uncertain delivery remains `ACK_PENDING`, while only an explicit
+  `NOT_ISSUED` outcome permits rollback.
+- Restart handling issues zero repeated NPC mutations. `OPEN` and `ANSWER`
+  settle only from a fresh exact NPC snapshot with a changed semantic action
+  fingerprint and one bounded successor. `ACCEPT` settles only from one exact
+  quest in a complete active catalogue. Expired journals stop without injector
+  reads or actions.
+- P0/P1/P2 hardening rejects wrong client/profile/tab, quest, NPC, action,
+  title/ref/text, timestamp, origin, schema, and non-canonical checkpoint
+  shapes. Ambiguous or unchanged successor evidence waits or stops fail-closed.
+  Checkpoint/CAS write failures restore all pending journal, dialogue, lease,
+  and acceptance state instead of exposing partial in-memory advancement.
+- The independent critic completed with PASS. Final verification passed exactly
+  `968` tests and all `5` architecture tests, Python compilation, JavaScript
+  syntax checks, deterministic bundle reproduction, version agreement,
+  `git diff --check`, and the authored-source line gate: `101` files, none over
+  1500 lines.
+- Status: **PARTIAL**. Registered browser tabs still run v59; manual extension
+  Reload is required before v61 live evidence. The next guarded order is exact
+  quest-269 legacy recovery proof, optional bounded apply only on exact identity,
+  then one bounded live journal acknowledgement run. Composite objectives and
+  procurement mutation remain unimplemented/unproved.
+
+## 2026-07-17 - Durable NPC Open Acknowledgement And Legacy Recovery (v60)
+
+- Aligned bridge `2026-07-17-npc-open-ack-v60` and extension `0.3.29`.
+  The generated ten-module bundle is byte-reproducible at SHA-256
+  `162f1e69a084890fda9e1f37bdc0901192dc4ec1998a119a8fbe3fe370c94c0f`.
+- Live run `4e5b3e3a00ed4a7b95fbdf441545227d` completed all three
+  available-catalogue pages (`31` cards) and all three active pages (`30`
+  cards). Quest `236` reached its exact local NPC and was quarantined on an
+  ambiguous/missing dialogue-open action. Quest `267` then exhausted its
+  bounded giver-not-observed settle window and was quarantined. The scheduler
+  continued to quest `269`, routed to `След Велета`, and attempted the exact
+  Vargard NPC open without manual routing.
+- The pre-v60 bridge reported `npc_open_postcondition_failed` for quest `269`,
+  while the exact dialogue was later observed open. This is recorded as a
+  false-negative postcondition. It is not converted retroactively into a live
+  PASS and does not authorize a repeated mutation.
+- Added durable causal NPC-open acknowledgement, systemic compare-and-swap
+  checkpoint transitions, and an explicit legacy recovery workflow. The
+  recovery command is read-only unless `--apply` is supplied and requires a
+  unique bounded event, exact client/profile/tab identity, fresh exact NPC
+  snapshot, and compatible pending quest state. These v60 paths pass offline;
+  they have not run live.
+- Independent validation passed exactly `935` tests and all `5` architecture
+  tests, Python compilation, JavaScript syntax checks, ten-module byte
+  reproduction, version agreement, authored-source line limits, and
+  `git diff --check`.
+- Status: **PARTIAL**. The registered Chrome extension tabs remain on v59.
+  Chrome's extension manager was blocked and idle self-update did not trigger;
+  the operator must manually Reload the extension before bounded v60 live
+  evidence can be collected. Composite quest execution and procurement mutation
+  remain unimplemented/unproved.
+
+## 2026-07-17 - Causal Catalogue Acknowledgement And Durable Quarantine (v59)
+
+- Aligned bridge `2026-07-17-catalog-ack-v59` and extension `0.3.28`.
+  The generated ten-module bundle is byte-reproducible at SHA-256
+  `e0844ffbf9651a47ca6839e369d3e7f998f7047842fdc4346d1615156bc8086e`.
+- Added causal acknowledgement for catalogue navigation, finite numeric and
+  client-binding hardening, mixed eligible/ineligible catalogue handling, and
+  bounded durable intake quarantine. Offline tests cover expired-stage
+  recovery and preserve fail-closed behavior for malformed authoritative
+  references.
+- Live run `373ffbde69a9492da14f43a15eb79029` stopped safely on an ambiguous
+  quest-263 dialogue. Run `3f6d823f4ab147b08ecd8d4424f0256c` then selected
+  exact reply `3808`, accepted quest `263`, and confirmed it through a complete
+  three-page active catalogue (`29 -> 30`). The composite objective was not
+  executed and remains quarantined.
+- Run `ce0f2757d95142d7acad1b214cafe7b0` exposed a false catalogue-open timeout.
+  After the causal ACK fix, run `8e956985037a42fdafe90446fa21d24c`
+  traversed pages `0 -> 1 -> 2` and exposed the mixed-card authoritative-ref
+  blocker, which is now fixed offline. Expired-stage recovery still needs live
+  proof.
+- Independent validation passed exactly `911` tests, `5` architecture tests,
+  Python compilation, JavaScript syntax checks, bundle reproduction, version
+  agreement, authored-source line limits, and `git diff --check`.
+- Status: **PARTIAL**. Exact quest intake is live-proven; composite execution,
+  procurement mutation, recovery, and an unattended quest chain are not.
+
+## 2026-07-17 - Generic Collection Progress And Guarded Spellbook Runtime (v55)
+
+- Completed bounded live diagnostic run
+  `07be41fd715c40a39e04c0215d2d3876`: quest `31`, one target, one victory,
+  one exit, and one hunt return in 40.85 seconds with zero errors or manual game
+  input. The run proved that the old fight model still returned
+  `ready/cooldown=null`, while server chat reported that enough wasp wings had
+  been collected.
+- Added a generic read-only collection-progress observer for the strict server
+  template `Вы набрали достаточное количество <ресурс>`. Python accepts it only
+  when the extracted resource uniquely matches the current authoritative quest
+  fingerprint. It never declares completion; it keeps evidence until a strictly
+  newer complete active catalogue arrives, tolerates an in-flight pre-trigger
+  refresh, performs at most three delayed same-fingerprint retries, and then
+  fails closed.
+- Connected the typed spellbook policy through a fail-closed adapter. Complete
+  five-slot identity, authoritative turn state, and domain-bound exact
+  readiness/cooldown evidence are required. Confirmed setup slots are latched
+  per battle, recovery items retain priority, and eight unknown observations
+  stop unsafe instead of falling through to generic rotation.
+- Aligned bridge `2026-07-17-autonomy-evidence-v55` and extension `0.3.24`.
+  The generated bridge is reproducibly built from nine authored modules
+  (SHA-256 `952a0ab2674258836d29f6c675e2e379a8527700376887d49ccb5cfe05094aad`).
+  Final validation passed `588` tests, independent review with no findings,
+  Python compilation, all JavaScript syntax checks, architecture/version
+  boundaries, and `git diff --check`. Live v55 validation remains pending the
+  Chrome extension update.
+
+## 2026-07-17 - Spellbook-Aware Combat Policy Scaffold (v54)
+
+- Read the five equipped level-5 Guardian abilities from the live spellbook
+  tooltip models without applying or rearranging them. The exact facts are
+  preserved in `docs/3kingdoms/SPELLBOOK_SKILLS.md`.
+- Added an action-free typed policy for the current spellbook. It plans eligible
+  instant setup slots 1/4, conditional defensive slot 2, then the strongest
+  explicitly ready turn action (`3 > 5`). Unknown readiness/cooldown waits with
+  zero actions; slot 0 requires an explicit strict-boolean low-prowess fallback.
+  This was the action-free precursor to the guarded v55 runtime adapter.
+- Added bounded combat observation for the next live evidence slice: allowlisted
+  primitive stance/position fields and non-sensitive return type/length metadata
+  for synchronous or Promise-returning `useSkill`. These observations do not
+  participate in `changed()` or confirmation, and arbitrary strings/objects are
+  not persisted.
+- Aligned bridge `2026-07-17-combat-observe-v54` and extension `0.3.23`.
+  Validation: full `554 passed` suite, independent review with no findings,
+  Python compilation, JavaScript syntax checks, reproducible eight-module
+  bridge build, architecture boundaries, and `git diff --check` passed. No v54
+  live mutation was run; Chrome still needs the extension update before the
+  diagnostic battle.
+
+## 2026-07-17 - Two-Cycle Quest Loop And Full Skill Rotation Proof
+
+- Fixed a P0 CLI configuration-shadow bug discovered during live acceptance.
+  `--config` before the subcommand was overwritten by a subparser `None`, which
+  silently loaded the example config and disabled the autonomous quest director.
+  The affected run was stopped before battle.
+- Global and subcommand config flags now use separate parser destinations and
+  one resolver. Either position preserves the explicit path, equal duplicates
+  are accepted, and conflicting duplicates fail with exit code 2 before the
+  handler. The `control-server` local default applies only when no explicit path
+  was provided.
+- Tightened repeated Navigator popup reuse: a new unique child remains
+  preferred; an existing popup is reused only when exactly one client has the
+  current parent tab as its opener. Existing unlinked or ambiguous popup sets
+  fail closed.
+- Enabled the complete configured combat rotation `1,2,3,4,5`. Bounded live run
+  `791bc2a2919f4360bd8003824140090e` completed two autonomous quest-directed
+  battles and two cycles with zero errors, incomplete cycles, recoveries, or
+  viewport moves in 89.18 seconds. It refreshed all three active-quest pages
+  between victories and repeated exact quest/Navigator/target selection without
+  manual game input.
+- Policy selected all five slots in both battles. Slots 1, 3, 4, and 5 received
+  live `useSkill_confirmed` evidence. Slot 2 (`Смена позиции I`) was attempted
+  but remained `useSkill_unconfirmed`, so the mutation path stopped fail-closed;
+  stance-specific confirmation is the next combat slice.
+- Validation after the CLI and Navigator safety fixes: full `546 passed` suite,
+  independent review with no findings, Python compilation, three JavaScript
+  syntax checks, architecture boundaries, deterministic eight-module bridge
+  rebuild, bundle consistency, and `git diff --check` all passed.
+
+## 2026-07-17 - First Bounded Live Quest Route And Combat Proof
+
+- The first v53 live attempt selected quest `31` (`Поиски Рокоша`) and the
+  exact objective target `Гигантская оса [2]`, but exposed a route handoff gap:
+  after `navigator_go` the parent remained on the active-quest page, so no
+  location transition could run. The session was stopped without a battle.
+- Added a guarded `quest_location` parent handoff. Both MOVE and authoritative
+  current-location navigator results open `area.php`; route steps remain gated
+  until the parent is confirmed as area/hunt/main. A current monster target is
+  no longer compared with the semantic location name.
+- Validation after the fix: full `538 passed` suite, independent review with no
+  findings, Python compilation, three JavaScript syntax checks, architecture
+  boundaries, deterministic bundle rebuild, and `git diff --check` passed.
+- Bounded live run `d5e07ca5670a48cea0e348c1921f35bb` then completed the
+  automatic sequence `active catalogue -> exact navigator target -> open area
+  -> route 124/121/110/111 -> hunt -> exact botId 1096 attack -> battle ->
+  confirmed victory -> exit -> hunt return`. Summary: one requested and one
+  completed cycle, zero incomplete cycles, zero errors, five confirmed combat
+  actions, one exit action, and no recovery.
+- The run stopped internally at `max_cycles=1`. That proves the route/combat
+  handoff but intentionally stops before a post-victory active-catalogue refresh,
+  so observable quest-progress advancement still needs a separate bounded live
+  proof. No purchase or paid resurrection action was allowed.
+
+## 2026-07-17 - Guarded Automated Quest Loop And CLI Safety (v53)
+
+- Routed every mutating injector CLI command through the shared safety guard,
+  `ActionExecutor`, and action sink. Each command requires its own explicit
+  `--live`; dry-run invocation returns before injector mutation or client lookup.
+- Strengthened architecture tests with a runtime/policy/helper AST import graph
+  and a fail-closed allowlist for mutating injector calls outside the approved
+  action path.
+- Persisted the authoritative quest intake reference before the accept mutation
+  and recover it only from a fresh matching active catalogue after restart.
+- Integrated the bounded completed-step turn-in coordinator: exact persisted
+  identity, route, NPC, dialogue, guarded completion action, and newer complete
+  active-catalogue reconciliation. Terminal absence releases the quest; a new
+  fingerprint advances the pinned chain; unchanged evidence retries only inside
+  a bounded phase deadline.
+- Scoped every giver/location reference to the fingerprint that established it.
+  A later chain step cannot reuse the intake giver without new authoritative
+  evidence and therefore stops before route or NPC mutation.
+- Staged final completion evidence durably before the guarded `done` mutation.
+  Restart recovery distinguishes terminal absence, continued fingerprint, and
+  an unconfirmed same step, then runs the normal scheduler cleanup path.
+- Reworked navigator selection around one strict deadline with dynamically
+  bounded delays and retry count. Removed the content transport's accidental
+  five-second minimum for commands without an inventory delay.
+- Aligned bridge `2026-07-17-quest-loop-v53` and extension `0.3.22`. Validation:
+  full `537 passed` suite, Python compilation, JavaScript syntax checks for the
+  generated bridge/background/content scripts, deterministic eight-module
+  bundle rebuild, architecture boundaries, and `git diff --check` passed. No
+  live acceptance claim is included.
+
 ## 2026-07-17 - Completed Quest Turn-In Safety Contract
 
 - Added a pure offline turn-in domain runtime with explicit route, NPC lookup,

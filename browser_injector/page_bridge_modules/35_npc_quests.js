@@ -38,6 +38,11 @@
     return /^\d+$/.test(text) && parseInt(text, 10) > 0 ? text : null;
   };
 
+  const npcIntegerString = (value) => {
+    const text = safeString(value, 40);
+    return /^\d+$/.test(text) && parseInt(text, 10) >= 0 ? text : null;
+  };
+
   const npcQuerySummary = (href, baseHref) => {
     const safeHref = safeQuestHref(href, baseHref);
     if (!safeHref || !/\/npc\.php(?:\?|$)/i.test(safeHref)) return null;
@@ -113,7 +118,10 @@
     const nodes = Array.from(context.doc.querySelectorAll(".b-control-area__list-item.npc")).slice(0, 100);
     for (const element of nodes) {
       const name = safeString(attr(element, "title") || element.innerText || element.textContent, 180);
-      const dataId = positiveIntegerString(attr(element, "data-id"));
+      // Area actors use zero-based IDs in some locations (for example the
+      // first house in "Земли пращуров").  Zero is a valid NPC identity,
+      // not a missing value; quest/ref/point identifiers remain strictly > 0.
+      const dataId = npcIntegerString(attr(element, "data-id"));
       const rawIndex = safeString(attr(element, "data-index"), 20);
       const dataIndex = /^\d+$/.test(rawIndex) ? parseInt(rawIndex, 10) : null;
       if (!name) continue;
@@ -193,7 +201,7 @@
     const context = mainContentContext();
     const expectedName = safeString(payload.expectedName, 180);
     const normalizedExpected = normalizeNpcName(expectedName);
-    const expectedNpcId = payload.expectedNpcId == null ? null : positiveIntegerString(payload.expectedNpcId);
+    const expectedNpcId = payload.expectedNpcId == null ? null : npcIntegerString(payload.expectedNpcId);
     const documentReady = !context.doc || !context.doc.readyState || context.doc.readyState === "complete";
     if (context.pageKind !== "npc" || !context.doc || !documentReady) {
       return {
@@ -234,7 +242,7 @@
     }
     const npcIds = Array.from(new Set(
       actions
-        .map((action) => action.query && action.query.params ? positiveIntegerString(action.query.params.f_id) : null)
+        .map((action) => action.query && action.query.params ? npcIntegerString(action.query.params.f_id) : null)
         .filter(Boolean)
     ));
     const npcId = npcIds.length === 1 ? npcIds[0] : null;
@@ -255,7 +263,7 @@
           title,
           action: /^далее$/i.test(buttonText) ? "open" : "unknown",
           text: buttonText,
-          npcId: action.query.params.f_id || null,
+          npcId: npcIntegerString(action.query.params.f_id),
           npcInstanceId: action.query.params.npc_id || null,
           visible: action.visible,
           disabled: action.disabled,
@@ -275,7 +283,7 @@
           ref,
           pointId: positiveIntegerString(params.point_id),
           text: candidate.text,
-          npcId: positiveIntegerString(params.f_id),
+          npcId: npcIntegerString(params.f_id),
           npcInstanceId: positiveIntegerString(params.npc_id),
           visible: candidate.visible,
           disabled: candidate.disabled,
@@ -293,7 +301,7 @@
           action: "done",
           pointId: positiveIntegerString(params.point_id),
           text: candidate.text,
-          npcId: positiveIntegerString(params.f_id),
+          npcId: npcIntegerString(params.f_id),
           npcInstanceId: positiveIntegerString(params.npc_id),
           visible: candidate.visible,
           disabled: candidate.disabled,
@@ -315,9 +323,11 @@
       expectedName: expectedName || null,
       expectedNpcId,
       npcId,
-      identityMatches: normalizedExpected
-        ? matchingHeaders.length === 1 && (!expectedNpcId || expectedNpcId === npcId)
-        : null,
+      identityMatches: expectedNpcId && normalizedExpected
+        ? expectedNpcId === npcId && matchingHeaders.length === 1
+        : expectedNpcId
+          ? expectedNpcId === npcId
+          : (normalizedExpected ? matchingHeaders.length === 1 : null),
       matchingHeaders,
       headers,
       actions,
@@ -332,8 +342,13 @@
   };
 
   const submitNpcQuestAction = (payload = {}) => {
+    const notIssued = (message) => ({
+      ok: false, outcome: "NOT_ISSUED", mutationIssued: false,
+      destination: null, issuedAt: null, message,
+    });
     const expectedSnapshotId = safeString(payload.expectedSnapshotId, 120);
-    const npcId = positiveIntegerString(payload.npcId);
+    const npcId = npcIntegerString(payload.npcId);
+    const expectedName = safeString(payload.expectedName, 180);
     const questId = positiveIntegerString(payload.questId);
     const expectedTitle = safeString(payload.expectedTitle, 220);
     const action = safeString(payload.action, 24).toLowerCase();
@@ -347,7 +362,7 @@
       (action === "done" && !expectedPointId) ||
       (action === "answer" && !expectedRef)
     ) {
-      return { ok: false, message: "npc_quest_action_invalid" };
+      return notIssued("npc_quest_action_invalid");
     }
     const observed = lastNpcDialogObservation;
     const observedAgeMs = observed && observed.generatedAt
@@ -360,10 +375,14 @@
       observedAgeMs < 0 ||
       observedAgeMs > 5000
     ) {
-      return { ok: false, message: "npc_dialog_snapshot_stale" };
+      return notIssued("npc_dialog_snapshot_stale");
     }
-    if (observed.truncated || observed.npcId !== npcId) {
-      return { ok: false, message: observed.truncated ? "npc_dialog_snapshot_truncated" : "npc_dialog_identity_mismatch" };
+    if (
+      observed.truncated || observed.npcId !== npcId || observed.identityMatches !== true ||
+      !observed.expectedName || !Array.isArray(observed.matchingHeaders) || observed.matchingHeaders.length !== 1 ||
+      (expectedName && !npcNamesEquivalent(observed.expectedName, expectedName))
+    ) {
+      return notIssued(observed.truncated ? "npc_dialog_snapshot_truncated" : "npc_dialog_identity_mismatch");
     }
     const observedMatches = action === "open"
       ? observed.questActions.filter((candidate) =>
@@ -399,7 +418,7 @@
           candidate.disabled === false
         );
     if (observedMatches.length !== 1) {
-      return { ok: false, message: observedMatches.length ? "npc_quest_action_ambiguous" : "npc_quest_action_missing" };
+      return notIssued(observedMatches.length ? "npc_quest_action_ambiguous" : "npc_quest_action_missing");
     }
     const context = mainContentContext();
     const elements = Array.from(
@@ -409,7 +428,7 @@
       if (!elementIsVisible(context.win, element) || Boolean(element.disabled) || attr(element, "aria-disabled") === "true") return false;
       const query = npcQuerySummary(npcActionHref(element, context.href), context.href);
       if (!query || !query.params) return false;
-      if (positiveIntegerString(query.params.f_id) !== npcId || positiveIntegerString(query.params.quest_id) !== questId) return false;
+      if (npcIntegerString(query.params.f_id) !== npcId || positiveIntegerString(query.params.quest_id) !== questId) return false;
       const text = safeString(npcActionText(element), 180);
       if (action === "answer") {
         return (
@@ -438,25 +457,38 @@
       return normalizeNpcName(title) === normalizeNpcName(expectedTitle);
     });
     if (matches.length !== 1) {
-      return { ok: false, message: matches.length ? "npc_quest_action_ambiguous" : "npc_quest_action_missing" };
+      return notIssued(matches.length ? "npc_quest_action_ambiguous" : "npc_quest_action_missing");
     }
+    const issuedAt = new Date().toISOString();
     try {
       matches[0].click();
     } catch (error) {
-      return { ok: false, message: `npc_quest_action_click_failed:${safeString(error && error.message ? error.message : error, 180)}` };
+      return {
+        ok: true, outcome: "ACK_PENDING", mutationIssued: true,
+        destination: mainContentContext().href || null, issuedAt,
+        message: `npc_quest_action_click_ambiguous:${safeString(error && error.message ? error.message : error, 180)}`,
+      };
     }
     lastNpcDialogObservation = null;
-    return { ok: true, message: "npc_quest_action_submitted", action, npcId, questId, title: expectedTitle };
+    return {
+      ok: true, outcome: "ACK_PENDING", mutationIssued: true,
+      destination: mainContentContext().href || null, issuedAt,
+      message: "npc_quest_action_submitted", action, npcId, questId, title: expectedTitle,
+    };
   };
 
   const openExactNpc = async (payload = {}) => {
+    const notIssued = (message, extra = {}) => ({
+      ok: false, outcome: "NOT_ISSUED", mutationIssued: false,
+      destination: null, issuedAt: null, message, ...extra,
+    });
     const expectedSnapshotId = safeString(payload.expectedSnapshotId, 120);
     const expectedLocationId = safeString(payload.expectedLocationId, 80);
     const expectedName = safeString(payload.expectedName, 180);
     const expectedDialogName = safeString(payload.expectedDialogName, 180) || expectedName;
-    const expectedDataId = positiveIntegerString(payload.npcId);
+    const expectedDataId = npcIntegerString(payload.npcId);
     if (!expectedSnapshotId || !expectedLocationId || !expectedName || !expectedDataId) {
-      return { ok: false, message: "npc_identity_invalid" };
+      return notIssued("npc_identity_invalid");
     }
     const observed = lastAreaNpcObservation;
     const observedAgeMs = observed && observed.generatedAt
@@ -469,13 +501,13 @@
       observedAgeMs < 0 ||
       observedAgeMs > 5000
     ) {
-      return { ok: false, message: "area_npc_snapshot_stale" };
+      return notIssued("area_npc_snapshot_stale");
     }
     if (!observed.location || String(observed.location.id || "") !== expectedLocationId) {
-      return { ok: false, message: "area_npc_location_mismatch" };
+      return notIssued("area_npc_location_mismatch");
     }
     if (observed.truncated) {
-      return { ok: false, message: "area_npc_snapshot_truncated" };
+      return notIssued("area_npc_snapshot_truncated");
     }
     const observedMatches = observed.items.filter((item) => (
       item.dataId === expectedDataId &&
@@ -483,7 +515,7 @@
       item.actionable === true
     ));
     if (observedMatches.length !== 1) {
-      return { ok: false, message: observedMatches.length ? "npc_match_ambiguous" : "npc_exact_match_missing" };
+      return notIssued(observedMatches.length ? "npc_match_ambiguous" : "npc_exact_match_missing");
     }
     const before = areaNpcSnapshot(expectedName);
     if (
@@ -492,52 +524,73 @@
       !before.location ||
       String(before.location.id || "") !== expectedLocationId
     ) {
-      return { ...before, ok: false, message: before.truncated ? "area_npc_snapshot_truncated" : before.message };
+      return notIssued(before.truncated ? "area_npc_snapshot_truncated" : before.message, { observed: before });
     }
     const context = mainContentContext();
     let candidates = Array.from(context.doc.querySelectorAll(".b-control-area__list-item.npc"))
       .filter((element) => normalizeNpcName(attr(element, "title") || element.innerText || element.textContent) === normalizeNpcName(expectedName))
       .filter((element) => elementIsVisible(context.win, element));
-    candidates = candidates.filter((element) => positiveIntegerString(attr(element, "data-id")) === expectedDataId);
+    candidates = candidates.filter((element) => npcIntegerString(attr(element, "data-id")) === expectedDataId);
     if (candidates.length !== 1) {
-      return {
-        ok: false,
+      return notIssued(candidates.length ? "npc_match_ambiguous" : "npc_exact_match_missing", {
         message: candidates.length ? "npc_match_ambiguous" : "npc_exact_match_missing",
         expectedName,
         expectedDataId,
         matchCount: candidates.length,
         snapshot: before,
-      };
+      });
     }
     const target = candidates[0];
+    const beforeState = {
+      snapshotId: before.snapshotId || null,
+      generatedAt: before.generatedAt || null,
+      pageKind: before.pageKind || "area",
+      href: before.href || mainContentContext().href || null,
+      location: before.location || null,
+    };
+    const issuedAt = new Date().toISOString();
     try {
       target.click();
     } catch (error) {
-      return { ok: false, message: `npc_click_failed:${safeString(error && error.message ? error.message : error, 180)}` };
+      return {
+        ok: true, outcome: "ACK_PENDING", mutationIssued: true,
+        destination: mainContentContext().href || null, issuedAt,
+        message: `npc_click_ambiguous:${safeString(error && error.message ? error.message : error, 180)}`,
+        before: beforeState, after: null,
+      };
     }
     const verifyTimeoutMs = Math.max(100, Math.min(5000, parseInt(payload.verifyTimeoutMs, 10) || 2000));
-    const started = Date.now();
-    let after = npcDialogSnapshot({ expectedName: expectedDialogName, expectedNpcId: expectedDataId });
-    while ((!after.ok || after.identityMatches !== true) && Date.now() - started < verifyTimeoutMs) {
-      await delayMs(100);
-      after = npcDialogSnapshot({ expectedName: expectedDialogName, expectedNpcId: expectedDataId });
-    }
+    const after = await adaptiveVerify(
+      () => npcDialogSnapshot({ expectedName: expectedDialogName, expectedNpcId: expectedDataId }),
+      (value) => value.ok && value.identityMatches === true,
+      { timeoutMs: verifyTimeoutMs, fingerprint: (value) => `${value.snapshotId || ""}:${value.href || ""}:${value.identityMatches}` },
+    );
     if (!after.ok || after.identityMatches !== true) {
       return {
-        ok: false,
+        ok: true,
+        outcome: "ACK_PENDING",
+        mutationIssued: true,
+        destination: after.href || mainContentContext().href || null,
+        issuedAt,
         message: "npc_open_postcondition_failed",
         expectedName,
         expectedDialogName,
         expectedDataId,
-        observed: after,
+        before: beforeState,
+        after,
       };
     }
     return {
       ok: true,
+      outcome: "CONFIRMED",
+      mutationIssued: true,
+      destination: after.href || mainContentContext().href || null,
+      issuedAt,
       message: "npc_opened_confirmed",
       expectedName,
       expectedDialogName,
       expectedDataId,
-      observed: after,
+      before: beforeState,
+      after,
     };
   };

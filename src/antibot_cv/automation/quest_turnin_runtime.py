@@ -18,6 +18,11 @@ from src.antibot_cv.automation.quest_chain_runtime import QuestChainLease
 from src.antibot_cv.automation.quest_director_policy import QuestRef
 from src.antibot_cv.automation.quest_giver import resolve_unique_giver
 from src.antibot_cv.automation.quest_objective_runtime import quest_step_fingerprint
+from src.antibot_cv.automation.quest_objective_router import (
+    ObjectiveRouteKind,
+    ObjectiveRouteStatus,
+    classify_objective,
+)
 
 
 class QuestTurnInPhase(str, Enum):
@@ -86,10 +91,16 @@ class QuestTurnInRuntime:
         lease: QuestChainLease,
         quest_ref: QuestRef,
         already_at_location: bool,
+        terminal_collection_confirmed: bool = False,
     ) -> PendingQuestTurnIn:
         if self.pending is not None:
             raise RuntimeError("quest turn-in is already in progress")
-        objective = _turn_in_objective(entry, lease=lease, quest_ref=quest_ref)
+        objective = _turn_in_objective(
+            entry,
+            lease=lease,
+            quest_ref=quest_ref,
+            terminal_collection_confirmed=terminal_collection_confirmed,
+        )
         self.pending = PendingQuestTurnIn(
             objective,
             QuestTurnInPhase.NPC_LOOKUP if already_at_location else QuestTurnInPhase.ROUTE,
@@ -122,14 +133,15 @@ class QuestTurnInRuntime:
             raise QuestTurnInError("turn_in_npc_missing_or_ambiguous", str(exc)) from exc
         npc_id = _text(match.get("dataId"), 80)
         npc_name = _text(match.get("name"), 180)
-        if not npc_id.isdecimal() or int(npc_id) <= 0 or not npc_name:
+        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name:
             raise QuestTurnInError("turn_in_npc_identity_invalid", "matched NPC identity is invalid")
         self.pending = replace(pending, location_id=location_id, npc_id=npc_id, npc_name=npc_name)
         return self._remember(QuestTurnInDecision(
             QuestTurnInIntent.OPEN_NPC,
             "open_exact_npc",
             _metadata(expected_snapshot_id=snapshot_id, expected_location_id=location_id, npc_id=npc_id,
-                      expected_name=npc_name, expected_dialog_name=npc_name, quest_id=pending.objective.quest_id),
+                      expected_name=npc_name, expected_dialog_name=pending.objective.giver_name,
+                      quest_id=pending.objective.quest_id),
             "quest_turn_in_npc_open_failed", pending.objective.quest_id, snapshot_id,
         ))
 
@@ -224,9 +236,64 @@ class QuestTurnInRuntime:
         catalog_complete: bool,
         catalog_revision: int,
     ) -> str:
+        pending = self._validate_fresh_active_catalog(
+            catalog_complete=catalog_complete,
+            catalog_revision=catalog_revision,
+        )
+        if any(entry.id == pending.objective.quest_id for entry in entries):
+            raise QuestTurnInError("turn_in_quest_still_active", "completed quest remains active")
+        quest_id = pending.objective.quest_id
+        self.pending, self._pending_decision = None, None
+        return quest_id
+
+    def verify_continuation(
+        self,
+        entries: Sequence[ActiveQuestEntry],
+        *,
+        catalog_complete: bool,
+        catalog_revision: int,
+    ) -> ActiveQuestEntry:
+        """Accept only a fresh, uniquely advanced step of the same quest chain."""
+
+        pending = self._validate_fresh_active_catalog(
+            catalog_complete=catalog_complete,
+            catalog_revision=catalog_revision,
+        )
+        matches = [entry for entry in entries if entry.id == pending.objective.quest_id]
+        if len(matches) != 1 or matches[0].title != pending.objective.quest_title:
+            raise QuestTurnInError(
+                "turn_in_continuation_identity_invalid",
+                "continued quest identity is missing, duplicated, or changed",
+            )
+        fingerprint, reason = quest_step_fingerprint(matches[0])
+        if fingerprint is None:
+            raise QuestTurnInError(
+                "turn_in_continuation_fingerprint_invalid",
+                reason or "continued quest fingerprint is invalid",
+            )
+        if fingerprint == pending.objective.completed_fingerprint:
+            raise QuestTurnInError(
+                "turn_in_step_not_advanced",
+                "completed quest remains on the same step after turn-in",
+            )
+        return matches[0]
+
+    def confirm_continuation(self) -> None:
+        self._require(QuestTurnInPhase.VERIFY_ACTIVE)
+        self.pending, self._pending_decision = None, None
+
+    def _validate_fresh_active_catalog(
+        self,
+        *,
+        catalog_complete: bool,
+        catalog_revision: int,
+    ) -> PendingQuestTurnIn:
         pending = self._require(QuestTurnInPhase.VERIFY_ACTIVE)
         if catalog_complete is not True:
-            raise QuestTurnInError("turn_in_active_catalog_incomplete", "terminal verification requires a complete catalogue")
+            raise QuestTurnInError(
+                "turn_in_active_catalog_incomplete",
+                "turn-in verification requires a complete catalogue",
+            )
         if (
             not isinstance(catalog_revision, int)
             or isinstance(catalog_revision, bool)
@@ -235,13 +302,9 @@ class QuestTurnInRuntime:
         ):
             raise QuestTurnInError(
                 "turn_in_active_catalog_stale",
-                "terminal verification requires a newer active catalogue revision",
+                "turn-in verification requires a newer active catalogue revision",
             )
-        if any(entry.id == pending.objective.quest_id for entry in entries):
-            raise QuestTurnInError("turn_in_quest_still_active", "completed quest remains active")
-        quest_id = pending.objective.quest_id
-        self.pending, self._pending_decision = None, None
-        return quest_id
+        return pending
 
     def _remember(self, decision: QuestTurnInDecision) -> QuestTurnInDecision:
         self._pending_decision = decision
@@ -253,11 +316,23 @@ class QuestTurnInRuntime:
         return self.pending
 
 
-def _turn_in_objective(entry: ActiveQuestEntry, *, lease: QuestChainLease, quest_ref: QuestRef) -> QuestTurnInObjective:
+def _turn_in_objective(
+    entry: ActiveQuestEntry,
+    *,
+    lease: QuestChainLease,
+    quest_ref: QuestRef,
+    terminal_collection_confirmed: bool = False,
+) -> QuestTurnInObjective:
     if entry.id != lease.quest_id or entry.title != lease.quest_title or entry.id != quest_ref.id or entry.title != quest_ref.title:
         raise QuestTurnInError("turn_in_identity_mismatch", "turn-in identities do not agree")
     progress = entry.data.get("progress")
-    if not isinstance(progress, Mapping) or progress.get("complete") is not True:
+    progress_complete = isinstance(progress, Mapping) and progress.get("complete") is True
+    route_plan = classify_objective(entry)
+    explicit_turn_in = (
+        route_plan.status is ObjectiveRouteStatus.READY
+        and route_plan.kind is ObjectiveRouteKind.TURN_IN
+    )
+    if not terminal_collection_confirmed and not progress_complete and not explicit_turn_in:
         raise QuestTurnInError("turn_in_objective_not_complete", "quest objective is not confirmed complete")
     fingerprint, reason = quest_step_fingerprint(entry)
     if fingerprint is None or fingerprint != lease.current_fingerprint:
@@ -285,7 +360,7 @@ def _actions(raw: object, *, quest_id: str, action: str, npc_id: str | None = No
             raise QuestTurnInError("turn_in_action_collection_invalid", "relevant dialogue action state is invalid")
         if npc_id is not None:
             item_npc_id = str(item.get("npcId") or "")
-            if not item_npc_id.isdecimal() or int(item_npc_id) <= 0:
+            if not item_npc_id.isdecimal() or int(item_npc_id) < 0:
                 raise QuestTurnInError("turn_in_action_collection_invalid", "relevant dialogue NPC identity is invalid")
             if item_npc_id != npc_id:
                 raise QuestTurnInError("turn_in_action_collection_invalid", "relevant dialogue NPC identity mismatches")

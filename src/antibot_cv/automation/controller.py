@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import argparse
 import json
+import runpy
 import sys
 import threading
 import time
@@ -37,6 +37,7 @@ from src.antibot_cv.automation.safety import HotkeyController, SafetyGuard
 from src.antibot_cv.automation.screen_runtime import ScreenRuntimeMixin
 from src.antibot_cv.automation.session import SessionState
 from src.antibot_cv.automation.state_machine import GameState, InvalidTransitionError, StateMachine
+from src.antibot_cv.automation.spellbook_combat_adapter import SpellbookBattleState
 from src.antibot_cv.detection.ability import AbilityBarDetector
 from src.antibot_cv.detection.attack import AttackButtonDetector
 from src.antibot_cv.detection.battle import BattleDetector
@@ -48,13 +49,13 @@ from src.antibot_cv.entity_detection.green_labels import GreenLabelDetector
 from src.antibot_cv.entity_detection.target_locator import LocatedTarget, TargetLocator
 from src.antibot_cv.entity_detection.tracker import EntityTracker
 from src.antibot_cv.telemetry.event_logger import EventLogger, frame_hash
+from src.antibot_cv.automation.performance_policy import capture_fps_for_state, evidence_hash_view
+from src.antibot_cv.automation.run_retention import RunRetentionPolicy, prune_run_directories
+from src.antibot_cv.automation.route_recovery_policy import RouteRecoveryCadence
 from src.antibot_cv.telemetry.session_summary import LatencyTracker, write_session_summary
 from src.antibot_cv.viewport.coordinates import CoordinateMapper, MonitorGeometry, Rect
 from src.antibot_cv.viewport.direction_pad import DirectionPadNavigator
 from src.antibot_cv.viewport.scrollbar import ScrollbarNavigator
-
-
-LIVE_APP_REACTIVATE_INTERVAL_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -96,11 +97,27 @@ class AutomationController(
         logger: object | None = None,
         mapper: CoordinateMapper | None = None,
         browser_client_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
     ) -> None:
         self.config = config
         self.browser_client_id = browser_client_id
+        self.cancellation_event = cancellation_event
         self.session = SessionState(requested_cycles=config.max_cycles)
         self.run_dir = Path(config.runs_dir) / self.session.session_id
+        if config.run_retention.enabled:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            (self.run_dir / ".active").write_text(self.session.session_id, encoding="ascii")
+            retention = config.run_retention
+            prune_run_directories(
+                config.runs_dir,
+                RunRetentionPolicy(
+                    retention.max_age_days,
+                    retention.max_runs,
+                    retention.max_total_bytes,
+                    retention.min_keep,
+                ),
+                active_session_ids=frozenset({self.session.session_id}),
+            )
         self.logger = logger or EventLogger(self.session.session_id, self.run_dir, dry_run=config.dry_run)
         self.guard = SafetyGuard(config)
         self.state_machine = StateMachine(self.logger)
@@ -131,7 +148,8 @@ class AutomationController(
         )
         self._stable_target_frames = 0
         self._current_target: LocatedTarget | None = None
-        self._last_frame_hash: str | None = None
+        self._frame_for_evidence_hash: np.ndarray | None = None
+        self._cached_frame_hash: str | None = None
         self._scrollbar_index = 0
         self._scrollbar_moves = 0
         self._direction_moves_since_scrollbar = 0
@@ -155,7 +173,10 @@ class AutomationController(
         self._last_item_recovery_attempt_monotonic: float | None = None
         self._last_battle_item_recovery_monotonic: float | None = None
         self._battle_item_recovery_counts: dict[tuple[int, str], int] = {}
+        self._damage_boost_armed_battle_id: int | None = None
+        self._pending_skill_expected_damage: float | None = None
         self._state_snapshot_cache: dict[str, object] | None = None
+        self._state_snapshot_cache_sections: tuple[str, ...] | None = None
         self._last_state_snapshot_monotonic: float | None = None
         self._last_state_snapshot_success_monotonic: float | None = None
         self._last_state_snapshot_client_id: str | None = None
@@ -196,9 +217,19 @@ class AutomationController(
         self._route_destination_name: str | None = None
         self._route_destination_id: str | None = None
         self._route_expected_transitions: int | None = None
+        self._navigator_arrived_confirmed = False
         self._route_step_submitted_from_id: str | None = None
+        self._route_step_expected_to_id: str | None = None
+        self._route_step_submitted_snapshot_id: str | None = None
         self._route_step_submitted_monotonic: float | None = None
+        self._route_started_monotonic: float | None = None
+        self._route_deadline_monotonic: float | None = None
+        self._route_poll_cadence = RouteRecoveryCadence()
+        self._route_visited_location_ids: set[str] = set()
+        self._route_rehydrate_attempts = 0
+        self._route_rehydrated_current_ids: set[str] = set()
         self._route_resume_target_name: str | None = None
+        self._route_resume_recovery_kind: str | None = None
         self._configured_route_completed_target: str | None = None
         self._death_checkpoint: RecoveryCheckpoint | None = None
         self._death_recovery_policy = DeathRecoveryPolicy(
@@ -209,6 +240,8 @@ class AutomationController(
         )
         self._last_player_observation: tuple[object, ...] | None = None
         self._combat_slot_sequence_index = 0
+        self._spellbook_battle_state = SpellbookBattleState()
+        self._pending_skill_mutation_binding = None
         self._state_entered_monotonic = time.monotonic()
         self._search_pause_until_monotonic: float | None = None
 
@@ -221,7 +254,11 @@ class AutomationController(
                 return ReplayActionSink(self.logger)
             return DryRunActionSink(self.logger)
         if sink_mode == "live":
-            return LiveMacActionSink(self.logger, browser_client_id=self.browser_client_id)
+            return LiveMacActionSink(
+                self.logger,
+                browser_client_id=self.browser_client_id,
+                cancellation_event=self.cancellation_event,
+            )
         return BlockedActionSink(self.logger, reason="live_not_explicit")
 
     def start(self) -> None:
@@ -233,7 +270,15 @@ class AutomationController(
         )
 
     def process_frame(self, frame: np.ndarray) -> GameState:
-        self._last_frame_hash = frame_hash(frame)
+        self._frame_for_evidence_hash = frame
+        self._cached_frame_hash = None
+        active_battle = self.session.battle_id
+        if self._battle_item_recovery_counts:
+            for key in tuple(self._battle_item_recovery_counts):
+                if key[0] != active_battle:
+                    self._battle_item_recovery_counts.pop(key, None)
+        if self._damage_boost_armed_battle_id != active_battle:
+            self._damage_boost_armed_battle_id = None
         if self.session.elapsed_s > self.config.max_session_minutes * 60:
             self.logger.log_event(
                 "session_stopped",
@@ -287,6 +332,12 @@ class AutomationController(
         self._recover_stuck_state(frame)
         return self.state_machine.state
 
+    @property
+    def _last_frame_hash(self) -> str | None:
+        if self._cached_frame_hash is None and self._frame_for_evidence_hash is not None:
+            sampled = evidence_hash_view(self._frame_for_evidence_hash)
+            self._cached_frame_hash = frame_hash(np.ascontiguousarray(sampled))
+        return self._cached_frame_hash
 
     def _safe_transition(self, target: GameState, *, battle_id: int | None = None, reason: str | None = None) -> None:
         try:
@@ -319,6 +370,9 @@ class AutomationController(
             cycle_id=self.session.cycle_id,
             completed_cycles=self.session.completed_cycles,
         )
+        active_marker = self.run_dir / ".active"
+        if active_marker.exists():
+            active_marker.replace(self.run_dir / ".complete")
         return summary
 
 
@@ -501,6 +555,17 @@ def _apply_runtime_overrides(config: AutomationConfig, overrides: dict[str, obje
         battle_item_recovery["damage_boost_slots"] = _parse_runtime_int_list(overrides.get("battleDamageBoostSlots"))
     if "battleDamageBoostNames" in overrides:
         battle_item_recovery["damage_boost_names"] = _parse_runtime_name_list(overrides.get("battleDamageBoostNames"))
+    if "battleDamageBoostChancePercent" in overrides:
+        battle_item_recovery["damage_boost_use_chance_percent"] = min(
+            100.0,
+            max(
+                0.0,
+                _as_float(
+                    overrides.get("battleDamageBoostChancePercent"),
+                    float(battle_item_recovery.get("damage_boost_use_chance_percent", 100)),
+                ),
+            ),
+        )
     if "battleItemCooldownMs" in overrides:
         battle_item_recovery["cooldown_ms"] = max(
             0,
@@ -599,7 +664,6 @@ def run_automation(
 
     activation_args = SimpleNamespace(activate_app=options.activate_app, no_activate_app=options.no_activate_app)
     _activate_configured_app(config, activation_args)
-    last_app_activation_monotonic = time.monotonic()
     start_delay = options.start_delay if options.start_delay is not None else (3.0 if options.live else 0.0)
     if start_delay > 0:
         print(f"Starting in {start_delay:.1f}s. Bring Chrome/game to the front and keep it unobstructed.", file=sys.stderr)
@@ -621,6 +685,7 @@ def run_automation(
             sink_mode="live" if options.live else "dry_run",
             mapper=mapper,
             browser_client_id=options.browser_client_id,
+            cancellation_event=stop_event,
         )
         hotkeys = HotkeyController(controller.guard, controller.logger)
         if options.hotkeys:
@@ -642,7 +707,6 @@ def run_automation(
             controller._search_pause_until_monotonic = time.monotonic() + controller.config.recovery.viewport_exhausted_pause_ms / 1000
         if status_callback:
             status_callback(_controller_status(controller))
-        frame_interval = 1.0 / max(1, config.capture_fps)
         try:
             while controller.state_machine.state != GameState.STOPPED:
                 started = time.monotonic()
@@ -650,9 +714,6 @@ def run_automation(
                     controller.guard.emergency_stop()
                     controller.state_machine.stop(cycle_id=controller.session.cycle_id, reason="api_stop_requested")
                     break
-                if options.live and started - last_app_activation_monotonic >= LIVE_APP_REACTIVATE_INTERVAL_S:
-                    if _activate_configured_app(config, activation_args):
-                        last_app_activation_monotonic = started
                 frame = capture.capture_frame()
                 controller.process_frame(frame)
                 controller.write_checkpoint()
@@ -660,7 +721,8 @@ def run_automation(
                     status_callback(_controller_status(controller))
                 if preview_enabled:
                     _show_preview("antibot-cv-preview", frame, controller)
-                sleep_s = max(0.0, frame_interval - (time.monotonic() - started))
+                effective_fps = capture_fps_for_state(controller.state_machine.state, config.capture_fps)
+                sleep_s = max(0.0, (1.0 / effective_fps) - (time.monotonic() - started))
                 time.sleep(sleep_s)
         except KeyboardInterrupt:
             controller.logger.log_event(
@@ -680,17 +742,5 @@ def run_automation(
         return summary
 
 
-def build_parser() -> argparse.ArgumentParser:
-    from src.antibot_cv.automation.controller_cli import build_parser as cli_build_parser
-
-    return cli_build_parser()
-
-
-def main(argv: list[str] | None = None) -> int:
-    from src.antibot_cv.automation.controller_cli import main as cli_main
-
-    return cli_main(argv)
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    runpy.run_path(str(Path(__file__).with_name("controller_cli.py")), run_name="__main__")

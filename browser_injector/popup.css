@@ -140,6 +140,17 @@ select {
   color: #251c14;
 }
 
+.range-field input[type="range"] {
+  box-sizing: border-box;
+  margin: 3px 0 0;
+  width: 100%;
+}
+
+.range-field output {
+  color: #251c14;
+  font-weight: 700;
+}
+
 .checks {
   display: grid;
   gap: 6px;
@@ -182,6 +193,11 @@ button:disabled {
 
 #stopButton {
   background: #9f332b;
+}
+
+#questRunButton {
+  background: #36724c;
+  grid-column: 1 / -1;
 }
 
 #refreshButton {

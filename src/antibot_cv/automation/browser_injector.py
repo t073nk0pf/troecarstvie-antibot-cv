@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 DEFAULT_INJECTOR_HOST = "127.0.0.1"
 DEFAULT_INJECTOR_PORT = 17654
-CURRENT_BRIDGE_VERSION = "2026-07-13-quest-scope-v52"
+CURRENT_BRIDGE_VERSION = "2026-07-17-chat-delivery-retention-v74"
 
 
 def _optional_int(value: object) -> int | None:
@@ -38,12 +38,16 @@ class InjectorResult:
 
 
 class BrowserInjectorServer:
+    CLIENT_TTL_S = 300.0
+    MAX_CLIENTS = 64
+
     def __init__(self, host: str = DEFAULT_INJECTOR_HOST, port: int = DEFAULT_INJECTOR_PORT) -> None:
         self.host = host
         self.port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._pending_condition = threading.Condition(self._lock)
         self._pending: dict[str, dict[str, Any]] = {}
         self._thread_local = threading.local()
         self._clients: dict[str, dict[str, Any]] = {}
@@ -93,6 +97,7 @@ class BrowserInjectorServer:
                 client_profile = parsed_query.get("profile", [""])[0]
                 client_tab_id = parsed_query.get("tab", [None])[0]
                 client_opener_tab_id = parsed_query.get("opener", [None])[0]
+                wait_s = min(30.0, max(0.0, float(parsed_query.get("wait", ["0"])[0] or 0)))
                 with outer._lock:
                     if client_id:
                         outer._record_client_locked(
@@ -109,6 +114,13 @@ class BrowserInjectorServer:
                     if client_version:
                         outer._last_client_version = str(client_version)
                     command = outer._next_command_for_client_locked(str(client_id) if client_id else None, client_version)
+                    deadline = time.monotonic() + wait_s
+                    while command is None and wait_s > 0 and time.monotonic() < deadline:
+                        outer._pending_condition.wait(deadline - time.monotonic())
+                        command = outer._next_command_for_client_locked(
+                            str(client_id) if client_id else None,
+                            client_version,
+                        )
                 self._send_json({"ok": True, "command": command})
 
             def do_POST(self) -> None:
@@ -220,6 +232,8 @@ class BrowserInjectorServer:
         timeout_s: float = 2.5,
         required_version: str | None = CURRENT_BRIDGE_VERSION,
         client_id: str | None = None,
+        cancellation_event: threading.Event | None = None,
+        deadline_monotonic: float | None = None,
     ) -> InjectorResult:
         self.start()
         command_id = uuid.uuid4().hex
@@ -249,10 +263,25 @@ class BrowserInjectorServer:
                 "created_at": time.monotonic(),
                 "delivered_count": 0,
             }
-        if not result_event.wait(timeout_s):
+            self._pending_condition.notify_all()
+        wait_deadline = time.monotonic() + max(0.0, timeout_s)
+        if deadline_monotonic is not None:
+            wait_deadline = min(wait_deadline, deadline_monotonic)
+        cancelled = False
+        while not result_event.is_set():
+            if cancellation_event is not None and cancellation_event.is_set():
+                cancelled = True
+                break
+            remaining = wait_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            result_event.wait(min(0.05, remaining))
+        if not result_event.is_set():
             with self._lock:
                 pending = self._pending.pop(command_id, None)
                 delivered_count = int(pending.get("delivered_count", 0) or 0) if isinstance(pending, dict) else 0
+            if cancelled:
+                return InjectorResult(False, "injector_cancelled", client_id=target_client_id)
             message = "injector_ack_timeout" if delivered_count > 0 else "injector_delivery_timeout"
             return InjectorResult(False, message, client_id=target_client_id)
         with self._lock:
@@ -337,6 +366,7 @@ class BrowserInjectorServer:
         opener_tab_id: object = None,
     ) -> None:
         now = time.monotonic()
+        self._prune_clients_locked(now)
         self._last_client_seen = now
         self._last_client_id = client_id
         if version:
@@ -352,6 +382,22 @@ class BrowserInjectorServer:
         client["profile_id"] = str(profile_id or "")
         client["tab_id"] = _optional_int(tab_id)
         client["opener_tab_id"] = _optional_int(opener_tab_id)
+
+    def _prune_clients_locked(self, now: float) -> None:
+        stale = [
+            client_id for client_id, data in self._clients.items()
+            if now - float(data.get("last_seen", 0.0) or 0.0) > self.CLIENT_TTL_S
+        ]
+        for client_id in stale:
+            self._clients.pop(client_id, None)
+        overflow = len(self._clients) - self.MAX_CLIENTS + 1
+        if overflow > 0:
+            oldest = sorted(
+                self._clients,
+                key=lambda client_id: float(self._clients[client_id].get("last_seen", 0.0) or 0.0),
+            )[:overflow]
+            for client_id in oldest:
+                self._clients.pop(client_id, None)
 
     def _next_command_for_client_locked(self, client_id: str | None, client_version: str | None) -> dict[str, Any] | None:
         if not client_id:

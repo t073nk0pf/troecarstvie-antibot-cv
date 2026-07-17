@@ -58,6 +58,23 @@ def test_all_available_quests_are_queued_before_active_execution() -> None:
     assert result.intake_queue == (quest(1), quest(2), quest(3))
 
 
+def test_active_first_mode_preserves_intake_but_executes_active_quest() -> None:
+    state = QuestDirectorState(
+        discovery_initialized=True,
+        available_snapshot_fresh=True,
+        active_snapshot_fresh=True,
+        active_quests=(quest(9),),
+        available_quests=(quest(1), quest(2)),
+    )
+
+    result = QuestDirectorPolicy(prefer_active_quests=True).decide(state)
+
+    assert result.intent is QuestDirectorIntent.EXECUTE_ACTIVE
+    assert result.reason == "active_quest_preferred_over_intake"
+    assert result.quest == quest(9)
+    assert result.intake_queue == (quest(1), quest(2))
+
+
 def test_existing_queue_order_is_stable_and_new_available_items_append() -> None:
     result = decide(
         intake_queue=(quest(2), quest(1)),

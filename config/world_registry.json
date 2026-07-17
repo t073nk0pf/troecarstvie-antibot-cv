@@ -104,6 +104,10 @@
       "id": "125",
       "name": "Порт Безбрежного моря"
     },
+    "129": {
+      "id": "129",
+      "name": "Ущелье Мрака"
+    },
     "171": {
       "id": "171",
       "name": "Пригород Арсы"
@@ -133,11 +137,59 @@
       "name": "Алхимик Филонид",
       "npcInstanceId": "70"
     },
+    "122:0": {
+      "areaObjectId": "0",
+      "locationId": "122",
+      "name": "Дом Аскорда",
+      "npcInstanceId": "74"
+    },
+    "122:5": {
+      "areaObjectId": "5",
+      "locationId": "122",
+      "name": "Изба Ламтаила"
+    },
+    "122:6": {
+      "areaObjectId": "6",
+      "locationId": "122",
+      "name": "Заброшенный дом"
+    },
+    "129:1": {
+      "areaObjectId": "1",
+      "locationId": "129",
+      "name": "Жрец Яросвет"
+    },
+    "129:8": {
+      "areaObjectId": "8",
+      "locationId": "129",
+      "name": "Палатка Гарда",
+      "npcInstanceId": "111"
+    },
+    "171:1": {
+      "areaObjectId": "1",
+      "locationId": "171",
+      "name": "Волхв Вяземайт"
+    },
+    "171:13": {
+      "areaObjectId": "13",
+      "locationId": "171",
+      "name": "Следопыт Олекса"
+    },
+    "171:14": {
+      "areaObjectId": "14",
+      "locationId": "171",
+      "name": "Полководец Щецин"
+    },
+    "171:2": {
+      "areaObjectId": "2",
+      "locationId": "171",
+      "name": "Царевич Придон",
+      "npcInstanceId": "55"
+    },
     "201:7": {
       "areaObjectId": "7",
       "locationId": "201",
       "name": "Заводчик Брокий",
-      "npcInstanceId": "114"
+      "npcInstanceId": "115"
     }
   },
   "schemaVersion": 1

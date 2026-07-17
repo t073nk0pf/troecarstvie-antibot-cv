@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+
+import pytest
 
 from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, DryRunActionSink, LiveMacActionSink
 from src.antibot_cv.automation.actions import _log_action, _route_confirmation_reason
@@ -8,6 +11,7 @@ from src.antibot_cv.automation.browser_injector import InjectorResult
 from src.antibot_cv.automation.config import AutomationConfig
 from src.antibot_cv.automation.safety import SafetyGuard
 from src.antibot_cv.automation.session import MAX_HUNT_CLICKS_PER_CYCLE, SessionState
+from src.antibot_cv.automation.live_action_service import LiveActionService
 from src.antibot_cv.telemetry.event_logger import InMemoryEventLogger
 from src.antibot_cv.viewport.coordinates import Point
 
@@ -15,6 +19,23 @@ from src.antibot_cv.viewport.coordinates import Point
 class FailingSink:
     def execute(self, request: ActionRequest) -> bool:
         raise AssertionError("live sink must not be reached")
+
+
+class DelegatingSink:
+    def __init__(self, target: LiveMacActionSink) -> None:
+        self.target = target
+
+    def execute(self, request: ActionRequest) -> bool:
+        return self.target.execute(request)
+
+
+class DelegatingDryRunSink(DryRunActionSink):
+    def __init__(self, target: LiveMacActionSink) -> None:
+        super().__init__()
+        self.target = target
+
+    def execute(self, request: ActionRequest) -> bool:
+        return self.target.execute(request)
 
 
 def test_dry_run_no_live_click(test_config: AutomationConfig) -> None:
@@ -26,6 +47,132 @@ def test_dry_run_no_live_click(test_config: AutomationConfig) -> None:
     assert ok is True
     assert len(sink.requests) == 1
     assert session.total_actions == 1
+
+
+def test_dry_run_request_collection_is_bounded() -> None:
+    sink = DryRunActionSink(max_requests=2)
+    for index in range(4):
+        sink.execute(ActionRequest(f"action-{index}"))
+    assert [request.action_type for request in sink.requests] == ["action-2", "action-3"]
+
+
+def test_session_battle_and_cycle_tracking_collections_are_reclaimed() -> None:
+    session = SessionState(requested_cycles=2)
+    session.new_battle()
+    session.mark_ability4()
+    session.mark_attack()
+    session.mark_exit()
+    session.mark_hunt()
+    session.complete_cycle()
+
+    assert session.ability_used_battle_ids == set()
+    assert session.exit_clicked_battle_ids == set()
+    assert session.attack_click_counts_by_battle_id == {}
+    assert session.hunt_click_counts_by_cycle_id == {}
+
+
+def test_physical_dry_run_boundary_blocks_malformed_live_sink_wiring(
+    test_config: AutomationConfig, monkeypatch,
+) -> None:
+    sink = LiveMacActionSink(browser_client_id="client-a")
+    calls: list[ActionRequest] = []
+    monkeypatch.setattr(sink, "execute", lambda request: calls.append(request) or True)
+    guard = SafetyGuard(test_config)
+    executor = ActionExecutor(
+        guard=guard, session=SessionState(requested_cycles=1), sink=sink,
+    )
+
+    assert executor.execute(ActionRequest("open_area", dry_run=False)) is False
+    assert calls == []
+    assert executor.session.total_actions == 0
+
+
+def test_physical_dry_run_boundary_blocks_live_sink_adapter(
+    test_config: AutomationConfig, monkeypatch,
+) -> None:
+    live_sink = LiveMacActionSink(browser_client_id="client-a")
+    calls: list[ActionRequest] = []
+    monkeypatch.setattr(live_sink, "execute", lambda request: calls.append(request) or True)
+    for adapter in (DelegatingSink(live_sink), DelegatingDryRunSink(live_sink)):
+        executor = ActionExecutor(
+            guard=SafetyGuard(test_config),
+            session=SessionState(requested_cycles=1),
+            sink=adapter,
+        )
+        assert executor.execute(ActionRequest("open_area", dry_run=False)) is False
+        assert executor.session.total_actions == 0
+    assert calls == []
+
+
+def test_live_action_service_persists_rate_limit_per_client(
+    test_config: AutomationConfig,
+) -> None:
+    config = replace(
+        test_config,
+        dry_run=False,
+        safety=replace(test_config.safety, max_actions_per_minute=2),
+    )
+    sinks: dict[str, DryRunActionSink] = {}
+    service = LiveActionService(
+        lambda: config,
+        sink_factory=lambda client_id: sinks.setdefault(client_id, DryRunActionSink()),
+    )
+    request = ActionRequest("open_area", dry_run=False)
+
+    assert service.execute("client-a", request) is True
+    assert service.execute("client-a", request) is True
+    assert service.execute("client-a", request) is False
+    assert len(sinks["client-a"].requests) == 2
+    assert service.counters("client-a")["rate_actions"] == 2
+    assert service.execute("client-b", request) is True
+
+
+def test_live_action_service_emergency_and_error_latches_persist_between_requests(
+    test_config: AutomationConfig,
+) -> None:
+    config = replace(test_config, dry_run=False)
+    sink = DryRunActionSink()
+    service = LiveActionService(lambda: config, sink_factory=lambda _client_id: sink)
+    request = ActionRequest("open_area", dry_run=False)
+
+    assert service.execute("client-a", request) is True
+    service.record_error("client-a")
+    service.emergency_stop("client-a")
+    assert service.execute("client-a", request) is False
+    assert len(sink.requests) == 1
+    assert service.counters("client-a") == {
+        "total_actions": 1,
+        "rate_actions": 1,
+        "emergency_stopped": True,
+        "consecutive_errors": 1,
+    }
+
+
+def test_live_action_service_preserves_safety_context_across_transport_reconnect(
+    test_config: AutomationConfig,
+) -> None:
+    config = replace(test_config, dry_run=False)
+    logical_ids = {"old-client": ("profile-a", 17), "new-client": ("profile-a", 17)}
+    sinks: dict[str, DryRunActionSink] = {}
+    service = LiveActionService(
+        lambda: config,
+        sink_factory=lambda client_id: sinks.setdefault(client_id, DryRunActionSink()),
+        identity_factory=logical_ids.get,
+    )
+    request = ActionRequest("open_area", dry_run=False)
+
+    assert service.execute("old-client", request) is True
+    service.record_error("old-client")
+    service.emergency_stop("old-client")
+    assert service.execute("new-client", request) is False
+    assert "new-client" in sinks
+    assert sinks["new-client"].requests == []
+    assert service.counters("new-client") == {
+        "total_actions": 1,
+        "rate_actions": 1,
+        "emergency_stopped": True,
+        "consecutive_errors": 1,
+    }
 
 
 def test_emergency_stop_blocks_actions(test_config: AutomationConfig) -> None:
@@ -154,7 +301,7 @@ def test_live_attack_visible_target_passes_allowed_levels(monkeypatch) -> None:
     assert logger.events[-1]["target_level"] == 3
 
 
-def test_live_ability_uses_js_skill_without_screen_point(monkeypatch) -> None:
+def test_live_ability_without_exact_mutation_binding_is_blocked(monkeypatch) -> None:
     class FakeInjector:
         def execute(
             self,
@@ -164,15 +311,7 @@ def test_live_ability_uses_js_skill_without_screen_point(monkeypatch) -> None:
             timeout_s: float = 2.5,
             required_version: str | None = None,
         ) -> InjectorResult:
-            assert command == "use_skill_slot"
-            assert payload == {"slot": 4, "verifyTimeoutMs": 900, "commandTimeoutMs": 4000}
-            assert timeout_s == 4.5
-            assert required_version is None
-            return InjectorResult(
-                True,
-                '{"ok":true,"message":"useSkill","slot":4,"ability":{"id":-10,"slot":4,"name":"test"}}',
-                "client",
-            )
+            raise AssertionError("missing binding must not reach injector")
 
     logger = InMemoryEventLogger(dry_run=False)
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
@@ -180,13 +319,12 @@ def test_live_ability_uses_js_skill_without_screen_point(monkeypatch) -> None:
 
     ok = sink.execute(ActionRequest("click_ability_4", metadata={"use_js_skill": True, "skill_slot": 4}, dry_run=False))
 
-    assert ok
-    assert logger.events[-1]["event_type"] == "click_ability_4_js"
-    assert logger.events[-1]["ability_id"] == -10
-    assert logger.events[-1]["ability_name"] == "test"
+    assert not ok
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert logger.events[-1]["block_reason"] == "skill_mutation_binding_missing"
 
 
-def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> None:
+def test_live_combat_slot_without_exact_mutation_binding_is_blocked(monkeypatch) -> None:
     class FakeInjector:
         def execute(
             self,
@@ -196,11 +334,7 @@ def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> Non
             timeout_s: float = 2.5,
             required_version: str | None = None,
         ) -> InjectorResult:
-            assert command == "use_skill_slot"
-            assert payload == {"slot": 4, "verifyTimeoutMs": 900, "commandTimeoutMs": 4000}
-            assert timeout_s == 4.5
-            assert required_version is None
-            return InjectorResult(True, '{"ok":true,"message":"useSkill","slot":4}', "client")
+            raise AssertionError("missing binding must not reach injector")
 
     logger = InMemoryEventLogger(dry_run=False)
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
@@ -208,9 +342,8 @@ def test_live_combat_slot_uses_js_skill_without_screen_point(monkeypatch) -> Non
 
     ok = sink.execute(ActionRequest("click_combat_slot", metadata={"use_js_skill": True, "slot_index": 4}, dry_run=False))
 
-    assert ok
-    assert logger.events[-1]["event_type"] == "click_combat_slot_js"
-    assert logger.events[-1]["skill_slot"] == 4
+    assert not ok
+    assert logger.events[-1]["event_type"] == "action_blocked"
 
 
 def test_live_js_combat_logs_compact_injector_evidence(monkeypatch) -> None:
@@ -234,6 +367,19 @@ def test_live_js_combat_logs_compact_injector_evidence(monkeypatch) -> None:
                             "message": "useSkill_confirmed",
                             "slot": 2,
                             "ability": {"id": -10, "slot": 2, "name": "test"},
+                            "returnObservation": {
+                                "raw": {"type": "promise"},
+                                "promise": {
+                                    "status": "resolved",
+                                    "result": {"type": "string", "length": 14},
+                                },
+                            },
+                            "beforePlayerStanceState": [
+                                {"path": "model.player.position", "type": "string", "value": "front"}
+                            ],
+                            "afterPlayerStanceState": [
+                                {"path": "model.player.position", "type": "string", "value": "back"}
+                            ],
                             "before": huge_snapshot,
                             "after": huge_snapshot,
                         }
@@ -264,7 +410,20 @@ def test_live_js_combat_logs_compact_injector_evidence(monkeypatch) -> None:
     sink = LiveMacActionSink(logger)
 
     assert sink.execute(
-        ActionRequest("click_combat_slot", metadata={"use_js_skill": True, "skill_slot": 2}, dry_run=False)
+        ActionRequest(
+            "click_combat_slot",
+            metadata={
+                "use_js_skill": True,
+                "skill_slot": 2,
+                "expected_skill_id": -10,
+                "expected_skill_name": "test",
+                "expected_skill_slot": 2,
+                "expected_battle_identity": "fight.php|battle:7|opp:42",
+                "expected_battle_snapshot_id": "battle-1",
+                "expected_battle_observation_token": "page-token-1",
+            },
+            dry_run=False,
+        )
     )
     assert sink.execute(
         ActionRequest(
@@ -277,6 +436,9 @@ def test_live_js_combat_logs_compact_injector_evidence(monkeypatch) -> None:
     serialized = json.dumps(logger.events, ensure_ascii=False)
     assert len(serialized) < 5000
     assert "x" * 2000 not in serialized
+    assert '\\"length\\":14' in serialized
+    assert "stance-applied" not in serialized
+    assert "model.player.position" in serialized
 
 
 def test_live_recovery_logs_compact_failed_inventory_diagnostics(monkeypatch) -> None:
@@ -696,7 +858,7 @@ def test_live_recovery_items_does_not_open_hunt_when_resource_not_confirmed(monk
             if command == "resource_snapshot":
                 return InjectorResult(True, json.dumps({"healthPercent": 100, "prowessPercent": 80}), "client")
             if command == "open_hunt":
-                raise AssertionError("hunt must not open before recovery is confirmed")
+                return InjectorResult(True, '{"ok":true,"message":"hunt_opened"}', "client")
             return InjectorResult(True, '{"ok":true}', "client")
 
     logger = InMemoryEventLogger(dry_run=False)
@@ -720,9 +882,9 @@ def test_live_recovery_items_does_not_open_hunt_when_resource_not_confirmed(monk
     )
 
     assert not ok
-    assert "open_hunt" not in calls
+    assert "open_hunt" in calls
     assert logger.events[-1]["event_type"] == "action_blocked"
-    assert logger.events[-1]["open_hunt_skipped"] == "recovery_failed"
+    assert logger.events[-1]["open_hunt_ok"] is True
     assert logger.events[-1]["recovery_resource_results"][-1]["ok"] is False
 
 
@@ -839,9 +1001,9 @@ def test_live_navigator_actions_keep_parent_and_child_clients_separate(monkeypat
                 "kind": "monster",
                 "searchDelayMs": 250,
                 "routeDelayMs": 350,
-                "commandTimeoutMs": 9000,
-            },
-            10.0,
+                    "commandTimeoutMs": 2600,
+                },
+                3.1,
         ),
         ("navigator_go", "child-client", {"expectedTarget": "Дикий предел"}, 3.0),
         (
@@ -895,7 +1057,11 @@ def test_live_open_quest_catalog_forwards_only_bounded_integer_page(monkeypatch)
             client_id: str | None = None,
         ) -> InjectorResult:
             calls.append((command, dict(payload or {}), timeout_s, client_id))
-            return InjectorResult(True, '{"message":"quest_catalog_opened_confirmed"}', client_id)
+            return InjectorResult(
+                True,
+                '{"ok":true,"outcome":"CONFIRMED","mutationIssued":true,"message":"quest_catalog_opened_confirmed"}',
+                client_id,
+            )
 
     logger = InMemoryEventLogger(dry_run=False)
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
@@ -907,11 +1073,75 @@ def test_live_open_quest_catalog_forwards_only_bounded_integer_page(monkeypatch)
     assert calls == [
         (
             "open_quest_catalog",
-            {"page": 2, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
-            5.5,
+            {"page": 2, "verifyTimeoutMs": 5000, "commandTimeoutMs": 8000},
+            8.5,
             "parent-client",
         )
     ]
+
+
+def test_live_open_quest_catalog_preserves_ack_pending_without_retry(monkeypatch) -> None:
+    calls: list[tuple[dict[str, object], float]] = []
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            calls.append((dict(payload or {}), timeout_s))
+            return InjectorResult(
+                True,
+                '{"ok":true,"outcome":"ACK_PENDING","mutationIssued":true,"message":"quest_catalog_open_unconfirmed"}',
+                client_id,
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(
+        ActionRequest("open_quest_catalog", metadata={"page": 0}, dry_run=False)
+    ) is True
+    assert calls == [
+        ({"page": 0, "verifyTimeoutMs": 5000, "commandTimeoutMs": 8000}, 8.5)
+    ]
+    assert logger.events[-1]["event_type"] == "open_quest_catalog_requested"
+    assert sink.last_catalog_navigation_outcome is not None
+    assert sink.last_catalog_navigation_outcome.status.value == "ACK_PENDING"
+    assert sink.last_catalog_navigation_outcome.client_id == "parent-client"
+
+
+def test_live_open_quest_catalog_does_not_fabricate_missing_result_client(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            return InjectorResult(
+                True,
+                '{"ok":true,"outcome":"ACK_PENDING","mutationIssued":true,"destination":"/user_quest.php?mode=avail&page=0","message":"quest_catalog_open_unconfirmed"}',
+                None,
+            )
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert sink.execute(ActionRequest("open_quest_catalog", metadata={"page": 0}, dry_run=False))
+    assert sink.last_catalog_navigation_outcome is not None
+    assert sink.last_catalog_navigation_outcome.client_id == ""
+
+
+def test_live_open_quest_catalog_not_issued_is_blocked(monkeypatch) -> None:
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            return InjectorResult(False, "injector_delivery_timeout", client_id)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(logger, browser_client_id="parent-client")
+
+    assert not sink.execute(ActionRequest("open_quest_catalog", metadata={"page": 0}, dry_run=False))
+    assert logger.events[-1]["event_type"] == "action_blocked"
+    assert sink.last_catalog_navigation_outcome is not None
+    assert sink.last_catalog_navigation_outcome.status.value == "NOT_ISSUED"
 
 
 def test_live_open_active_quest_page_forwards_only_bounded_integer_page(monkeypatch) -> None:
@@ -927,20 +1157,55 @@ def test_live_open_active_quest_page_forwards_only_bounded_integer_page(monkeypa
             client_id: str | None = None,
         ) -> InjectorResult:
             calls.append((command, dict(payload or {}), timeout_s, client_id))
-            return InjectorResult(True, '{"message":"quest_active_opened_confirmed"}', client_id)
+            return InjectorResult(True, json.dumps({
+                "outcome": "CONFIRMED", "mutationIssued": True,
+                "message": "quest_active_opened_confirmed", "shellLoaded": True,
+                "destination": "/user_quest.php?mode=started&page=1",
+            }), client_id)
 
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
     sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False), browser_client_id="parent-client")
 
     assert sink.execute(ActionRequest("open_active_quest_page", metadata={"page": 1}, dry_run=False))
+    assert sink.last_active_catalog_navigation_outcome.status.value == "CONFIRMED"
     assert not sink.execute(ActionRequest("open_active_quest_page", metadata={"page": "1"}, dry_run=False))
     assert not sink.execute(ActionRequest("open_active_quest_page", metadata={"page": 101}, dry_run=False))
     assert calls == [(
         "open_active_quest_page",
-        {"page": 1, "verifyTimeoutMs": 2000, "commandTimeoutMs": 5000},
-        5.5,
+        {"page": 1, "verifyTimeoutMs": 5000, "commandTimeoutMs": 7000},
+        7.5,
         "parent-client",
     )]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_execute", "expected_status"),
+    [
+        ({"outcome": "ACK_PENDING", "mutationIssued": True,
+          "message": "quest_active_open_unconfirmed"}, True, "ACK_PENDING"),
+        ({"outcome": "NOT_ISSUED", "mutationIssued": False,
+          "message": "quest_active_main_content_missing"}, False, "NOT_ISSUED"),
+    ],
+)
+def test_live_active_navigation_preserves_issued_ambiguity(
+    monkeypatch, payload, expected_execute, expected_status,
+) -> None:
+    payload = {
+        **payload, "destination": "/user_quest.php?mode=started&page=1",
+        "shellLoaded": False,
+    }
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            return InjectorResult(expected_execute, json.dumps(payload_result), client_id)
+
+    payload_result = payload
+    monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False), browser_client_id="parent-client")
+    assert sink.execute(ActionRequest(
+        "open_active_quest_page", metadata={"page": 1}, dry_run=False,
+    )) is expected_execute
+    assert sink.last_active_catalog_navigation_outcome.status.value == expected_status
 
 
 def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeypatch) -> None:
@@ -956,7 +1221,12 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
             client_id: str | None = None,
         ) -> InjectorResult:
             calls.append((command, dict(payload or {}), timeout_s, client_id))
-            return InjectorResult(True, '{"message":"npc_opened_confirmed"}', client_id)
+            return InjectorResult(True, json.dumps({
+                "outcome": "CONFIRMED", "mutationIssued": True,
+                "destination": "https://3kingdoms.ru/npc.php?f_id=6",
+                "issuedAt": "2026-07-17T00:00:00Z",
+                "message": "npc_opened_confirmed",
+            }), client_id)
 
     logger = InMemoryEventLogger(dry_run=False)
     monkeypatch.setattr("src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector())
@@ -969,6 +1239,9 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
     }
 
     assert sink.execute(ActionRequest("open_exact_npc", metadata=valid, dry_run=False))
+    assert sink.execute(
+        ActionRequest("open_exact_npc", metadata={**valid, "npc_id": "0"}, dry_run=False)
+    )
     assert not sink.execute(ActionRequest("open_exact_npc", metadata={**valid, "npc_id": "6x"}, dry_run=False))
     assert not sink.execute(
         ActionRequest("open_exact_npc", metadata={**valid, "expected_snapshot_id": "wrong"}, dry_run=False)
@@ -987,7 +1260,21 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
             },
             6.0,
             "parent-client",
-        )
+        ),
+        (
+            "open_exact_npc",
+            {
+                "expectedSnapshotId": "area-npcs-mrj-1",
+                "expectedLocationId": "125",
+                "npcId": "0",
+                "expectedName": "Моряк Кентур",
+                "expectedDialogName": "Моряк Кентур",
+                "verifyTimeoutMs": 2500,
+                "commandTimeoutMs": 5500,
+            },
+            6.0,
+            "parent-client",
+        ),
     ]
 
 
@@ -1121,9 +1408,11 @@ def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> No
                 "target": "Белая Рысь [6]",
                 "target_kind": "monster",
                 "navigator_client_id": "child-client",
-                "search_delay_ms": 12000,
-                "route_delay_ms": 8000,
-                "retry_delay_ms": 500,
+                "search_delay_ms": 1425,
+                "route_delay_ms": 950,
+                "command_timeout_ms": 4375,
+                "retry_delay_ms": 0,
+                "retry_limit": 1,
             },
             dry_run=False,
         )
@@ -1131,9 +1420,9 @@ def test_live_navigator_retries_once_after_unique_section_lag(monkeypatch) -> No
 
     assert len(calls) == 2
     assert calls[0] == calls[1]
-    assert calls[0][2]["commandTimeoutMs"] == 22000
-    assert calls[0][3] == 23.0
-    assert sleeps == [0.5]
+    assert calls[0][2]["commandTimeoutMs"] == 4375
+    assert calls[0][3] == 4.875
+    assert sleeps == []
     assert [event["event_type"] for event in logger.events[-2:]] == [
         "navigator_target_selection_retry",
         "navigator_target_selected",

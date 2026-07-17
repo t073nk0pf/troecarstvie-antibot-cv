@@ -5,12 +5,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
+import hashlib
 import re
+import time
 from types import MappingProxyType
 
 from src.antibot_cv.automation.quest_active_catalog import ActiveQuestEntry
+from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+    select_exploratory_dialogue_action,
+)
 from src.antibot_cv.automation.quest_giver import resolve_unique_giver
 from src.antibot_cv.automation.quest_objective_runtime import quest_step_fingerprint
+from src.antibot_cv.automation.quest_puzzle_sequences import (
+    select_verified_puzzle_action,
+    unsupported_puzzle_signature,
+)
 
 
 class QuestDialoguePhase(str, Enum):
@@ -55,7 +64,13 @@ class PendingQuestDialogue:
     area_snapshot_id: str | None = None
     quest_opened: bool = False
     dialog_steps: int = 0
+    puzzle_step: int = 0
+    puzzle_completed_drums: tuple[int, ...] = ()
     last_answer_ref: str | None = None
+    dialog_choice_fingerprint: str | None = None
+    attempted_answer_refs: tuple[str, ...] = ()
+    started_monotonic: float = 0.0
+    deadline_monotonic: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -117,6 +132,13 @@ def parse_dialogue_objective(entry: ActiveQuestEntry) -> QuestDialogueObjective:
             flags=re.IGNORECASE,
         )
     if npc_match is None:
+        npc_match = re.search(
+            rf"^\s*(?:отправляйтесь|отправиться)\s+(?:к\s+)?(.+?)\s+"
+            rf"(?:в|на)\s+{re.escape(label)}(?=\s|[.,!?;:]|$)",
+            raw_objective,
+            flags=re.IGNORECASE,
+        )
+    if npc_match is None:
         raise QuestDialogueError(
             "dialogue_npc_missing_or_ambiguous",
             "quest objective does not identify an NPC before the navigation location",
@@ -147,6 +169,7 @@ class QuestDialogueRuntime:
         if self.pending is not None:
             raise RuntimeError("quest dialogue is already in progress")
         objective = parse_dialogue_objective(entry)
+        started = time.monotonic()
         self.pending = PendingQuestDialogue(
             objective=objective,
             phase=(
@@ -154,6 +177,8 @@ class QuestDialogueRuntime:
                 if already_at_location
                 else QuestDialoguePhase.ROUTE
             ),
+            started_monotonic=started,
+            deadline_monotonic=started + 120.0,
         )
         self._pending_decision = None
         return self.pending
@@ -185,7 +210,7 @@ class QuestDialogueRuntime:
             raise QuestDialogueError("dialogue_npc_missing_or_ambiguous", str(exc)) from exc
         npc_id = _bounded_text(match.get("dataId"), max_length=80)
         npc_name = _bounded_text(match.get("name"), max_length=180)
-        if not npc_id.isdecimal() or int(npc_id) <= 0 or not npc_name:
+        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name:
             raise QuestDialogueError("dialogue_npc_identity_invalid", "matched NPC identity is invalid")
         self.pending = replace(
             pending,
@@ -203,7 +228,11 @@ class QuestDialogueRuntime:
                     expected_location_id=location_id,
                     npc_id=npc_id,
                     expected_name=npc_name,
-                    expected_dialog_name=npc_name,
+                    # Area actors may be proxies such as ``Дом Аскорда``
+                    # or ``Палатка Вилены``.  The click stays bound to the
+                    # exact proxy ID/name, while the resulting dialogue is
+                    # bound to the quest-authored person identity.
+                    expected_dialog_name=pending.objective.npc_query,
                     quest_id=pending.objective.quest_id,
                 ),
                 action_failure_reason="quest_dialogue_npc_open_failed",
@@ -267,16 +296,55 @@ class QuestDialogueRuntime:
             npc_id=pending.npc_id,
             action="done",
         )
-        if len(answers) > 1 or len(completions) > 1 or (answers and completions):
+        choice_fingerprint = _dialog_choice_fingerprint(answers) if answers else None
+        attempted_refs = (
+            pending.attempted_answer_refs
+            if choice_fingerprint == pending.dialog_choice_fingerprint
+            else ()
+        )
+        selected_answer = select_exploratory_dialogue_action(
+            answers,
+            attempted_refs=attempted_refs,
+        ) if answers else None
+        puzzle_answer = select_verified_puzzle_action(
+            pending.objective.quest_id,
+            answers,
+            href=str(snapshot.get("href") or ""),
+            completed_drums=pending.puzzle_completed_drums,
+        ) if answers else None
+        if puzzle_answer is not None:
+            selected_answer = puzzle_answer
+        if puzzle_answer is None and unsupported_puzzle_signature(
+            pending.objective.quest_id,
+            answers,
+        ):
+            raise QuestDialogueError(
+                "dialogue_puzzle_unsupported",
+                "dialogue exposes a puzzle without a verified recipe",
+            )
+        if answers and selected_answer is None:
+            if (
+                len(answers) == 1
+                and _bounded_text(answers[0].get("ref"), max_length=80) in attempted_refs
+            ):
+                raise QuestDialogueError(
+                    "dialogue_action_not_advanced",
+                    "dialogue still exposes the previously submitted answer",
+                )
+            raise QuestDialogueError(
+                "dialogue_choices_exhausted",
+                "dialogue has no remaining safe untried progression action",
+            )
+        if len(completions) > 1 or (answers and completions):
             raise QuestDialogueError("dialogue_action_ambiguous", "dialogue exposes ambiguous progression actions")
         if pending.dialog_steps >= max_steps:
             raise QuestDialogueError("dialogue_step_limit_exceeded", "quest dialogue step limit exceeded")
-        if len(answers) == 1:
-            expected_ref = _bounded_text(answers[0].get("ref"), max_length=80)
-            expected_text = _bounded_text(answers[0].get("text"), max_length=1200)
+        if selected_answer is not None:
+            expected_ref = _bounded_text(selected_answer.get("ref"), max_length=80)
+            expected_text = _bounded_text(selected_answer.get("text"), max_length=1200)
             if not expected_ref.isdecimal() or int(expected_ref) <= 0 or not expected_text:
                 raise QuestDialogueError("dialogue_answer_invalid", "dialogue answer identity is invalid")
-            if expected_ref == pending.last_answer_ref:
+            if expected_ref in attempted_refs:
                 raise QuestDialogueError(
                     "dialogue_action_not_advanced",
                     "dialogue still exposes the previously submitted answer",
@@ -285,7 +353,16 @@ class QuestDialogueRuntime:
                 QuestDialogueDecision(
                     QuestDialogueIntent.ANSWER_DIALOG,
                     "npc_quest_action",
-                    _metadata(**common, action="answer", expected_ref=expected_ref, expected_text=expected_text),
+                    _metadata(
+                        **common,
+                        action="answer",
+                        expected_ref=expected_ref,
+                        expected_text=expected_text,
+                        verified_puzzle_step=(pending.puzzle_step if puzzle_answer is not None else None),
+                        puzzle_completed_drum=(puzzle_answer.get("puzzle_completed_drum") if puzzle_answer is not None else None),
+                        puzzle_implicit_completed_drums=(puzzle_answer.get("puzzle_implicit_completed_drums") if puzzle_answer is not None else None),
+                        dialog_choice_fingerprint=choice_fingerprint,
+                    ),
                     "quest_dialogue_answer_failed",
                     pending.objective.quest_id,
                     snapshot_id,
@@ -321,10 +398,35 @@ class QuestDialogueRuntime:
         elif decision.intent is QuestDialogueIntent.OPEN_QUEST:
             updated = replace(pending, quest_opened=True)
         elif decision.intent is QuestDialogueIntent.ANSWER_DIALOG:
+            puzzle_step = pending.puzzle_step
+            if decision.action_metadata.get("verified_puzzle_step") == pending.puzzle_step:
+                puzzle_step += 1
+            completed_drums = pending.puzzle_completed_drums
+            implicit_drums = decision.action_metadata.get("puzzle_implicit_completed_drums")
+            if isinstance(implicit_drums, tuple):
+                completed_drums = (*completed_drums, *(item for item in implicit_drums if isinstance(item, int) and item not in completed_drums))
+            completed_drum = decision.action_metadata.get("puzzle_completed_drum")
+            if isinstance(completed_drum, int) and completed_drum not in completed_drums:
+                completed_drums = (*completed_drums, completed_drum)
+            choice_fingerprint = str(
+                decision.action_metadata.get("dialog_choice_fingerprint") or ""
+            ) or None
+            expected_ref = str(decision.action_metadata.get("expected_ref") or "")
+            attempted_refs = (
+                pending.attempted_answer_refs
+                if choice_fingerprint == pending.dialog_choice_fingerprint
+                else ()
+            )
+            if expected_ref and expected_ref not in attempted_refs:
+                attempted_refs = (*attempted_refs, expected_ref)
             updated = replace(
                 pending,
                 dialog_steps=pending.dialog_steps + 1,
-                last_answer_ref=str(decision.action_metadata.get("expected_ref") or "") or None,
+                puzzle_step=puzzle_step,
+                puzzle_completed_drums=completed_drums,
+                last_answer_ref=expected_ref or None,
+                dialog_choice_fingerprint=choice_fingerprint,
+                attempted_answer_refs=attempted_refs,
             )
         elif decision.intent is QuestDialogueIntent.COMPLETE_STEP:
             updated = replace(
@@ -390,6 +492,18 @@ def _metadata(**values: object) -> Mapping[str, object]:
 
 def _normalized(value: object) -> str:
     return " ".join(str(value or "").casefold().replace("ё", "е").split())
+
+
+def _dialog_choice_fingerprint(actions: tuple[Mapping[str, object], ...]) -> str:
+    identities = sorted(
+        (
+            _bounded_text(action.get("ref"), max_length=80),
+            _normalized(action.get("text")),
+        )
+        for action in actions
+    )
+    material = "\x1e".join(f"{ref}\x1f{text}" for ref, text in identities)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _bounded_text(value: object, *, max_length: int) -> str:

@@ -73,6 +73,7 @@ class BattleSnapshot:
     items: tuple[BattleItem, ...] = field(default_factory=tuple)
     repeated_action_count: int = 0
     damage_boost_active: bool | None = None
+    damage_boost_roll: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ class CombatPolicy:
     prowess_threshold: float = 0.35
     damage_boost_threshold: float = 0.0
     damage_boost_enabled: bool = False
+    damage_boost_use_chance_percent: float = 100.0
     max_repeated_actions: int = 3
     allow_slot_zero: bool = False
     allow_zero_prowess_slot: bool = False
@@ -118,14 +120,26 @@ class CombatPolicy:
         chosen = self._choose_item(items, wanted_kinds)
         if chosen is not None:
             return CombatDecision(CombatIntent.USE_ITEM, f"{self._kind(chosen).value}_threshold", item=chosen)
-        item_waiting = any(self._kind(item) in wanted_kinds and not self._ready(item) for item in allowed_items)
+        # A health/prowess recovery must remain a safety gate while it is on
+        # cooldown.  A damage sphere is different: it is an optional prefix
+        # for an already selected strike.  If it cannot be used right now,
+        # still submit the strike; the game itself safely ignores a skill
+        # whose cooldown has not expired.
+        item_waiting = any(
+            self._kind(item) in wanted_kinds
+            and self._kind(item) is not BattleItemKind.DAMAGE_BOOST
+            and not self._ready(item)
+            for item in allowed_items
+        )
 
-        # Strongest known, explicitly allowlisted strike wins. Readiness is
-        # explicit: a missing flag is never treated as ready.
+        # Submit the strongest explicitly allowlisted non-zero strike without
+        # making the bridge's readiness flag a gate.  The game owns cooldown
+        # validation, and rejecting an early request is harmless; waiting for
+        # a flag which is absent in some battle frames stalls combat entirely.
         skills = [
             skill
             for skill in snapshot.skills
-            if self._skill_allowed(skill, snapshot.resources) and self._ready(skill)
+            if self._skill_allowed(skill, snapshot.resources)
         ]
         skills.sort(key=lambda skill: (-skill.damage, skill.slot, skill.name))
         if skills:
@@ -170,8 +184,14 @@ class CombatPolicy:
         if (
             self.damage_boost_enabled
             and snapshot.damage_boost_active is False
+            and snapshot.damage_boost_roll * 100 < self.damage_boost_use_chance_percent
             and hp_ratio >= self.hp_threshold
             and prowess_ratio >= self.prowess_threshold
+            and any(
+                self._skill_allowed(skill, resources)
+                and skill.damage > self.damage_boost_threshold
+                for skill in snapshot.skills
+            )
         ):
             wanted.append(BattleItemKind.DAMAGE_BOOST)
         return wanted
@@ -211,14 +231,14 @@ class CombatPolicy:
         valid_cooldown = lambda value: value is None or (isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0)
         valid_skills = all(isinstance(skill, AvailableSkill) and isinstance(skill.name, str) and integer(skill.slot) and skill.slot >= 0 and isinstance(skill.damage, (int, float)) and not isinstance(skill.damage, bool) and skill.damage >= 0 and isinstance(skill.ready, (bool, type(None))) and valid_cooldown(skill.cooldown) for skill in snapshot.skills)
         valid_items = all(isinstance(item, BattleItem) and isinstance(item.name, str) and integer(item.slot) and item.slot >= 0 and integer(item.count) and isinstance(item.ready, (bool, type(None))) and valid_cooldown(item.cooldown) for item in snapshot.items)
-        return isinstance(r, BattleResources) and isinstance(snapshot.active, (bool, type(None))) and isinstance(snapshot.finished, (bool, type(None))) and isinstance(snapshot.damage_boost_active, (bool, type(None))) and integer(snapshot.turn) and snapshot.turn >= 0 and integer(snapshot.repeated_action_count) and snapshot.repeated_action_count >= 0 and all(
+        return isinstance(r, BattleResources) and isinstance(snapshot.active, (bool, type(None))) and isinstance(snapshot.finished, (bool, type(None))) and isinstance(snapshot.damage_boost_active, (bool, type(None))) and isinstance(snapshot.damage_boost_roll, (int, float)) and not isinstance(snapshot.damage_boost_roll, bool) and 0 <= snapshot.damage_boost_roll < 1 and integer(snapshot.turn) and snapshot.turn >= 0 and integer(snapshot.repeated_action_count) and snapshot.repeated_action_count >= 0 and all(
             integer(v) and v >= 0 for v in (r.hp, r.max_hp, r.prowess, r.max_prowess) if v is not None
         ) and (r.max_hp is not None and r.max_hp > 0 and r.hp is not None and r.hp <= r.max_hp) and (r.max_prowess is not None and r.max_prowess > 0 and r.prowess is not None and r.prowess <= r.max_prowess) and valid_skills and valid_items and all(
             isinstance(item.kind, (BattleItemKind, str)) and (not isinstance(item.kind, str) or item.kind in {k.value for k in BattleItemKind}) for item in snapshot.items
         )
 
     def _valid_policy(self) -> bool:
-        return 0 <= self.hp_threshold <= 1 and 0 <= self.prowess_threshold <= 1 and self.max_repeated_actions > 0 and self.damage_boost_threshold >= 0 and isinstance(self.damage_boost_enabled, bool)
+        return 0 <= self.hp_threshold <= 1 and 0 <= self.prowess_threshold <= 1 and self.max_repeated_actions > 0 and self.damage_boost_threshold >= 0 and isinstance(self.damage_boost_enabled, bool) and isinstance(self.damage_boost_use_chance_percent, (int, float)) and not isinstance(self.damage_boost_use_chance_percent, bool) and 0 <= self.damage_boost_use_chance_percent <= 100
 
     @staticmethod
     def _unsafe(reason: str) -> CombatDecision:
