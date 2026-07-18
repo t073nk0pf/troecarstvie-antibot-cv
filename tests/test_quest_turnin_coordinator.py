@@ -9,6 +9,10 @@ from src.antibot_cv.automation.browser_injector import InjectorResult
 from src.antibot_cv.automation.config import AutomationConfig, to_plain_dict
 from src.antibot_cv.automation.controller import AutomationController
 from src.antibot_cv.automation.quest_director_policy import QuestRef
+from src.antibot_cv.automation.quest_chat_progress import QuestChatProgressEvidence
+from src.antibot_cv.automation.quest_inventory_guard import (
+    QuestInventoryCompletionEvidence,
+)
 from src.antibot_cv.automation.quest_objective_router import classify_objective
 from src.antibot_cv.automation.quest_turnin_runtime import QuestTurnInPhase
 from src.antibot_cv.automation.state_machine import GameState
@@ -61,6 +65,28 @@ def existing_turn_in_item() -> dict[str, object]:
     }
 
 
+def q304_composite_item() -> dict[str, object]:
+    return {
+        "id": "304",
+        "title": "Цветочная болезнь",
+        "status": "active",
+        "objective": (
+            "Убивая Непобедимых кабанов, получите 5 пузырьков крови, также "
+            "найдите в Пристанище трёх ветров Светящийся мох, в Длани Рода Пятнистый гриб "
+            "и 5 свежих листьев кустарника на Просторах безмолвия. Собрав необходимое, "
+            "возвращайтесь к колдунье Вилене."
+        ),
+        "objectiveKind": "collect",
+        "navigation": [
+            {"text": "Непобедимый кабан", "target": "Непобедимый кабан [5]"},
+            {"text": "Пристанище трёх ветров", "target": "Пристанище трёх ветров"},
+            {"text": "Длани Рода", "target": "Длань Рода"},
+            {"text": "Просторах безмолвия", "target": "Просторы безмолвия"},
+        ],
+        "progress": {"current": 5, "required": 5, "complete": False},
+    }
+
+
 def controller(test_config: AutomationConfig) -> tuple[AutomationController, DryRunActionSink]:
     data = to_plain_dict(test_config)
     data["leveling"] = {**data["leveling"], "autonomous_quest_director": True}
@@ -94,6 +120,65 @@ def test_legacy_completed_lease_blocks_turn_in_without_actions(test_config: Auto
         if event["event_type"] == "quest_turn_in_ref_missing"
     )
     assert json.loads(json.dumps(missing_ref_event, ensure_ascii=False)) == missing_ref_event
+
+
+def test_q304_blood_completion_starts_next_area_object_not_turn_in(
+    test_config: AutomationConfig, monkeypatch,
+) -> None:
+    result, sink = controller(test_config)
+    director = result._quest_director
+    assert director is not None
+    director.begin_active_refresh()
+    director.ingest_active_page(active_page(q304_composite_item()))
+    entry = director.active_catalog.result[0]
+    director.chain.release_completed("246")
+    lease = director.chain.pin_entry(entry, revision=director.active_catalog.revision)
+    result._quest_inventory_terminal_completion_evidence = QuestInventoryCompletionEvidence(
+        "304", "Цветочная болезнь", lease.current_fingerprint,
+        (("Кровь Непобедимого кабана", 5),),
+    )
+    monkeypatch.setattr(result, "_inspect_quest_area_inventory", lambda plan: [
+        {"artAltTitle": "Кровь Непобедимого кабана", "count": 5}
+    ])
+
+    assert result._maybe_begin_quest_turn_in() is False
+    assert result._begin_non_combat_quest_executor("304") is True
+
+    assert result._quest_turn_in.pending is None
+    assert result.state_machine.state is not GameState.STOPPED
+    assert result._quest_area_objects.pending is not None
+    assert result._quest_area_objects.pending.requirement.resource_name == "Светящийся мох"
+    assert [request.action_type for request in sink.requests] == ["open_location_navigator"]
+
+
+def test_q304_terminal_chat_evidence_remains_eligible_for_turn_in(
+    test_config: AutomationConfig,
+) -> None:
+    result, sink = controller(test_config)
+    director = result._quest_director
+    assert director is not None
+    director.begin_active_refresh()
+    director.ingest_active_page(active_page(q304_composite_item()))
+    entry = director.active_catalog.result[0]
+    director.chain.release_completed("246")
+    lease = director.chain.pin_entry(entry, revision=director.active_catalog.revision)
+    director.chain.bind_accepted_ref(
+        QuestRef(
+            "304", "Цветочная болезнь",
+            location="Пристанище трёх ветров", giver_names=("Колдунья Вилена",),
+        )
+    )
+    result._quest_chat_terminal_completion_evidence = QuestChatProgressEvidence(
+        "chat-q304-terminal", "необходимое", "необходимое",
+        "304", "Цветочная болезнь", lease.current_fingerprint, True,
+    )
+
+    assert result._maybe_begin_quest_turn_in() is True
+
+    assert result.state_machine.state is not GameState.STOPPED
+    assert result._quest_turn_in.pending is not None
+    assert result._quest_area_objects.pending is None
+    assert [request.action_type for request in sink.requests] == ["open_location_navigator"]
 
 
 def test_turn_in_plan_after_pin_enters_turn_in_coordinator_not_dialogue(

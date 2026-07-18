@@ -8,6 +8,10 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 from src.antibot_cv.automation.actions import ActionRequest
+from src.antibot_cv.automation.area_object_activity import (
+    AreaObjectPlanStatus,
+    parse_area_object_plan,
+)
 from src.antibot_cv.automation.quest_active_catalog import json_safe_active_value
 from src.antibot_cv.automation.quest_chain_runtime import ChainRefreshState
 from src.antibot_cv.automation.quest_turnin_runtime import (
@@ -50,12 +54,17 @@ class QuestTurnInCoordinatorMixin:
             self, "_quest_inventory_terminal_completion_evidence", None
         )
         completion_evidence = chat_evidence or inventory_evidence
+        area_object_plan = parse_area_object_plan(matches[0])
         terminal_collection_confirmed = bool(
             completion_evidence is not None
             and completion_evidence.quest_id == lease.quest_id
             and completion_evidence.quest_title == lease.quest_title
             and completion_evidence.fingerprint == lease.current_fingerprint
             and completion_evidence.terminal_collection
+            and not (
+                completion_evidence is inventory_evidence
+                and area_object_plan.status is AreaObjectPlanStatus.READY
+            )
         )
         route_plan = classify_objective(matches[0])
         explicit_turn_in = (

@@ -5352,12 +5352,11 @@ def test_quest_inventory_guard_checks_initially_then_after_each_completed_battle
     assert len(sink.requests) == 2
 
 
-def test_quest_inventory_guard_blocks_attack_and_starts_refresh_when_item_exists(
+def test_quest_inventory_item_skips_combat_and_routes_to_turn_in_npc(
     test_config: AutomationConfig,
-    monkeypatch,
 ) -> None:
-    from types import SimpleNamespace
     from src.antibot_cv.automation.config import to_plain_dict
+    from src.antibot_cv.automation.quest_director_runtime import QuestDirectorRuntime
     from src.antibot_cv.automation.quest_objective_runtime import (
         MonsterTarget,
         ObjectiveKind,
@@ -5366,43 +5365,84 @@ def test_quest_inventory_guard_blocks_attack_and_starts_refresh_when_item_exists
 
     data = to_plain_dict(test_config)
     data["dry_run"] = False
+    data["leveling"] = {
+        **data["leveling"],
+        "enabled": True,
+        "autonomous_quest_director": True,
+    }
+    logger = InMemoryEventLogger(dry_run=False)
     controller = AutomationController(
-        AutomationConfig.from_dict(data), sink_mode="replay", logger=InMemoryEventLogger(dry_run=False)
+        AutomationConfig.from_dict(data), sink_mode="replay", logger=logger
     )
     controller.session.requested_cycles = 10
+    controller.current_location_name = "Южная застава"
+    controller.current_page_kind = "quests"
+    controller.state_machine.state = GameState.QUEST_REFRESH_PENDING
+    active_item = {
+        "id": "280",
+        "title": "Фамильная ступка",
+        "status": "active",
+        "objective": (
+            "Добудьте Пояс Кентавра-ветерана и возвращайтесь к разбойнику "
+            "Аскорду в Земли Пращуров."
+        ),
+        "navigation": [{"text": "Земли Пращуров", "target": "Земли Пращуров"}],
+        "progress": {"current": 0, "required": 1, "complete": False},
+    }
+    director = QuestDirectorRuntime(chain_state_path=None)
+    director.begin_active_refresh()
+    active_snapshot = {
+        "loadStatus": "loaded", "mode": "started", "currentPage": 0,
+        "pageCount": 1, "hasNextPage": False, "items": [active_item],
+        "truncated": False,
+    }
+    director.ingest_active_page(active_snapshot)
+    entry = director.active_catalog.result[0]
+    lease = director.chain.pin_entry(entry, revision=director.active_catalog.revision)
     active = QuestObjective(
         ObjectiveKind.MONSTER_HUNT, "280", "Фамильная ступка",
-        "Добудьте Пояс Кентавра-ветерана и возвращайтесь к Аскорду.",
-        "fingerprint-280", MonsterTarget("Свирепый кентавр [5]", "Свирепый кентавр", 5),
+        active_item["objective"], lease.current_fingerprint,
+        MonsterTarget("Свирепый кентавр [5]", "Свирепый кентавр", 5),
         "Свирепых кентавров", None, None, False, 0,
     )
-    controller._quest_director = SimpleNamespace(
-        active_objective=active, active_snapshot_fresh=True,
-        active_catalog=SimpleNamespace(complete=True),
-    )
+    director.active_objective = active
+    controller._quest_director = director
     controller._quest_target_names = (active.monster.name,)
     controller._quest_target_levels = (5,)
     controller._quest_target_specs = ((active.monster.name, 5),)
 
     class InventorySink:
-        last_quest_inventory_snapshot = None
+        def __init__(self) -> None:
+            self.last_quest_inventory_snapshot = None
+            self.requests = []
 
         def execute(self, request) -> bool:
-            self.last_quest_inventory_snapshot = {
-                "ok": True, "category": "quest", "categoryConfirmed": True,
-                "truncated": False,
-                "sample": [{"artAltTitle": "Пояс Кентавра-ветерана", "count": 1}],
-            }
+            self.requests.append(request)
+            if request.action_type == "inspect_quest_inventory":
+                self.last_quest_inventory_snapshot = {
+                    "ok": True, "category": "quest", "categoryConfirmed": True,
+                    "truncated": False,
+                    "sample": [{"artAltTitle": "Пояс Кентавра-ветерана", "count": 1}],
+                }
             return True
 
-    controller.action_executor.sink = InventorySink()
-    refreshed = []
-    monkeypatch.setattr(controller, "_maybe_start_quest_refresh", lambda: refreshed.append(True) or True)
+    sink = InventorySink()
+    controller.action_executor.sink = sink
 
     assert controller._quest_inventory_allows_attack() is False
     assert controller._quest_target_names == ()
     assert controller._quest_inventory_terminal_completion_evidence.quest_id == "280"
-    assert refreshed == [True]
+    director.begin_active_refresh()
+    director.ingest_active_page(active_snapshot)
+    assert controller._maybe_begin_quest_turn_in() is True
+
+    action_types = [request.action_type for request in sink.requests]
+    assert action_types == ["inspect_quest_inventory", "open_location_navigator"]
+    assert not any("attack" in action_type or "combat" in action_type for action_type in action_types)
+    assert controller._quest_turn_in.pending is not None
+    assert controller._quest_turn_in.pending.objective.giver_name == "Разбойник Аскорд"
+    assert controller._quest_turn_in.pending.objective.location == "Земли Пращуров"
+    assert sink.requests[-1].metadata["reason"] == "quest_turn_in_route"
 
 
 def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(

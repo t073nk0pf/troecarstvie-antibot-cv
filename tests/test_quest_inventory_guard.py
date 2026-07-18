@@ -9,14 +9,20 @@ from src.antibot_cv.automation.quest_objective_runtime import (
 )
 
 
-def objective(text: str) -> QuestObjective:
+def objective(
+    text: str,
+    *,
+    quest_id: str = "280",
+    quest_title: str = "Фамильная ступка",
+    monster_name: str = "Свирепый кентавр",
+) -> QuestObjective:
     return QuestObjective(
         ObjectiveKind.MONSTER_HUNT,
-        "280",
-        "Фамильная ступка",
+        quest_id,
+        quest_title,
         text,
         "fingerprint-280",
-        MonsterTarget("Свирепый кентавр [5]", "Свирепый кентавр", 5),
+        MonsterTarget(f"{monster_name} [5]", monster_name, 5),
         "Свирепых кентавров",
         None,
         None,
@@ -136,6 +142,110 @@ def test_short_inflected_trophy_does_not_guess_between_two_sources() -> None:
 
     assert result.confirmed is True
     assert result.complete is False
+
+
+def test_real_q304_counted_blood_is_not_replaced_by_description_bound_moss() -> None:
+    current = objective(
+        "Убивая Непобедимых кабанов, получите 5 пузырьков крови, также найдите "
+        "в Пристанище трёх ветров Светящийся мох, в Длани Рода Пятнистый гриб и 5 свежих "
+        "листьев кустарника на Просторах безмолвия. Собрав необходимое, возвращайтесь к колдунье Вилене.",
+        quest_id="304",
+        quest_title="Цветочная болезнь",
+        monster_name="Непобедимый кабан",
+    )
+    result = evaluate_quest_inventory(
+        current,
+        {
+            "ok": True,
+            "category": "quest",
+            "categoryConfirmed": True,
+            "truncated": False,
+            "items": [
+                {"artAltTitle": "Кровь Непобедимого кабана", "count": 5},
+                {
+                    "artAltTitle": "Светящийся мох",
+                    "artAltDescription": "Используется в квесте «Цветочная болезнь»",
+                    "count": 1,
+                },
+            ],
+        },
+    )
+
+    assert result.complete is True
+    assert [(item.name, item.required) for item in result.requirements] == [
+        ("Кровь Непобедимого кабана", 5)
+    ]
+
+
+def test_q304_does_not_bind_single_blood_trophy_from_wrong_monster() -> None:
+    current = objective(
+        "Убивая Непобедимых кабанов, получите 5 пузырьков крови и возвращайтесь к колдунье.",
+        quest_id="304",
+        quest_title="Цветочная болезнь",
+        monster_name="Непобедимый кабан",
+    )
+    result = evaluate_quest_inventory(
+        current, snapshot("Кровь Свирепого кабана", 5)
+    )
+
+    assert result.confirmed is True
+    assert result.complete is False
+    assert [(item.name, item.required) for item in result.requirements] == [
+        ("пузырьков крови", 5)
+    ]
+
+
+def test_q304_does_not_bind_blood_trophy_missing_monster_qualifier() -> None:
+    current = objective(
+        "Убивая Непобедимых кабанов, получите 5 пузырьков крови и возвращайтесь к колдунье.",
+        quest_id="304",
+        quest_title="Цветочная болезнь",
+        monster_name="Непобедимый кабан",
+    )
+
+    result = evaluate_quest_inventory(current, snapshot("Кровь кабана", 5))
+
+    assert result.complete is False
+
+
+def test_q304_does_not_take_blood_qualifier_from_area_object_wording() -> None:
+    current = objective(
+        "Убивая Непобедимых кабанов, получите 5 пузырьков крови, также найдите "
+        "Светящийся мох и 5 свежих листьев кустарника. Собрав необходимое, возвращайтесь к колдунье.",
+        quest_id="304",
+        quest_title="Цветочная болезнь",
+        monster_name="Непобедимый кабан",
+    )
+
+    result = evaluate_quest_inventory(
+        current, snapshot("Кровь Свежего кабана", 5)
+    )
+
+    assert result.complete is False
+
+
+def test_generic_blood_requirement_does_not_guess_between_qualified_trophies() -> None:
+    current = objective(
+        "Убивая кабанов, получите 5 пузырьков крови и возвращайтесь к колдунье."
+    )
+    result = evaluate_quest_inventory(
+        current,
+        {
+            "ok": True,
+            "category": "quest",
+            "categoryConfirmed": True,
+            "truncated": False,
+            "items": [
+                {"artAltTitle": "Кровь Непобедимого кабана", "count": 5},
+                {"artAltTitle": "Кровь Свирепого кабана", "count": 5},
+            ],
+        },
+    )
+
+    assert result.complete is False
+    assert [(item.name, item.required) for item in result.requirements] == [
+        ("пузырьков крови", 5)
+    ]
 
 
 def test_inventory_binding_covers_common_case_and_number_forms() -> None:

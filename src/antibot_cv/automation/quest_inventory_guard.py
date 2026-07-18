@@ -100,7 +100,7 @@ def evaluate_quest_inventory(
             return QuestInventoryGuardResult(False, False, requirements, (), "quest_inventory_count_invalid")
         items.append({"name": name.strip(), "count": count})
         semantic_items.append((name.strip(), count, description if isinstance(description, str) else ""))
-    if len(requirements) == 1:
+    if len(requirements) == 1 and _COUNTED.search(" ".join(objective.objective.split())) is None:
         description_matches = [
             name
             for name, _, description in semantic_items
@@ -119,7 +119,9 @@ def evaluate_quest_inventory(
     # бивней"), while the backpack stores the concrete trophy title
     # ("Бивень кабана-секача"). Bind that requirement only when the lexical
     # match is unique; ambiguity remains fail-closed.
-    requirements = _resolve_qualified_inventory_names(requirements, semantic_items)
+    requirements = _resolve_qualified_inventory_names(
+        requirements, semantic_items, objective.monster.name
+    )
     if not requirements:
         matched = [
             (name, count)
@@ -162,14 +164,24 @@ def evaluate_quest_inventory(
 def _resolve_qualified_inventory_names(
     requirements: Sequence[GatheringRequirement],
     items: Sequence[tuple[str, int, str]],
+    monster_name: str,
 ) -> tuple[GatheringRequirement, ...]:
     resolved: list[GatheringRequirement] = []
+    monster_tokens = _lexemes(monster_name)
     for requirement in requirements:
-        requirement_tokens = _lexemes(requirement.name)
+        # Container/measure words describe the required quantity, not the
+        # trophy title stored by inventory (for example, "пузырьков крови").
+        requirement_tokens = tuple(
+            token
+            for token in _lexemes(requirement.name)
+            if not token.startswith("пузыр")
+        )
         candidates = [
             name
             for name, _, _ in items
-            if _qualified_name_matches(requirement_tokens, _lexemes(name))
+            if _qualified_name_matches(
+                requirement_tokens, _lexemes(name), monster_tokens
+            )
         ]
         if len(candidates) == 1:
             resolved.append(GatheringRequirement(candidates[0], requirement.required))
@@ -179,17 +191,33 @@ def _resolve_qualified_inventory_names(
 
 
 def _qualified_name_matches(
-    requirement_tokens: Sequence[str], item_tokens: Sequence[str]
+    requirement_tokens: Sequence[str],
+    item_tokens: Sequence[str],
+    monster_tokens: Sequence[str],
 ) -> bool:
     if not requirement_tokens or not item_tokens:
         return False
     if len(requirement_tokens) > 1:
-        return all(
+        requirement_matches = all(
             any(_lexeme_equal(token, candidate) for candidate in item_tokens)
             for token in requirement_tokens
         )
-    return any(
-        _lexeme_equal(requirement_tokens[0], candidate) for candidate in item_tokens
+    else:
+        requirement_matches = any(
+            _lexeme_equal(requirement_tokens[0], candidate) for candidate in item_tokens
+        )
+    if not requirement_matches:
+        return False
+    if not any(token == "кров" for token in requirement_tokens):
+        return True
+    qualifiers = tuple(
+        token
+        for token in item_tokens
+        if not any(_lexeme_equal(token, required) for required in requirement_tokens)
+    )
+    return len(qualifiers) == len(monster_tokens) and all(
+        any(_lexeme_equal(token, monster) for monster in monster_tokens)
+        for token in qualifiers
     )
 
 
@@ -256,7 +284,7 @@ def _stem_word(value: str) -> str:
     normalized = value.casefold().replace("ё", "е")
     endings = (
         "иями", "ями", "ами", "иями", "его", "ого", "ему", "ому", "ией", "ией",
-        "иях", "ах", "ях", "ов", "ев", "ей", "ия", "ие", "ию", "иям", "ием",
+        "иях", "ах", "ях", "ов", "ев", "ей", "ых", "их", "ия", "ие", "ию", "иям", "ием",
         "ой", "ей", "ый", "ий", "ая", "яя", "ую", "юю", "ом", "ем", "ам", "ям",
         "ы", "и", "а", "я", "у", "ю", "е", "о", "ь", "й",
     )
