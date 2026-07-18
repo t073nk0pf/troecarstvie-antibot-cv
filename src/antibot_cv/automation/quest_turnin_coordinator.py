@@ -13,6 +13,7 @@ from src.antibot_cv.automation.area_object_activity import (
     parse_area_object_plan,
 )
 from src.antibot_cv.automation.quest_active_catalog import json_safe_active_value
+from src.antibot_cv.automation.quest_compiler import QuestCompileStatus, compile_quest_plan
 from src.antibot_cv.automation.quest_chain_runtime import ChainRefreshState
 from src.antibot_cv.automation.quest_turnin_runtime import (
     QuestTurnInError,
@@ -25,6 +26,11 @@ from src.antibot_cv.automation.quest_objective_router import (
     ObjectiveRouteKind,
     ObjectiveRouteStatus,
     classify_objective,
+)
+from src.antibot_cv.automation.quest_plan_evaluator import evaluate_quest_plan
+from src.antibot_cv.automation.quest_turnin_admission import (
+    TurnInAdmissionStatus,
+    admit_turn_in,
 )
 from src.antibot_cv.automation.runtime_helpers import same_location_name
 from src.antibot_cv.automation.state_machine import GameState
@@ -48,30 +54,89 @@ class QuestTurnInCoordinatorMixin:
         matches = [entry for entry in director.active_catalog.result if entry.id == lease.quest_id]
         if len(matches) != 1:
             return False
-        progress = matches[0].data.get("progress")
-        chat_evidence = getattr(self, "_quest_chat_terminal_completion_evidence", None)
-        inventory_evidence = getattr(
-            self, "_quest_inventory_terminal_completion_evidence", None
+        semantic_slice = (
+            self.config.leveling.quest_engine_mode == "q280_q304"
+            and lease.quest_id in {"280", "304"}
         )
-        completion_evidence = chat_evidence or inventory_evidence
-        area_object_plan = parse_area_object_plan(matches[0])
-        terminal_collection_confirmed = bool(
-            completion_evidence is not None
-            and completion_evidence.quest_id == lease.quest_id
-            and completion_evidence.quest_title == lease.quest_title
-            and completion_evidence.fingerprint == lease.current_fingerprint
-            and completion_evidence.terminal_collection
-            and not (
-                completion_evidence is inventory_evidence
-                and area_object_plan.status is AreaObjectPlanStatus.READY
+        admission_token = None
+        if semantic_slice:
+            entry = matches[0]
+            compiled = compile_quest_plan(entry)
+            context = getattr(self, "_quest_semantic_evaluation_context", None)
+            authority = getattr(self, "_quest_active_catalog_authority", None)
+            quest_ref = lease.accepted_ref
+            if (
+                compiled.status is not QuestCompileStatus.READY
+                or compiled.plan is None
+                or context is None
+                or authority is None
+                or quest_ref is None
+            ):
+                self._stop_leveling_unsafe("quest_turn_in_semantic_context_missing")
+                return True
+            evaluation = evaluate_quest_plan(
+                compiled.plan,
+                tuple(getattr(self, "_quest_semantic_evidence", ())),
+                capabilities=(
+                    "kill", "combat_drop", "area_object", "gathering", "purchase",
+                    "visit", "interact_npc", "turn_in",
+                ),
+                context=context,
             )
-        )
+            admission = admit_turn_in(
+                compiled.plan,
+                evaluation,
+                lease,
+                entry,
+                quest_ref,
+                context,
+                authority,
+                now=time.time(),
+            )
+            self.logger.log_event(
+                "quest_turn_in_semantic_admission",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                quest_id=entry.id,
+                status=admission.status.value,
+                reason=admission.reason,
+            )
+            if admission.status is TurnInAdmissionStatus.UNSAFE:
+                self._stop_leveling_unsafe(
+                    f"quest_turn_in_semantic_admission:{admission.reason}"
+                )
+                return True
+            if admission.status is TurnInAdmissionStatus.BLOCKED:
+                return True
+            admission_token = admission.token
+        progress = matches[0].data.get("progress")
+        terminal_collection_confirmed = False
+        if not semantic_slice:
+            chat_evidence = getattr(
+                self, "_quest_chat_terminal_completion_evidence", None
+            )
+            inventory_evidence = getattr(
+                self, "_quest_inventory_terminal_completion_evidence", None
+            )
+            completion_evidence = chat_evidence or inventory_evidence
+            area_object_plan = parse_area_object_plan(matches[0])
+            terminal_collection_confirmed = bool(
+                completion_evidence is not None
+                and completion_evidence.quest_id == lease.quest_id
+                and completion_evidence.quest_title == lease.quest_title
+                and completion_evidence.fingerprint == lease.current_fingerprint
+                and completion_evidence.terminal_collection
+                and not (
+                    completion_evidence is inventory_evidence
+                    and area_object_plan.status is AreaObjectPlanStatus.READY
+                )
+            )
         route_plan = classify_objective(matches[0])
         explicit_turn_in = (
             route_plan.status is ObjectiveRouteStatus.READY
             and route_plan.kind is ObjectiveRouteKind.TURN_IN
         )
-        if not terminal_collection_confirmed and not explicit_turn_in and (
+        if not semantic_slice and not terminal_collection_confirmed and not explicit_turn_in and (
             not isinstance(progress, Mapping) or progress.get("complete") is not True
         ):
             return False
@@ -132,6 +197,7 @@ class QuestTurnInCoordinatorMixin:
                 quest_ref=lease.accepted_ref,
                 already_at_location=same_location_name(self.current_location_name, lease.accepted_ref.location),
                 terminal_collection_confirmed=terminal_collection_confirmed,
+                admission_token=admission_token,
             )
         except (QuestTurnInError, RuntimeError, ValueError) as exc:
             reason = exc.unsafe_reason if isinstance(exc, QuestTurnInError) else str(exc)

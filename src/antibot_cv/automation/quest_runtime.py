@@ -19,6 +19,9 @@ from src.antibot_cv.automation.quest_catalog_navigation import (
 from src.antibot_cv.automation.quest_active_catalog_navigation import (
     settle_active_catalog_snapshot,
 )
+from src.antibot_cv.automation.quest_catalog_authority_runtime import (
+    QuestCatalogAuthorityRuntimeMixin,
+)
 from src.antibot_cv.automation.quest_acceptance_coordinator import QuestAcceptanceCoordinatorMixin
 from src.antibot_cv.automation.quest_chat_progress_coordinator import (
     QuestChatProgressCoordinatorMixin,
@@ -80,6 +83,7 @@ from src.antibot_cv.automation.quest_refresh_runtime import QuestRefreshRuntimeM
 
 
 class QuestRuntimeMixin(
+    QuestCatalogAuthorityRuntimeMixin,
     QuestRefreshRuntimeMixin,
     QuestOrderedHandoffCoordinatorMixin,
     QuestChatProgressCoordinatorMixin,
@@ -168,6 +172,7 @@ class QuestRuntimeMixin(
         self._quest_active_snapshot_requested = False
         self._quest_active_page_requested: int | None = None
         self._quest_active_request_snapshot_id: str | None = None
+        self._init_quest_catalog_authority_runtime()
         self._quest_director_next_farm_refresh_cycle: int | None = None
         self._last_quest_director_key: tuple[object, ...] | None = None
         self._quest_intake = QuestIntakeRuntime()
@@ -194,6 +199,16 @@ class QuestRuntimeMixin(
 
         self._quest_area_objects = QuestAreaObjectRuntime()
 
+    def _request_active_quest_snapshot(self, reason: str) -> bool:
+        """Invalidate semantic authority when a new active refresh begins."""
+
+        if (
+            self.config.leveling.quest_engine_mode != "legacy"
+            and not self._quest_active_snapshot_requested
+        ):
+            self._invalidate_quest_active_catalog_authority()
+        return super()._request_active_quest_snapshot(reason)
+
     def _validate_route_coordinator_binding(
         self,
         recovery_kind: str | None,
@@ -201,7 +216,7 @@ class QuestRuntimeMixin(
     ) -> bool:
         """Require an exact typed coordinator lease before resuming a quest route."""
 
-        if recovery_kind not in {"quest_accept", "quest_dialogue", "quest_turn_in", "quest_ordered_handoff"}:
+        if recovery_kind not in {"quest_accept", "quest_area_object", "quest_dialogue", "quest_turn_in", "quest_ordered_handoff"}:
             if recovery_kind != "quest_location":
                 return True
         binding_error = self._route_arrival_binding_error(recovery_kind, destination_name)
@@ -209,6 +224,7 @@ class QuestRuntimeMixin(
             return True
         reason = {
             "quest_accept": "quest_accept_route_binding_mismatch",
+            "quest_area_object": "quest_area_object_route_binding_mismatch",
             "quest_dialogue": "quest_dialogue_route_binding_mismatch",
             "quest_turn_in": "quest_turn_in_route_binding_mismatch",
             "quest_ordered_handoff": "quest_ordered_handoff_route_binding_mismatch",
@@ -229,6 +245,8 @@ class QuestRuntimeMixin(
             route_link_label=self._quest_route_link_label,
             target_routes_by_monster=self._quest_target_routes,
             route_locations=self._quest_route_locations,
+            area_object_pending=self._quest_area_objects.pending,
+            active_catalog_authority=self._quest_active_catalog_authority,
         )
         return validate_quest_route_binding(evidence)
 
@@ -485,6 +503,15 @@ class QuestRuntimeMixin(
                     or snapshot_id == self._quest_active_request_snapshot_id
                 ):
                     return
+                authority_error = self._record_quest_active_catalog_authority_page(
+                    page=page,
+                    pending_navigation=pending_active_navigation,
+                    evidence=active_evidence,
+                    quest_data=quest_data,
+                )
+                if authority_error is not None:
+                    self._stop_leveling_unsafe(authority_error)
+                    return
                 next_page = director.ingest_active_page(quest_data)
                 if pending_active_navigation is not None:
                     director.chain.clear_active_catalog_navigation(pending_active_navigation)
@@ -494,6 +521,7 @@ class QuestRuntimeMixin(
                 self._quest_active_navigation_retry_monotonic = 0.0
                 if next_page is None:
                     self._quest_active_snapshot_requested = False
+                    self._seal_quest_active_catalog_authority()
                     generated_at = _snapshot_epoch_seconds(quest_data.get("generatedAt"))
                     if generated_at is not None:
                         self._ordered_handoff_active_snapshot_id = snapshot_id

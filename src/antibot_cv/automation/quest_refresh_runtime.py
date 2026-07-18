@@ -56,11 +56,9 @@ from src.antibot_cv.automation.gathering_activity_runtime import (
     GatheringPlanStatus,
     parse_gathering_plan,
 )
-from src.antibot_cv.automation.area_object_activity import (
-    AreaObjectPlanStatus,
-    parse_area_object_plan,
-)
+from src.antibot_cv.automation.area_object_activity import AreaObjectPlanStatus, parse_area_object_plan
 from src.antibot_cv.automation.quest_area_object_runtime import AreaObjectPhase
+from src.antibot_cv.automation.quest_semantic_area_runtime import QuestSemanticAreaRuntimeMixin
 from src.antibot_cv.automation.quest_policy import (
     Quest as PolicyQuest,
     QuestDecision as PolicyQuestDecision,
@@ -82,7 +80,7 @@ from src.antibot_cv.automation.runtime_helpers import (
 from src.antibot_cv.automation.state_machine import GameState
 
 
-class QuestRefreshRuntimeMixin:
+class QuestRefreshRuntimeMixin(QuestSemanticAreaRuntimeMixin):
     """Coordinate quest catalog refresh and non-combat objective execution."""
 
     def _maybe_start_quest_refresh(self) -> bool:
@@ -644,7 +642,7 @@ class QuestRefreshRuntimeMixin:
             return self._defer_active_quest(quest_id, "gathering_node_discovery_required")
         return self._defer_active_quest(quest_id, f"gathering_plan:{plan.reason}")
 
-    def _quest_area_inventory_items(self) -> list[dict[str, object]] | None:
+    def _quest_area_inventory_items(self, plan) -> list[dict[str, object]] | None:
         sink = self.action_executor.sink
         snapshot = getattr(sink, "last_quest_inventory_snapshot", None)
         if not isinstance(snapshot, dict) or snapshot.get("ok") is not True:
@@ -652,9 +650,14 @@ class QuestRefreshRuntimeMixin:
         if snapshot.get("category") != "quest" or snapshot.get("categoryConfirmed") is not True:
             return None
         items = snapshot.get("items")
-        return list(items) if isinstance(items, list) else None
+        if not isinstance(items, list):
+            return None
+        if not self._record_quest_area_inventory_evidence(plan, snapshot, items):
+            return None
+        return list(items)
 
     def _inspect_quest_area_inventory(self, plan) -> list[dict[str, object]] | None:
+        authority = getattr(self, "_quest_active_catalog_authority", None)
         request = ActionRequest(
             "inspect_quest_inventory",
             cycle_id=self.session.cycle_id,
@@ -663,6 +666,8 @@ class QuestRefreshRuntimeMixin:
             metadata={
                 "quest_id": plan.quest_id,
                 "quest_title": plan.quest_title,
+                "causal_baseline": str(getattr(authority, "causal_baseline", "") or ""),
+                "minimum_revision": getattr(authority, "revision", None),
                 "names": [item.resource_name for item in plan.requirements],
                 "inventory_open_delay_ms": self.config.item_recovery.inventory_open_delay_ms,
                 "quest_category_load_delay_ms": 1500,
@@ -671,7 +676,7 @@ class QuestRefreshRuntimeMixin:
         )
         if not self.action_executor.execute(request):
             return None
-        return self._quest_area_inventory_items()
+        return self._quest_area_inventory_items(plan)
 
     def _begin_quest_area_object_executor(self, plan) -> bool:
         items = self._inspect_quest_area_inventory(plan)
@@ -686,7 +691,14 @@ class QuestRefreshRuntimeMixin:
             quest_title=plan.quest_title, resource=pending.requirement.resource_name,
             required=pending.requirement.required, location=pending.requirement.location,
         )
+        if not self._quest_area_semantic_binding_valid(plan):
+            self._quest_area_objects.pending = None
+            return self._stop_leveling_unsafe("quest_area_object_semantic_admission_denied")
         if _same_location_name(self.current_location_name, pending.requirement.location):
+            if not self._validate_route_coordinator_binding(
+                "quest_area_object", pending.requirement.location,
+            ):
+                return True
             return self._on_quest_area_object_route_arrived("quest_area_object_already_local")
         return self._start_location_route(
             pending.requirement.location,
@@ -716,6 +728,8 @@ class QuestRefreshRuntimeMixin:
             return True
         if self.current_page_kind != "area":
             return True
+        if not self._quest_area_semantic_binding_valid(pending.plan):
+            return self._stop_leveling_unsafe("quest_area_object_semantic_evidence_unbound")
         request = ActionRequest(
             "area_object_snapshot", cycle_id=self.session.cycle_id,
             battle_id=self.session.battle_id, dry_run=self.config.dry_run,

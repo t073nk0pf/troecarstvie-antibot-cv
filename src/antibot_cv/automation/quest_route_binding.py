@@ -11,7 +11,14 @@ from src.antibot_cv.automation.runtime_helpers import (
 
 
 QUEST_ROUTE_KINDS = frozenset(
-    {"quest_accept", "quest_dialogue", "quest_location", "quest_turn_in", "quest_ordered_handoff"}
+    {
+        "quest_accept",
+        "quest_area_object",
+        "quest_dialogue",
+        "quest_location",
+        "quest_turn_in",
+        "quest_ordered_handoff",
+    }
 )
 
 
@@ -41,6 +48,10 @@ class QuestRouteBindingEvidence:
     navigator_label: str | None = None
     target_routes: tuple[str, ...] = ()
     route_locations: tuple[str, ...] = ()
+    authority_present: bool = False
+    authority_complete: bool = False
+    authority_plan_fingerprint: str | None = None
+    authority_lease_fingerprint: str | None = None
 
 
 def validate_quest_route_binding(evidence: QuestRouteBindingEvidence) -> str | None:
@@ -73,6 +84,28 @@ def validate_quest_route_binding(evidence: QuestRouteBindingEvidence) -> str | N
         return None
     if evidence.lease is None:
         return "lease_missing"
+    if evidence.kind == "quest_area_object":
+        if evidence.phase != "route" or evidence.pending is None:
+            return "area_object_phase_mismatch"
+        if (
+            not evidence.pending.quest_id
+            or not evidence.pending.title
+            or not evidence.lease.quest_id
+            or not evidence.lease.title
+            or evidence.lease.quest_id != evidence.pending.quest_id
+            or evidence.lease.title != evidence.pending.title
+            or not same_location_name(evidence.target, evidence.pending.location)
+        ):
+            return "area_object_identity_mismatch"
+        if (
+            not evidence.authority_present
+            or not evidence.authority_complete
+            or not evidence.authority_plan_fingerprint
+            or not evidence.lease.fingerprint
+            or evidence.authority_lease_fingerprint != evidence.lease.fingerprint
+        ):
+            return "area_object_authority_mismatch"
+        return None
     if evidence.kind == "quest_ordered_handoff":
         if evidence.pending is None:
             return "ordered_handoff_cursor_missing"
@@ -141,6 +174,8 @@ def route_binding_evidence(
     target_routes_by_monster: object,
     route_locations: object,
     ordered_handoff_cursor: object = None,
+    area_object_pending: object = None,
+    active_catalog_authority: object = None,
 ) -> QuestRouteBindingEvidence:
     """Adapt coordinator-owned runtime records into immutable validation evidence."""
 
@@ -175,6 +210,29 @@ def route_binding_evidence(
         title_attr="quest_title",
         fingerprint_attr="current_fingerprint",
     )
+    if normalized_kind == "quest_area_object":
+        plan = getattr(area_object_pending, "plan", None)
+        requirement = getattr(area_object_pending, "requirement", None)
+        return QuestRouteBindingEvidence(
+            **base,
+            phase=_phase(area_object_pending),
+            pending=(
+                None if plan is None or requirement is None else RouteIdentity(
+                    quest_id=_text(getattr(plan, "quest_id", None)),
+                    title=_text(getattr(plan, "quest_title", None)),
+                    location=_text(getattr(requirement, "location", None)),
+                )
+            ),
+            lease=lease,
+            authority_present=active_catalog_authority is not None,
+            authority_complete=getattr(active_catalog_authority, "complete", None) is True,
+            authority_plan_fingerprint=_text(
+                getattr(active_catalog_authority, "plan_fingerprint", None)
+            ),
+            authority_lease_fingerprint=_text(
+                getattr(active_catalog_authority, "lease_fingerprint", None)
+            ),
+        )
     if normalized_kind == "quest_ordered_handoff":
         return QuestRouteBindingEvidence(
             **base,

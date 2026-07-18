@@ -155,6 +155,7 @@ class LevelingConfig:
     quest_refresh_timeout_ms: int = 10000
     auto_navigate_quest_targets: bool = False
     autonomous_quest_director: bool = False
+    quest_engine_mode: str = "legacy"
     pinned_quest_id: str = ""
     ignored_quest_ids: tuple[str, ...] = ()
     prefer_active_quests: bool = False
@@ -387,6 +388,10 @@ def _build_leveling_config(raw: dict[str, Any]) -> LevelingConfig:
         data["auto_target_level_offsets"] = tuple(int(value) for value in data["auto_target_level_offsets"])
     if "ignored_quest_ids" in data:
         data["ignored_quest_ids"] = tuple(str(value).strip() for value in data["ignored_quest_ids"] if str(value).strip())
+    quest_engine_mode = str(data.get("quest_engine_mode", "legacy")).strip()
+    if quest_engine_mode not in {"legacy", "shadow", "q280_q304"}:
+        raise ValueError("leveling.quest_engine_mode must be one of: legacy, shadow, q280_q304")
+    data["quest_engine_mode"] = quest_engine_mode
     return LevelingConfig(**data)
 
 

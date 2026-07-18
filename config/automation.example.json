@@ -117,6 +117,7 @@
     "quest_refresh_timeout_ms": 10000,
     "auto_navigate_quest_targets": false,
     "autonomous_quest_director": false,
+    "quest_engine_mode": "legacy",
     "pinned_quest_id": "",
     "quest_refresh_every_completed": 5,
     "quest_catalog_max_pages": 20,

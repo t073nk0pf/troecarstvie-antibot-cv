@@ -597,6 +597,8 @@ def _apply_runtime_overrides(config: AutomationConfig, overrides: dict[str, obje
         leveling["autonomous_quest_director"] = autonomous_quest_director
         if autonomous_quest_director:
             leveling["enabled"] = True
+    if "questEngineMode" in overrides:
+        leveling["quest_engine_mode"] = str(overrides.get("questEngineMode") or "").strip()
     if "pinnedQuestId" in overrides:
         pinned_quest_id = str(overrides.get("pinnedQuestId") or "").strip()
         if pinned_quest_id and (not pinned_quest_id.isdecimal() or int(pinned_quest_id) <= 0):

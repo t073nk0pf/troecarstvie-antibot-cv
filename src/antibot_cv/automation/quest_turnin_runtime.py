@@ -23,6 +23,7 @@ from src.antibot_cv.automation.quest_objective_router import (
     ObjectiveRouteStatus,
     classify_objective,
 )
+from src.antibot_cv.automation.quest_turnin_admission import TurnInAdmissionToken
 
 
 class QuestTurnInPhase(str, Enum):
@@ -92,6 +93,7 @@ class QuestTurnInRuntime:
         quest_ref: QuestRef,
         already_at_location: bool,
         terminal_collection_confirmed: bool = False,
+        admission_token: TurnInAdmissionToken | None = None,
     ) -> PendingQuestTurnIn:
         if self.pending is not None:
             raise RuntimeError("quest turn-in is already in progress")
@@ -100,6 +102,7 @@ class QuestTurnInRuntime:
             lease=lease,
             quest_ref=quest_ref,
             terminal_collection_confirmed=terminal_collection_confirmed,
+            admission_token=admission_token,
         )
         self.pending = PendingQuestTurnIn(
             objective,
@@ -350,9 +353,31 @@ def _turn_in_objective(
     lease: QuestChainLease,
     quest_ref: QuestRef,
     terminal_collection_confirmed: bool = False,
+    admission_token: TurnInAdmissionToken | None = None,
 ) -> QuestTurnInObjective:
     if entry.id != lease.quest_id or entry.title != lease.quest_title or entry.id != quest_ref.id or entry.title != quest_ref.title:
         raise QuestTurnInError("turn_in_identity_mismatch", "turn-in identities do not agree")
+    semantic_admitted = admission_token is not None
+    if semantic_admitted:
+        if not isinstance(admission_token, TurnInAdmissionToken):
+            raise QuestTurnInError("turn_in_admission_invalid", "semantic admission token is invalid")
+        if (
+            admission_token.quest_id != entry.id
+            or admission_token.quest_title != entry.title
+            or admission_token.quest_id != lease.quest_id
+            or admission_token.quest_title != lease.quest_title
+            or not admission_token.plan_fingerprint
+            or not admission_token.turn_in_requirement_id
+            or not admission_token.catalog_snapshot_id
+            or admission_token.catalog_revision < lease.selected_revision
+            or admission_token.lease_fingerprint != lease.current_fingerprint
+            or lease.accepted_ref != quest_ref
+            or lease.turn_in_ref_fingerprint != lease.current_fingerprint
+        ):
+            raise QuestTurnInError(
+                "turn_in_admission_mismatch",
+                "semantic admission token does not match the exact entry, lease, and reference",
+            )
     progress = entry.data.get("progress")
     progress_complete = isinstance(progress, Mapping) and progress.get("complete") is True
     route_plan = classify_objective(entry)
@@ -360,7 +385,7 @@ def _turn_in_objective(
         route_plan.status is ObjectiveRouteStatus.READY
         and route_plan.kind is ObjectiveRouteKind.TURN_IN
     )
-    if not terminal_collection_confirmed and not progress_complete and not explicit_turn_in:
+    if not semantic_admitted and not terminal_collection_confirmed and not progress_complete and not explicit_turn_in:
         raise QuestTurnInError("turn_in_objective_not_complete", "quest objective is not confirmed complete")
     fingerprint, reason = quest_step_fingerprint(entry)
     if fingerprint is None or fingerprint != lease.current_fingerprint:

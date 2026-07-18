@@ -44,6 +44,9 @@ def test_live_quest_inventory_inspection_does_not_reopen_hunt_before_validation(
     calls: list[str] = []
 
     class FakeInjector:
+        def client_snapshot(self, client_id: str | None = None) -> dict[str, object]:
+            return {"client_id": client_id, "profile_id": "profile-a", "tab_id": 17}
+
         def execute(
             self,
             command: str,
@@ -78,6 +81,98 @@ def test_live_quest_inventory_inspection_does_not_reopen_hunt_before_validation(
     assert calls == ["inventory_snapshot"]
     assert logger.events[-1]["event_type"] == "quest_inventory_inspected"
     assert "open_hunt_ok" not in logger.events[-1]
+
+
+def test_live_semantic_inventory_snapshot_binds_transport_identity_and_request_baseline(
+    monkeypatch,
+) -> None:
+    class FakeInjector:
+        def client_snapshot(self, client_id: str | None = None) -> dict[str, object]:
+            return {"client_id": client_id, "profile_id": "profile-a", "tab_id": 17}
+
+        def execute(self, *args: object, **kwargs: object) -> InjectorResult:
+            return InjectorResult(True, json.dumps({
+                "ok": True, "category": "quest", "categoryConfirmed": True,
+                "snapshotId": "inventory-1", "generatedAt": "2026-07-18T10:00:00Z",
+                "revision": 999, "items": [],
+                "clientId": "untrusted-page-client",
+            }), "transport-client")
+
+    injector = FakeInjector()
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector", lambda: injector,
+    )
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False))
+
+    assert sink.execute(ActionRequest(
+        "inspect_quest_inventory", dry_run=False,
+        metadata={"causal_baseline": "catalog-base", "minimum_revision": 7},
+    ))
+    assert sink.last_quest_inventory_snapshot == {
+        "ok": True, "category": "quest", "categoryConfirmed": True,
+        "snapshotId": "inventory-1", "generatedAt": "2026-07-18T10:00:00Z",
+        "revision": 999, "items": [], "clientId": "transport-client",
+        "profileId": "profile-a", "tabId": "17", "causalBaseline": "catalog-base",
+    }
+
+
+def test_live_semantic_inventory_snapshot_rejects_missing_transport_identity(
+    monkeypatch,
+) -> None:
+    class FakeInjector:
+        def client_snapshot(self, client_id: str | None = None) -> dict[str, object]:
+            return {"client_id": client_id, "profile_id": "", "tab_id": None}
+
+        def execute(self, *args: object, **kwargs: object) -> InjectorResult:
+            return InjectorResult(True, json.dumps({
+                "ok": True, "category": "quest", "categoryConfirmed": True,
+                "snapshotId": "inventory-1", "generatedAt": "2026-07-18T10:00:00Z",
+                "revision": 1, "items": [],
+            }), "transport-client")
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False))
+
+    assert not sink.execute(ActionRequest(
+        "inspect_quest_inventory", dry_run=False,
+        metadata={"causal_baseline": "catalog-base", "minimum_revision": 7},
+    ))
+    assert sink.last_quest_inventory_snapshot is None
+
+
+def test_live_semantic_inventory_snapshot_requires_strict_revision_advance(
+    monkeypatch,
+) -> None:
+    revisions = iter((7, 8))
+
+    class FakeInjector:
+        def client_snapshot(self, client_id: str | None = None) -> dict[str, object]:
+            return {"client_id": client_id, "profile_id": "profile-a", "tab_id": 17}
+
+        def execute(self, *args: object, **kwargs: object) -> InjectorResult:
+            revision = next(revisions)
+            return InjectorResult(True, json.dumps({
+                "ok": True, "category": "quest", "categoryConfirmed": True,
+                "snapshotId": f"inventory-{revision}",
+                "generatedAt": "2026-07-18T10:00:00Z",
+                "revision": revision, "items": [],
+            }), "transport-client")
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector", lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(InMemoryEventLogger(dry_run=False))
+    request = ActionRequest(
+        "inspect_quest_inventory", dry_run=False,
+        metadata={"causal_baseline": "catalog-base", "minimum_revision": 7},
+    )
+
+    assert not sink.execute(request)
+    assert sink.last_quest_inventory_snapshot is None
+    assert sink.execute(request)
+    assert sink.last_quest_inventory_snapshot["revision"] == 8
 
 
 def test_dry_run_no_live_click(test_config: AutomationConfig) -> None:

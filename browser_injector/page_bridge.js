@@ -2186,6 +2186,7 @@
   };
 
   const QUEST_INVENTORY_ITEM_LIMIT = 256;
+  let inventorySnapshotRevision = 0;
 
   const questInventoryCategoryLoadDelayMs = (payload) => Math.max(
     0,
@@ -2235,10 +2236,15 @@
     const snapshotItems = category === "quest"
       ? questItems
       : entries.map((entry) => entry.item);
+    inventorySnapshotRevision = Math.max(Date.now(), inventorySnapshotRevision + 1);
+    const generatedAt = new Date().toISOString();
     return {
       ok: true,
       message: "inventory_snapshot",
       bridgeVersion: BRIDGE_VERSION,
+      snapshotId: `inventory-${Date.now()}-${inventorySnapshotRevision}`,
+      generatedAt,
+      revision: inventorySnapshotRevision,
       backpackMessage,
       backpackProof,
       itemCount: snapshotItems.length,

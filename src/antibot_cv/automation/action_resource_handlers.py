@@ -66,8 +66,43 @@ def handle_action(self, request):
             timeout_s=max(10.0, float(metadata.get("timeout_s", 10.0) or 10.0)),
         )
         parsed = _parse_injector_dict(result.message)
-        if result.ok and parsed is not None:
-            self.last_quest_inventory_snapshot = parsed
+        accepted = False
+        if result.ok and isinstance(parsed, dict):
+            semantic_authority_requested = (
+                "causal_baseline" in metadata or "minimum_revision" in metadata
+            )
+            client_id = str(result.client_id or "").strip()
+            client = injector.client_snapshot(client_id) if client_id else {}
+            profile_id = str(client.get("profile_id") or "").strip()
+            tab_id = client.get("tab_id")
+            causal_baseline = str(metadata.get("causal_baseline") or "").strip()
+            revision = parsed.get("revision")
+            minimum_revision = metadata.get("minimum_revision")
+            if (
+                client_id
+                and profile_id
+                and isinstance(tab_id, int)
+                and not isinstance(tab_id, bool)
+                and causal_baseline
+                and isinstance(revision, int)
+                and not isinstance(revision, bool)
+                and revision >= 0
+                and isinstance(minimum_revision, int)
+                and not isinstance(minimum_revision, bool)
+                and revision > minimum_revision
+            ):
+                parsed = dict(parsed)
+                parsed.update({
+                    "clientId": client_id,
+                    "profileId": profile_id,
+                    "tabId": str(tab_id),
+                    "causalBaseline": causal_baseline,
+                })
+                self.last_quest_inventory_snapshot = parsed
+                accepted = True
+            elif not semantic_authority_requested:
+                self.last_quest_inventory_snapshot = parsed
+                accepted = True
         inventory_observation = {}
         if isinstance(parsed, dict):
             raw_items = parsed.get("items")
@@ -92,11 +127,11 @@ def handle_action(self, request):
             "quest_inventory_inspected",
             request,
             inventory_client_id=result.client_id,
-            inventory_ok=result.ok,
+            inventory_ok=accepted,
             inventory_message=_compact_injector_message(result.message),
             **inventory_observation,
         )
-        return bool(result.ok and parsed is not None)
+        return accepted
     if request.action_type == 'use_recovery_items':
         metadata = dict(request.metadata or {})
         timeout_s = float(metadata.get('timeout_s', 6.0) or 6.0)

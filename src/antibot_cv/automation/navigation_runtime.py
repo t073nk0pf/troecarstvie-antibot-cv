@@ -18,6 +18,9 @@ from src.antibot_cv.automation.quest_inventory_guard import (
     evaluate_quest_inventory,
     quest_item_requirements,
 )
+from src.antibot_cv.automation.quest_semantic_precombat_runtime import (
+    SemanticQuestPrecombatRuntimeMixin,
+)
 from src.antibot_cv.automation.runtime_helpers import (
     detect_direction_pad_roi as _detect_direction_pad_roi,
     is_semantic_location_name as _is_semantic_location_name,
@@ -48,7 +51,7 @@ NAVIGATOR_AREA_HANDOFF_KINDS = {
 }
 
 
-class NavigationRuntimeMixin:
+class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
     def _clear_location_route_tracking(self) -> None:
         """Clear controller-local route ownership after a terminal handoff."""
 
@@ -992,7 +995,7 @@ class NavigationRuntimeMixin:
         self._reset_scrollbar_search()
         return True
 
-    def _quest_inventory_allows_attack(self) -> bool:
+    def _legacy_quest_inventory_allows_attack(self) -> bool:
         director = getattr(self, "_quest_director", None)
         objective = director.active_objective if director is not None else None
         requirements = quest_item_requirements(objective)
@@ -1032,8 +1035,6 @@ class NavigationRuntimeMixin:
         if not self.action_executor.execute(request):
             self._stop_leveling_unsafe("quest_inventory_inspection_failed")
             return False
-        # Inventory inspection owns this controller pass.  Do not let the generic
-        # game-shell recovery reopen hunt before the snapshot is validated.
         self._quest_inventory_navigation_owned = True
         self._selected_target = None
         self._current_target = None
@@ -1059,6 +1060,9 @@ class NavigationRuntimeMixin:
             collected=[{"name": name, "count": count} for name, count in result.collected],
             reason=result.reason,
         )
+        return self._legacy_quest_inventory_allows_attack_after_inspection(result, objective, current_cycle)
+
+    def _legacy_quest_inventory_allows_attack_after_inspection(self, result, objective, current_cycle: int) -> bool:
         if not result.confirmed:
             self._stop_leveling_unsafe(f"quest_inventory_guard:{result.reason}")
             return False

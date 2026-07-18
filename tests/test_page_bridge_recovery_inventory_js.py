@@ -136,12 +136,19 @@ function command(type, payload = {}) {
 (async () => {
   const result = await command("inventory_snapshot", { names: [], open: false });
   assert.strictEqual(result.ok, true);
+  assert.match(result.message.snapshotId, /^inventory-\d+-\d+$/);
+  assert.ok(Date.parse(result.message.generatedAt));
+  assert.ok(result.message.revision >= Date.parse(result.message.generatedAt));
+  const firstRevision = result.message.revision;
   assert.strictEqual(result.message.candidates[0].src, "/images/items/burdjuk_udal.png");
   assert.deepStrictEqual(result.message.candidates[0].rect, { x: 10, y: 20, width: 32, height: 32 });
   const questStartedAt = Date.now();
   const questResult = await command("inventory_snapshot", { names: ["пояс кентавра"], open: true, category: "quest" });
   assert.ok(Date.now() - questStartedAt >= 2900);
   assert.strictEqual(questResult.ok, true);
+  assert.match(questResult.message.snapshotId, /^inventory-\d+-\d+$/);
+  assert.ok(Date.parse(questResult.message.generatedAt));
+  assert.ok(questResult.message.revision > firstRevision);
   assert.strictEqual(questResult.message.backpackMessage, "processMenu_b11");
   assert.strictEqual(questResult.message.backpackProof.confirmed, true);
   assert.strictEqual(questResult.message.categoryConfirmed, true);
