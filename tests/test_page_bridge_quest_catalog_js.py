@@ -81,6 +81,137 @@ assert.strictEqual(section.data.items[0].navigation[0].text, "Лесная оп�
 
     assert result.returncode == 0, result.stdout + result.stderr
 
+
+def test_q304_npc_instance_is_bound_separately_for_open_answer_and_done() -> None:
+    script = r"""
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+let source = fs.readFileSync("browser_injector/page_bridge.js", "utf8");
+const start = source.indexOf("  // source: page_bridge_modules/35_npc_quests.js\n");
+const end = source.indexOf("  // source: page_bridge_modules/36_quest_chat_progress.js\n");
+assert.ok(start >= 0 && end > start);
+source = source.slice(0, start) +
+  "  // source: page_bridge_modules/35_npc_quests.js\n" +
+  fs.readFileSync("browser_injector/page_bridge_modules/35_npc_quests.js", "utf8") + "\n" +
+  source.slice(end);
+const version = source.match(/const BRIDGE_VERSION = "([^"]+)"/)[1];
+const messages = [];
+const listeners = {};
+const header = { innerText: "Колдунья Вилена", textContent: "Колдунья Вилена" };
+let clicks = 0;
+const root = {
+  name: "top", location: { href: "https://3kingdoms.ru/npc.php?f_id=4&npc_id=110" },
+  frames: [], setTimeout,
+  addEventListener(type, callback) { listeners[type] = callback; }, removeEventListener() {},
+  postMessage(message) { messages.push(message); },
+};
+root.top = root; root.window = root;
+function showAction({ text, href, containerText = text }) {
+  const action = {
+    tagName: "A", innerText: text, textContent: text, disabled: false,
+    getAttribute(name) { return name === "href" ? href : null; },
+    getClientRects() { return [{ width: 20, height: 10 }]; },
+    closest() { return { innerText: containerText, textContent: containerText }; },
+    click() { clicks += 1; },
+  };
+  root.document = {
+    title: "Цветочная болезнь", readyState: "complete",
+    body: { innerText: "Колдунья Вилена Цветочная болезнь", textContent: "" },
+    querySelectorAll(selector) {
+      if (selector === "h2") return [header];
+      if (selector === "a[href],button,input[type='button'],input[type='submit'],[onclick]") return [action, { ...action }];
+      return [];
+    },
+  };
+}
+showAction({
+  text: "Далее", href: "npc.php?f_id=4&npc_id=110&quest_id=304",
+  containerText: "Цветочная болезньДалее",
+});
+vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
+async function command(type, payload) {
+  messages.length = 0;
+  listeners.message({ source: root, data: {
+    source: `antibot-cv-content:${version}`, token: `${type}-${Date.now()}`,
+    command: { type, payload },
+  } });
+  const deadline = Date.now() + 1000;
+  while (!messages.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.strictEqual(messages.length, 1);
+  return JSON.parse(messages[0].message);
+}
+async function snapshot() {
+  return command("npc_dialog_snapshot", {
+    expectedName: "Колдунья Вилена", expectedNpcId: "4", expectedNpcInstanceId: "110",
+  });
+}
+;(async () => {
+  let observed = await snapshot();
+  assert.strictEqual(observed.identityMatches, true);
+  assert.strictEqual(observed.npcInstanceId, "110");
+  assert.strictEqual(observed.questActions[0].npcId, "4");
+  assert.strictEqual(observed.questActions[0].npcInstanceId, "110");
+  assert.strictEqual(observed.questActions.length, 1);
+  const wrongInstance = await command("npc_dialog_snapshot", {
+    expectedName: "Колдунья Вилена", expectedNpcId: "4", expectedNpcInstanceId: "109",
+  });
+  assert.strictEqual(wrongInstance.identityMatches, false);
+  for (const malformed of [true, false, 110.5, 0, -1, {}, [], "110x"]) {
+    const invalidInstance = await command("npc_dialog_snapshot", {
+      expectedName: "Колдунья Вилена", expectedNpcId: "4", expectedNpcInstanceId: malformed,
+    });
+    assert.strictEqual(invalidInstance.identityMatches, false);
+    assert.strictEqual(invalidInstance.expectedNpcInstanceInvalid, true);
+  }
+  observed = await snapshot();
+  let result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "110", expectedNpcInstanceId: "110",
+    expectedName: "Колдунья Вилена", questId: "304", expectedTitle: "Цветочная болезнь", action: "open",
+  });
+  assert.strictEqual(result.message, "npc_dialog_identity_mismatch");
+  assert.strictEqual(clicks, 0);
+  result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "4", expectedNpcInstanceId: "110x",
+    questId: "304", expectedTitle: "Цветочная болезнь", action: "open",
+  });
+  assert.strictEqual(result.message, "npc_quest_action_invalid");
+  result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "4", expectedNpcInstanceId: "109",
+    expectedName: "Колдунья Вилена", questId: "304", expectedTitle: "Цветочная болезнь", action: "open",
+  });
+  assert.strictEqual(result.message, "npc_quest_action_missing");
+  assert.strictEqual(clicks, 0);
+  result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "4", expectedNpcInstanceId: "110",
+    expectedName: "Колдунья Вилена", questId: "304", expectedTitle: "Цветочная болезнь", action: "open",
+  });
+  assert.strictEqual(result.message, "npc_quest_action_submitted");
+
+  showAction({ text: "Помогу вам.", href: "npc.php?f_id=4&npc_id=110&quest_id=304&point_id=901&ref=77" });
+  observed = await snapshot();
+  result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "4", expectedNpcInstanceId: "110",
+    expectedName: "Колдунья Вилена", questId: "304", expectedTitle: "Цветочная болезнь", action: "answer",
+    expectedRef: "77", expectedText: "Помогу вам.",
+  });
+  assert.strictEqual(result.message, "npc_quest_action_submitted");
+
+  showAction({ text: "Завершить задание", href: "npc.php?f_id=4&npc_id=110&quest_id=304&point_id=902&action=done" });
+  observed = await snapshot();
+  result = await command("npc_quest_action", {
+    expectedSnapshotId: observed.snapshotId, npcId: "4", expectedNpcInstanceId: "110",
+    expectedName: "Колдунья Вилена", questId: "304", action: "done",
+    expectedPointId: "902", expectedText: "Завершить задание",
+  });
+  assert.strictEqual(result.message, "npc_quest_action_submitted");
+  assert.strictEqual(clicks, 3);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(["node", "-e", script], cwd=".", text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
 def test_page_bridge_reads_available_quest_giver_route_and_pagination() -> None:
     script = r"""
 const assert = require("assert");
@@ -431,6 +562,7 @@ const npcElement = {
 const areaDocument = {
   title: "Порт",
   readyState: "complete",
+  scripts: [{ src: "", textContent: String.raw`var area = new LocationApp({"area_conf":"<town><item id=\"0\" name=\"Моряк Кентур\" type=\"npc\" href=\"/npc.php?action=enter&amp;ref=540&amp;secret-token\" mode=\"npc\" /></town>"});` }],
   body: { innerText: "Порт безбрежного моря\nЦарство: Свет", textContent: "Порт безбрежного моря Царство: Свет" },
   querySelector(selector) {
     if (selector === ".b-control-area__list,.b-control-area") return shell;
@@ -540,7 +672,19 @@ const npcDocument = {
 };
 const root = {
   name: "top",
-  location: { href: "https://3kingdoms.ru/area.php?location_id=125" },
+  location: {
+    href: "https://3kingdoms.ru/area.php?location_id=125",
+    assign(value) {
+      clicks += 1;
+      this.href = new URL(value, "https://3kingdoms.ru/area.php").href;
+      const parsed = new URL(this.href);
+      if (parsed.searchParams.get("quest_id") === "314" && parsed.searchParams.get("ref") === "401") {
+        root.document = terminalDocument;
+      } else {
+        root.document = npcDocument;
+      }
+    },
+  },
   frames: [],
   document: areaDocument,
   area: { model: { area: { title: "Порт безбрежного моря" } }, controller: { compass: { data: { location: 125 } } } },
@@ -550,7 +694,7 @@ const root = {
   postMessage(message) { messages.push(message); },
 };
 root.top = root; root.window = root;
-vm.runInNewContext(source, { window: root, console, setTimeout });
+vm.runInNewContext(source, { window: root, console, setTimeout, URL, URLSearchParams });
 async function command(type, payload = {}) {
   messages.length = 0;
   listeners.message({ source: root, data: {
@@ -568,23 +712,47 @@ async function command(type, payload = {}) {
   assert.strictEqual(observed.message.items[0].actionable, true);
 
   const stale = await command("open_exact_npc", {
-    expectedSnapshotId: "wrong", expectedLocationId: "125", npcId: "0", expectedName: "Моряк Кентур",
+    expectedSnapshotId: "wrong", expectedLocationId: "125", npcId: "0", expectedRouteRef: "540", expectedName: "Моряк Кентур",
   });
   assert.strictEqual(stale.ok, false);
   assert.strictEqual(stale.message.message, "area_npc_snapshot_stale");
   assert.strictEqual(clicks, 0);
 
-  const opened = await command("open_exact_npc", {
+  const invalidInstance = await command("open_exact_npc", {
     expectedSnapshotId: observed.message.snapshotId,
+    expectedLocationId: "125", npcId: "0", expectedRouteRef: "540", expectedName: "Моряк Кентур",
+    expectedDialogName: "Моряка Кентура", expectedNpcInstanceId: "1".repeat(41),
+  });
+  assert.strictEqual(invalidInstance.message.outcome, "NOT_ISSUED");
+  assert.strictEqual(invalidInstance.message.message, "npc_instance_identity_invalid");
+  assert.strictEqual(clicks, 0);
+
+  const wrongInstance = await command("open_exact_npc", {
+    expectedSnapshotId: observed.message.snapshotId,
+    expectedLocationId: "125", npcId: "0", expectedRouteRef: "540", expectedName: "Моряк Кентур",
+    expectedDialogName: "Моряка Кентура", expectedNpcInstanceId: "74",
+    verifyTimeoutMs: 100,
+  });
+  assert.notStrictEqual(wrongInstance.message.outcome, "CONFIRMED");
+  assert.strictEqual(wrongInstance.message.outcome, "ACK_PENDING");
+  assert.strictEqual(clicks, 1);
+  root.location.href = "https://3kingdoms.ru/area.php?location_id=125";
+  root.document = areaDocument;
+  const observedAgain = await command("area_npc_snapshot", { expectedName: "Моряк Кентур" });
+
+  const opened = await command("open_exact_npc", {
+    expectedSnapshotId: observedAgain.message.snapshotId,
     expectedLocationId: "125",
     npcId: "0",
+    expectedRouteRef: "540",
     expectedName: "Моряк Кентур",
     expectedDialogName: "Моряка Кентура",
+    expectedNpcInstanceId: "75",
     verifyTimeoutMs: 250,
   });
   assert.strictEqual(opened.ok, true);
   assert.strictEqual(opened.message.message, "npc_opened_confirmed");
-  assert.strictEqual(clicks, 1);
+  assert.strictEqual(clicks, 2);
   assert.strictEqual(opened.message.outcome, "CONFIRMED");
   assert.strictEqual(opened.message.after.identityMatches, true);
   assert.strictEqual(opened.message.after.questActions[0].questId, "314");
@@ -650,7 +818,9 @@ async function command(type, payload = {}) {
   });
   assert.strictEqual(answered.ok, true);
   assert.strictEqual(answered.message.outcome, "ACK_PENDING");
-  assert.strictEqual(answerClicks, 1);
+  assert.strictEqual(answerClicks, 0);
+  assert.ok(root.location.href.includes("quest_id=314"));
+  assert.ok(root.location.href.includes("ref=401"));
   const terminal = await command("npc_dialog_snapshot", { expectedName: "Моряк Кентур", expectedNpcId: "0" });
   assert.strictEqual(terminal.message.doneActions.length, 2);
   assert.deepStrictEqual(
@@ -702,11 +872,11 @@ async function command(type, payload = {}) {
   assert.strictEqual(acceptClicks, 1);
   root.location.href = "https://3kingdoms.ru/area.php?location_id=125";
   root.document = areaDocument;
-  npcElement.click = () => { clicks += 1; };
-  const observedAgain = await command("area_npc_snapshot", { expectedName: "Моряк Кентур" });
+  root.location.assign = () => { clicks += 1; };
+  const delayedObservation = await command("area_npc_snapshot", { expectedName: "Моряк Кентур" });
   const delayed = await command("open_exact_npc", {
-    expectedSnapshotId: observedAgain.message.snapshotId,
-        expectedLocationId: "125", npcId: "0", expectedName: "Моряк Кентур",
+    expectedSnapshotId: delayedObservation.message.snapshotId,
+        expectedLocationId: "125", npcId: "0", expectedRouteRef: "540", expectedName: "Моряк Кентур",
     verifyTimeoutMs: 100,
   });
   assert.strictEqual(delayed.ok, true);

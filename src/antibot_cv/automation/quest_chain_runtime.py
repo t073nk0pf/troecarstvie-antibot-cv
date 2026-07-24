@@ -14,15 +14,18 @@ from src.antibot_cv.automation.quest_chain_state import (
     PendingTurnInCompletion,
     QuarantinedQuest,
     QuestChainLease,
+    QuestLocalBlock,
 )
 from src.antibot_cv.automation.quest_chain_persistence import (
     restore_accepted_ref as _restore_accepted_ref,
     restore_quarantines as _restore_quarantines,
     restore_staged_ref as _restore_staged_ref,
     restore_turn_in_completion as _restore_turn_in_completion,
+    restore_local_blocks as _restore_local_blocks,
     serialize_quarantine as _serialize_quarantine,
     serialize_ref as _serialize_ref,
     serialize_turn_in_completion as _serialize_turn_in_completion,
+    serialize_local_block as _serialize_local_block,
     valid_capability as _valid_capability,
     valid_reason as _valid_reason,
     validate_authoritative_ref as _validate_authoritative_ref,
@@ -33,6 +36,11 @@ from src.antibot_cv.automation.quest_intake_quarantine import (
     make_intake_quarantine,
     restore_intake_quarantines,
     serialize_intake_quarantine,
+)
+from src.antibot_cv.automation.quest_local_block_journal import (
+    LocalBlockEnsureResult,
+    LocalBlockEnsureState,
+    QuestLocalBlockJournalMixin,
 )
 from src.antibot_cv.automation.quest_objective_runtime import (
     ObjectiveSelectionStatus,
@@ -135,7 +143,7 @@ def _npc_action_matches(
     )
 
 
-class QuestChainRuntime:
+class QuestChainRuntime(QuestLocalBlockJournalMixin):
     """Keep one quest chain pinned until explicit terminal evidence releases it."""
 
     def __init__(
@@ -145,6 +153,7 @@ class QuestChainRuntime:
         max_quarantines: int = 100,
         max_intake_quarantines: int = 100,
         max_unsupported_available: int = 500,
+        max_local_blocks: int = 100,
     ) -> None:
         self.lease: QuestChainLease | None = None
         self.pending_accepted_ref: QuestRef | None = None
@@ -164,6 +173,10 @@ class QuestChainRuntime:
             raise ValueError("max quarantines must be positive")
         self.max_quarantines = max_quarantines
         self.quarantines: tuple[QuarantinedQuest, ...] = ()
+        if isinstance(max_local_blocks, bool) or not isinstance(max_local_blocks, int) or max_local_blocks <= 0:
+            raise ValueError("max local blocks must be positive")
+        self.max_local_blocks = max_local_blocks
+        self.local_blocks: tuple[QuestLocalBlock, ...] = ()
         if (
             not isinstance(max_intake_quarantines, int)
             or isinstance(max_intake_quarantines, bool)
@@ -262,6 +275,8 @@ class QuestChainRuntime:
                 payload["pending_accepted_ref"] = _serialize_ref(self.pending_accepted_ref)
             if self.quarantines:
                 payload["quarantines"] = [_serialize_quarantine(item) for item in self.quarantines]
+            if self.local_blocks:
+                payload["local_blocks"] = [_serialize_local_block(item) for item in self.local_blocks]
             if self.intake_quarantines:
                 payload["intake_quarantines"] = [
                     serialize_intake_quarantine(item) for item in self.intake_quarantines
@@ -320,6 +335,8 @@ class QuestChainRuntime:
             )
         if self.quarantines:
             payload["quarantines"] = [_serialize_quarantine(item) for item in self.quarantines]
+        if self.local_blocks:
+            payload["local_blocks"] = [_serialize_local_block(item) for item in self.local_blocks]
         if self.intake_quarantines:
             payload["intake_quarantines"] = [
                 serialize_intake_quarantine(item) for item in self.intake_quarantines
@@ -352,7 +369,28 @@ class QuestChainRuntime:
             raise ValueError("NPC action journal requires durable dialog")
         if restored_catalog_navigation is not None and restored_active_catalog_navigation is not None:
             raise ValueError("available and active catalog navigation stages conflict")
-        if (restored_catalog_navigation is not None or restored_active_catalog_navigation is not None) and (restored_npc_open or restored_npc_dialog):
+        accept_catalog_reconciliation = bool(
+            restored_catalog_navigation is None
+            and restored_active_catalog_navigation is not None
+            and restored_npc_open is None
+            and restored_npc_dialog is not None
+            and restored_npc_action is not None
+            and (
+                (
+                    restored_npc_action.action is NpcQuestActionKind.ACCEPT
+                    and restored_npc_action.phase is NpcQuestActionPhase.ACCEPT_VERIFY
+                )
+                or (
+                    restored_npc_action.action is NpcQuestActionKind.DONE
+                    and restored_npc_action.phase is NpcQuestActionPhase.ACK_PENDING
+                )
+            )
+        )
+        if (
+            (restored_catalog_navigation is not None or restored_active_catalog_navigation is not None)
+            and (restored_npc_open or restored_npc_dialog)
+            and not accept_catalog_reconciliation
+        ):
             raise ValueError("catalog and NPC mutation stages conflict")
         if restored_ordered_handoff is not None and (
             restored_catalog_navigation is not None
@@ -370,10 +408,20 @@ class QuestChainRuntime:
             payload.get("quarantines"),
             max_items=self.max_quarantines,
         )
+        restored_local_blocks = _restore_local_blocks(
+            payload.get("local_blocks"), max_items=self.max_local_blocks,
+        )
         restored_intake_quarantines = restore_intake_quarantines(
             payload.get("intake_quarantines"),
             max_items=self.max_intake_quarantines,
         )
+        if any(
+            block.quest_id == quarantine.quest_id
+            and block.fingerprint == quarantine.fingerprint
+            for block in restored_local_blocks
+            for quarantine in restored_quarantines
+        ):
+            raise ValueError("local block conflicts with quarantine")
         if "quest_id" not in payload:
             if restored_ordered_handoff is not None:
                 raise ValueError("ordered handoff cursor requires pinned lease")
@@ -390,6 +438,7 @@ class QuestChainRuntime:
             if (
                 restored_pending_ref is None
                 and not restored_quarantines
+                and not restored_local_blocks
                 and not restored_intake_quarantines
                 and restored_catalog_navigation is None
                 and restored_active_catalog_navigation is None
@@ -422,6 +471,7 @@ class QuestChainRuntime:
             self.ordered_handoff_cursor = restored_ordered_handoff
             self.unsupported_available_entries = restored_unsupported_available
             self.quarantines = restored_quarantines
+            self.local_blocks = restored_local_blocks
             self.intake_quarantines = restored_intake_quarantines
             return None
 
@@ -543,6 +593,7 @@ class QuestChainRuntime:
         self.ordered_handoff_cursor = restored_ordered_handoff
         self.unsupported_available_entries = restored_unsupported_available
         self.quarantines = restored_quarantines
+        self.local_blocks = restored_local_blocks
         self.intake_quarantines = restored_intake_quarantines
         return self.lease
 
@@ -564,10 +615,35 @@ class QuestChainRuntime:
     def stage_active_catalog_navigation(self, pending: PendingActiveCatalogNavigation) -> None:
         """Durably stage one exact active-catalog navigation before dispatch."""
 
+        accept_catalog_reconciliation = bool(
+            self.pending_accepted_ref is not None
+            and self.pending_npc_open is None
+            and self.pending_npc_dialog is not None
+            and self.pending_npc_action is not None
+            and (
+                (
+                    self.pending_npc_action.action is NpcQuestActionKind.ACCEPT
+                    and self.pending_npc_action.phase is NpcQuestActionPhase.ACCEPT_VERIFY
+                )
+                or (
+                    self.pending_npc_action.action is NpcQuestActionKind.DONE
+                    and self.pending_npc_action.phase is NpcQuestActionPhase.ACK_PENDING
+                )
+            )
+            and _npc_action_matches(
+                self.pending_npc_action,
+                self.pending_npc_dialog,
+                self.pending_accepted_ref,
+            )
+        )
         if (
             self.pending_catalog_navigation is not None
-            or self.pending_npc_open is not None or self.pending_npc_dialog is not None
-            or self.pending_npc_action is not None or self.ordered_handoff_cursor is not None
+            or self.pending_npc_open is not None
+            or (
+                (self.pending_npc_dialog is not None or self.pending_npc_action is not None)
+                and not accept_catalog_reconciliation
+            )
+            or self.ordered_handoff_cursor is not None
         ):
             raise RuntimeError("another mutation stage is already pending")
         if self.pending_active_catalog_navigation not in {None, pending}:
@@ -639,13 +715,13 @@ class QuestChainRuntime:
             self.pending_npc_open = pending
             raise
 
-    def settle_npc_open(self, pending: PendingNpcOpen) -> None:
+    def settle_npc_open(self, pending: PendingNpcOpen, *, quest_opened: bool = False) -> None:
         """Atomically persist the causal transition into the NPC dialog phase."""
 
         if self.pending_npc_open != pending or self.pending_npc_dialog is not None:
             raise RuntimeError("NPC open stage changed before settle")
         self.pending_npc_open = None
-        self.pending_npc_dialog = pending
+        self.pending_npc_dialog = replace(pending, quest_opened=True) if quest_opened else pending
         try:
             self._persist()
         except Exception:
@@ -760,6 +836,32 @@ class QuestChainRuntime:
             self.pending_npc_action = pending
             raise
         return updated
+
+    def settle_completed_intake(
+        self, pending: PendingNpcQuestAction, *, expected_ref: QuestRef,
+    ) -> None:
+        """Atomically clear one terminal DONE intake after catalogue proof."""
+
+        if (
+            pending.action is not NpcQuestActionKind.DONE
+            or pending.phase is not NpcQuestActionPhase.ACK_PENDING
+            or self.pending_npc_action != pending
+            or self.pending_accepted_ref != expected_ref
+        ):
+            raise RuntimeError("completed intake does not match durable state")
+        previous_action = self.pending_npc_action
+        previous_ref = self.pending_accepted_ref
+        previous_dialog = self.pending_npc_dialog
+        self.pending_npc_action = None
+        self.pending_accepted_ref = None
+        self.pending_npc_dialog = None
+        try:
+            self._persist()
+        except Exception:
+            self.pending_npc_action = previous_action
+            self.pending_accepted_ref = previous_ref
+            self.pending_npc_dialog = previous_dialog
+            raise
 
     def recover_legacy_npc_dialog(
         self, pending: PendingNpcOpen, *, expected_disk_bytes: bytes,
@@ -892,8 +994,11 @@ class QuestChainRuntime:
     ) -> IntakeQuarantine:
         """Atomically replace one exact staged acceptance with durable evidence."""
 
-        if self.pending_accepted_ref != expected_ref:
+        if self.pending_accepted_ref != expected_ref or self.pending_npc_action is not None:
             raise RuntimeError("intake quarantine does not match staged acceptance")
+        npc_stage = self.pending_npc_open or self.pending_npc_dialog
+        if npc_stage is not None and not _npc_stage_matches_ref(npc_stage, expected_ref):
+            raise RuntimeError("intake quarantine NPC identity mismatch")
         evidence = make_intake_quarantine(
             expected_ref,
             reason=reason,
@@ -901,16 +1006,22 @@ class QuestChainRuntime:
             recorded_at=time.time() if recorded_at is None else recorded_at,
         )
         previous_pending = self.pending_accepted_ref
+        previous_npc_open = self.pending_npc_open
+        previous_npc_dialog = self.pending_npc_dialog
         previous_quarantines = self.intake_quarantines
         retained = tuple(
             item for item in self.intake_quarantines if item.quest_id != evidence.quest_id
         )
         self.intake_quarantines = (*retained, evidence)[-self.max_intake_quarantines :]
         self.pending_accepted_ref = None
+        self.pending_npc_open = None
+        self.pending_npc_dialog = None
         try:
             self._persist()
         except Exception:
             self.pending_accepted_ref = previous_pending
+            self.pending_npc_open = previous_npc_open
+            self.pending_npc_dialog = previous_npc_dialog
             self.intake_quarantines = previous_quarantines
             raise
         return evidence
@@ -959,7 +1070,11 @@ class QuestChainRuntime:
             or not quest_ref.giver_names[0]
         ):
             raise ValueError("accepted quest reference is not authoritative")
-        if lease.accepted_ref is not None and lease.accepted_ref != quest_ref:
+        if (
+            lease.accepted_ref is not None
+            and lease.accepted_ref != quest_ref
+            and lease.turn_in_ref_fingerprint == lease.current_fingerprint
+        ):
             raise RuntimeError("accepted quest reference conflicts with pinned chain")
         self.lease = replace(
             lease,
@@ -1003,11 +1118,23 @@ class QuestChainRuntime:
         npc_stage = previous_npc_open or previous_npc_dialog
         if npc_stage is not None and not _npc_stage_matches_ref(npc_stage, expected_ref):
             raise RuntimeError("staged NPC recovery identity mismatch")
-        if previous_npc_action is not None and (
-            previous_npc_action.action is not NpcQuestActionKind.ACCEPT
-            or previous_npc_action.phase is not NpcQuestActionPhase.ACCEPT_VERIFY
-            or not _npc_action_matches(previous_npc_action, previous_npc_dialog, expected_ref)
-        ):
+        npc_action_verifies_accept = bool(
+            previous_npc_action is not None
+            and (
+                (
+                    previous_npc_action.action is NpcQuestActionKind.ACCEPT
+                    and previous_npc_action.phase is NpcQuestActionPhase.ACCEPT_VERIFY
+                )
+                or (
+                    previous_npc_action.action is NpcQuestActionKind.DONE
+                    and previous_npc_action.phase is NpcQuestActionPhase.ACK_PENDING
+                )
+            )
+            and _npc_action_matches(
+                previous_npc_action, previous_npc_dialog, expected_ref
+            )
+        )
+        if previous_npc_action is not None and not npc_action_verifies_accept:
             raise RuntimeError("staged NPC accept recovery identity mismatch")
         self.lease = QuestChainLease(
             entry.id,
@@ -1151,7 +1278,18 @@ class QuestChainRuntime:
             float(timestamp),
         )
         retained = tuple(item for item in self.quarantines if item.quest_id != entry.id)
+        previous_quarantines = self.quarantines
+        previous_local_blocks = self.local_blocks
+        previous_lease = self.lease
+        previous_pending_ref = self.pending_accepted_ref
+        previous_pending_completion = self.pending_turn_in_completion
+        previous_pending_restored = self.pending_turn_in_completion_restored
+        previous_handoff = self.ordered_handoff_cursor
         self.quarantines = (*retained, evidence)[-self.max_quarantines :]
+        self.local_blocks = tuple(
+            item for item in self.local_blocks
+            if not (item.quest_id == entry.id and item.fingerprint == fingerprint)
+        )
         if self.lease is not None and self.lease.quest_id == entry.id:
             self.lease = None
             self.pending_accepted_ref = None
@@ -1162,7 +1300,17 @@ class QuestChainRuntime:
                 and self.ordered_handoff_cursor.quest_id == entry.id
             ):
                 self.ordered_handoff_cursor = None
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self.quarantines = previous_quarantines
+            self.local_blocks = previous_local_blocks
+            self.lease = previous_lease
+            self.pending_accepted_ref = previous_pending_ref
+            self.pending_turn_in_completion = previous_pending_completion
+            self.pending_turn_in_completion_restored = previous_pending_restored
+            self.ordered_handoff_cursor = previous_handoff
+            raise
         return evidence
 
     def is_quarantined(
@@ -1338,6 +1486,7 @@ class QuestChainRuntime:
         self.pending_turn_in_completion_restored = False
         self.ordered_handoff_cursor = None
         self.quarantines = tuple(item for item in self.quarantines if item.quest_id != quest_id)
+        self.local_blocks = tuple(item for item in self.local_blocks if item.quest_id != quest_id)
         self._persist_or_unlink()
 
     def release_deferred(self, quest_id: str) -> None:
@@ -1392,4 +1541,5 @@ class QuestChainRuntime:
         self.ordered_handoff_cursor = None
         self.unsupported_available_entries = ()
         self.quarantines = ()
+        self.local_blocks = ()
         self.intake_quarantines = ()

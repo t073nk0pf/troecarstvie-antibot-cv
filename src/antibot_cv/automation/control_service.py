@@ -3,16 +3,35 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from src.antibot_cv.automation.browser_injector import CURRENT_BRIDGE_VERSION, BrowserInjectorServer
-from src.antibot_cv.automation.actions import ActionRequest
+from src.antibot_cv.automation.actions import (
+    ActionDiagnosticCode,
+    ActionExecutionStatus,
+    ActionRequest,
+)
 from src.antibot_cv.automation.config import to_plain_dict
 from src.antibot_cv.automation.controller import AutomationRunOptions, load_config, run_automation
 from src.antibot_cv.automation.live_action_service import LiveActionService
+from src.antibot_cv.automation.mutation_lease import (
+    ActorKey,
+    MutationLease,
+    MutationLeaseCoordinator,
+    MutationLeaseMode,
+    MutationTarget,
+)
 from src.antibot_cv.automation.world_registry import WorldRegistry
+from src.antibot_cv.automation.npc_census_live import (
+    CensusInspectContract,
+    inspection_snapshot_matches, newer_same_area_authority,
+)
+from src.antibot_cv.automation.npc_census_inspect_journal import (
+    NpcCensusInspectJournal,
+    PendingCensusInspection,
+)
 
 
 @dataclass
@@ -26,10 +45,29 @@ class ControlRun:
     last_summary: dict[str, Any] | None = None
     last_status: dict[str, Any] = field(default_factory=dict)
     last_options: dict[str, Any] = field(default_factory=dict)
+    mutation_lease: MutationLease | None = None
 
     @property
     def running(self) -> bool:
         return self.thread.is_alive()
+
+
+@dataclass(frozen=True, slots=True)
+class RouteReconciliationRecord:
+    lease: MutationLease
+    before_snapshot: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class NpcOpenReconciliationRecord:
+    lease: MutationLease
+    expected_snapshot_id: str
+    expected_location_id: str
+    endpoint_npc_id: str
+    route_ref: str
+    endpoint_name: str
+    resulting_dialog_name: str
+    resulting_instance_id: str
 
 
 class AutomationControlService:
@@ -44,12 +82,41 @@ class AutomationControlService:
         self.default_config = str(default_config) if default_config is not None else "config/automation.local.json"
         self.allow_live = bool(allow_live)
         self.world_registry = WorldRegistry(Path(self.default_config).with_name("world_registry.json"))
+        # The page bridge survives control-server restarts.  A wall-clock epoch
+        # keeps a freshly started authority newer than any process-local epoch
+        # issued by an earlier server, while fencing tokens remain per intent.
+        self.mutation_coordinator = MutationLeaseCoordinator(
+            generation_seed=int(time.time()),
+        )
         self.live_actions = LiveActionService(
             lambda: load_config(self.default_config),
             identity_factory=self._logical_client_key,
+            mutation_coordinator=self.mutation_coordinator,
         )
         self._lock = threading.RLock()
         self._runs: dict[str, ControlRun] = {}
+        self._route_reconciliations: dict[MutationTarget, RouteReconciliationRecord] = {}
+        self._npc_open_reconciliations: dict[MutationTarget, NpcOpenReconciliationRecord] = {}
+        census_runs_dir = Path(load_config(self.default_config).runs_dir)
+        self._npc_inspect_journal = NpcCensusInspectJournal(
+            census_runs_dir / "npc_census_inspect.json",
+        )
+        self._npc_inspect_journal.load()
+        self._npc_inspect_leases: dict[tuple[str, int], MutationLease] = {}
+        self._restore_npc_inspect_barriers()
+
+    def _restore_npc_inspect_barriers(self) -> None:
+        """Restore global actor ownership for inspections uncertain at restart."""
+
+        for pending in self._npc_inspect_journal.records():
+            actor = ActorKey(pending.profile_id, pending.tab_id)
+            lease = self.mutation_coordinator.try_acquire(
+                actor, "quest:durable-census:inspect_exact_npc",
+                MutationLeaseMode.TRANSIENT,
+            )
+            if lease is None:
+                raise ValueError("NPC census durable mutation barrier restore failed")
+            self._npc_inspect_leases[pending.actor_key] = lease
 
     def clients(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -245,11 +312,25 @@ class AutomationControlService:
             "error": None if submitted else "instance_entry_blocked",
         }
 
-    def npc_dialog(self, client_id: str | None = None, expected_name: str | None = None) -> tuple[int, dict[str, Any]]:
+    def npc_dialog(
+        self,
+        client_id: str | None = None,
+        expected_name: str | None = None,
+        expected_npc_id: str | int | None = None,
+        expected_npc_instance_id: str | int | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         return self._structured_snapshot(
             "npc_dialog_snapshot",
             client_id=client_id,
-            payload={"expectedName": str(expected_name or "")[:180]},
+            payload={
+                "expectedName": str(expected_name or "")[:180],
+                "expectedNpcId": str(
+                    expected_npc_id if expected_npc_id is not None else ""
+                )[:40],
+                "expectedNpcInstanceId": str(
+                    expected_npc_instance_id if expected_npc_instance_id is not None else ""
+                )[:40],
+            },
         )
 
     def _structured_snapshot(
@@ -300,8 +381,35 @@ class AutomationControlService:
         if error is not None:
             return 409, error
         assert resolved_client_id is not None
-        before_status, before_payload = self.location_route(resolved_client_id)
-        before_snapshot = before_payload.get("snapshot") if before_status == 200 else None
+        retained_lease = self.live_actions.retained_fenced(
+            resolved_client_id, "location_route_step",
+        )
+        records = getattr(self, "_route_reconciliations", None)
+        if records is None:
+            records = {}
+            self._route_reconciliations = records
+        record = (
+            records.get(retained_lease.target)
+            if retained_lease is not None else None
+        )
+        if retained_lease is not None and not (
+            isinstance(record, RouteReconciliationRecord)
+            and record.lease == retained_lease
+        ):
+            return 502, {
+                "ok": False,
+                "submitted": False,
+                "verified": False,
+                "error": "route_reconciliation_record_missing",
+                "client_id": resolved_client_id,
+            }
+        if isinstance(record, RouteReconciliationRecord) and record.lease == retained_lease:
+            before_status = 200
+            before_payload = {"snapshot": record.before_snapshot}
+            before_snapshot = record.before_snapshot
+        else:
+            before_status, before_payload = self.location_route(resolved_client_id)
+            before_snapshot = before_payload.get("snapshot") if before_status == 200 else None
         if not isinstance(before_snapshot, dict):
             return 409, {
                 "ok": False,
@@ -314,7 +422,28 @@ class AutomationControlService:
             or before_snapshot.get("currentLocationId")
             or ""
         ).strip()
-        submitted = self.live_actions.execute(
+        def stage_route_record(lease: MutationLease) -> None:
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._lock = lock
+            with lock:
+                existing = records.get(lease.target)
+                candidate = RouteReconciliationRecord(lease, dict(before_snapshot))
+                if existing is not None and existing != candidate:
+                    raise RuntimeError("route reconciliation CAS conflict")
+                records[lease.target] = candidate
+
+        def rollback_route_record(lease: MutationLease) -> None:
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                return
+            with lock:
+                existing = records.get(lease.target)
+                if isinstance(existing, RouteReconciliationRecord) and existing.lease == lease:
+                    records.pop(lease.target, None)
+
+        dispatch = None if retained_lease is not None else self.live_actions.execute_fenced(
             resolved_client_id,
             ActionRequest(
                 "location_route_step",
@@ -323,8 +452,18 @@ class AutomationControlService:
                     "expected_current_location_id": expected_current_location_id,
                     "navigation_delay_ms": max(25, min(250, int(payload.get("navigationDelayMs") or 75))),
                 },
-            )
+            ),
+            on_claimed=stage_route_record,
+            on_not_issued=rollback_route_record,
         )
+        dispatch_status = (
+            ActionExecutionStatus.DELIVERY_UNKNOWN
+            if dispatch is None else dispatch.execution.status
+        )
+        dispatch_lease = retained_lease if dispatch is None else dispatch.lease
+        submitted = dispatch_status in {
+            ActionExecutionStatus.ISSUED, ActionExecutionStatus.DELIVERY_UNKNOWN,
+        }
         if not submitted:
             return 409, {
                 "ok": False,
@@ -360,19 +499,44 @@ class AutomationControlService:
             if isinstance(next_transition, dict)
             else ""
         )
+        expected_next_location_id = (
+            str(next_transition.get("locId") or "").strip()
+            if isinstance(next_transition, dict)
+            else ""
+        )
         verified_by_id = bool(
-            before_location_id and after_location_id and before_location_id != after_location_id
+            expected_next_location_id
+            and after_location_id == expected_next_location_id
+            and before_location_id != after_location_id
         )
         verified_by_name = bool(
-            expected_next_name
+            not expected_next_location_id
+            and expected_next_name
             and after_name == expected_next_name
             and before_name != after_name
         )
         verified = verified_by_id or verified_by_name
+        settled = verified
+        if verified and dispatch_lease is not None:
+            settled = False
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._lock = lock
+            with lock:
+                existing = records.get(dispatch_lease.target)
+                if (
+                    isinstance(existing, RouteReconciliationRecord)
+                    and existing.lease == dispatch_lease
+                    and self.live_actions.reconcile_fenced(dispatch_lease)
+                ):
+                    records.pop(dispatch_lease.target, None)
+                    settled = True
         verification_method = "location_id" if verified_by_id else "semantic_name" if verified_by_name else None
-        return 200, {
-            "ok": True,
+        return (200 if settled else 502), {
+            "ok": settled,
             "submitted": True,
+            "delivery_status": dispatch_status.value,
             "verified": verified,
             "verification_method": verification_method,
             "client_id": resolved_client_id,
@@ -389,32 +553,299 @@ class AutomationControlService:
         if error is not None:
             return 409, error
         assert resolved_client_id is not None
-        metadata = {
-            "expected_snapshot_id": payload.get("expectedSnapshotId"),
-            "expected_location_id": payload.get("expectedLocationId"),
-            "npc_id": payload.get("npcId"),
-            "expected_name": payload.get("expectedName"),
-            "expected_dialog_name": payload.get("expectedDialogName"),
+        raw_npc_id = payload.get("npcId")
+        raw_instance_id = payload.get("expectedNpcInstanceId")
+        endpoint_npc_id = str(raw_npc_id).strip() if not isinstance(raw_npc_id, bool) else ""
+        raw_route_ref = payload.get("expectedRouteRef")
+        route_ref = str(raw_route_ref).strip() if not isinstance(raw_route_ref, bool) else ""
+        if not route_ref.isascii() or not route_ref.isdecimal() or int(route_ref or "0") <= 0:
+            return 400, {"ok": False, "error": "npc_route_identity_invalid"}
+        if raw_instance_id is None or raw_instance_id == "":
+            resulting_instance_id = ""
+        elif isinstance(raw_instance_id, bool):
+            return 400, {"ok": False, "error": "npc_instance_identity_invalid"}
+        elif isinstance(raw_instance_id, int):
+            if raw_instance_id <= 0:
+                return 400, {"ok": False, "error": "npc_instance_identity_invalid"}
+            resulting_instance_id = str(raw_instance_id)
+        elif isinstance(raw_instance_id, str):
+            candidate_instance_id = raw_instance_id.strip()
+            if (
+                not candidate_instance_id
+                or not candidate_instance_id.isascii()
+                or not candidate_instance_id.isdecimal()
+                or int(candidate_instance_id) <= 0
+            ):
+                return 400, {"ok": False, "error": "npc_instance_identity_invalid"}
+            resulting_instance_id = str(int(candidate_instance_id))
+        else:
+            return 400, {"ok": False, "error": "npc_instance_identity_invalid"}
+        contract_values = {
+            "expected_snapshot_id": str(payload.get("expectedSnapshotId") or "").strip(),
+            "expected_location_id": str(payload.get("expectedLocationId") or "").strip(),
+            "endpoint_npc_id": endpoint_npc_id,
+            "route_ref": route_ref,
+            "endpoint_name": str(payload.get("expectedName") or "").strip(),
+            "resulting_dialog_name": str(
+                payload.get("expectedDialogName") or payload.get("expectedName") or ""
+            ).strip(),
+            "resulting_instance_id": resulting_instance_id,
         }
-        submitted = self.live_actions.execute(
+        metadata = {
+            "expected_snapshot_id": contract_values["expected_snapshot_id"],
+            "expected_location_id": contract_values["expected_location_id"],
+            "npc_id": contract_values["endpoint_npc_id"],
+            "expected_route_ref": contract_values["route_ref"],
+            "expected_name": contract_values["endpoint_name"],
+            "expected_dialog_name": contract_values["resulting_dialog_name"],
+            "expected_npc_instance_id": contract_values["resulting_instance_id"],
+        }
+        retained_lease = self.live_actions.retained_fenced(
+            resolved_client_id, "open_exact_npc",
+        )
+        records = getattr(self, "_npc_open_reconciliations", None)
+        if records is None:
+            records = {}
+            self._npc_open_reconciliations = records
+        record = records.get(retained_lease.target) if retained_lease is not None else None
+        if retained_lease is not None and not (
+            isinstance(record, NpcOpenReconciliationRecord) and record.lease == retained_lease
+        ):
+            return 502, {
+                "ok": False, "submitted": False,
+                "error": "npc_open_reconciliation_record_missing",
+                "client_id": resolved_client_id,
+            }
+        if isinstance(record, NpcOpenReconciliationRecord):
+            current_contract = (
+                contract_values["expected_snapshot_id"], contract_values["expected_location_id"],
+                contract_values["endpoint_npc_id"], contract_values["endpoint_name"],
+                contract_values["route_ref"],
+                contract_values["resulting_dialog_name"], contract_values["resulting_instance_id"],
+            )
+            stored_contract = (
+                record.expected_snapshot_id, record.expected_location_id,
+                record.endpoint_npc_id, record.endpoint_name,
+                record.route_ref,
+                record.resulting_dialog_name, record.resulting_instance_id,
+            )
+            if current_contract != stored_contract:
+                return 409, {
+                    "ok": False, "submitted": False,
+                    "error": "npc_open_reconciliation_contract_mismatch",
+                    "client_id": resolved_client_id,
+                }
+
+        def stage_npc_record(lease: MutationLease) -> None:
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._lock = lock
+            candidate = NpcOpenReconciliationRecord(lease=lease, **contract_values)
+            with lock:
+                existing = records.get(lease.target)
+                if existing is not None and existing != candidate:
+                    raise RuntimeError("NPC reconciliation CAS conflict")
+                records[lease.target] = candidate
+
+        def rollback_npc_record(lease: MutationLease) -> None:
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                return
+            with lock:
+                existing = records.get(lease.target)
+                if isinstance(existing, NpcOpenReconciliationRecord) and existing.lease == lease:
+                    records.pop(lease.target, None)
+
+        dispatch = None if retained_lease is not None else self.live_actions.execute_fenced(
             resolved_client_id,
             ActionRequest("open_exact_npc", dry_run=False, metadata=metadata),
+            on_claimed=stage_npc_record,
+            on_not_issued=rollback_npc_record,
         )
+        dispatch_status = (
+            ActionExecutionStatus.DELIVERY_UNKNOWN
+            if dispatch is None else dispatch.execution.status
+        )
+        diagnostic_code = _public_action_diagnostic_code(
+            ActionDiagnosticCode.RETAINED_RECONCILIATION
+            if dispatch is None else dispatch.execution.diagnostic_code
+        )
+        dispatch_lease = retained_lease if dispatch is None else dispatch.lease
+        submitted = dispatch_status in {
+            ActionExecutionStatus.ISSUED, ActionExecutionStatus.DELIVERY_UNKNOWN,
+        }
         if not submitted:
             return 409, {
                 "ok": False,
                 "error": "open_exact_npc_blocked",
+                "delivery_status": dispatch_status.value,
+                "diagnostic_code": diagnostic_code,
                 "client_id": resolved_client_id,
             }
         dialog_status, dialog = self.npc_dialog(
             resolved_client_id,
-            str(payload.get("expectedDialogName") or payload.get("expectedName") or ""),
+            contract_values["resulting_dialog_name"],
+            contract_values["endpoint_npc_id"],
+            contract_values["resulting_instance_id"],
         )
-        return (200 if dialog_status == 200 else 502), {
-            "ok": dialog_status == 200,
+        dialog_snapshot = dialog.get("snapshot") if isinstance(dialog, dict) else None
+        expected_npc_id_text = contract_values["endpoint_npc_id"]
+        observed_npc_id = (
+            dialog_snapshot.get("npcId") if isinstance(dialog_snapshot, dict) else None
+        )
+        observed_npc_id_text = (
+            str(observed_npc_id).strip()
+            if not isinstance(observed_npc_id, bool) else ""
+        )
+        observed_instance_id = (
+            dialog_snapshot.get("npcInstanceId")
+            if isinstance(dialog_snapshot, dict) else None
+        )
+        observed_instance_id_text = (
+            str(observed_instance_id).strip()
+            if not isinstance(observed_instance_id, bool) else ""
+        )
+        expected_instance_id_text = contract_values["resulting_instance_id"]
+        dialog_verified = bool(
+            dialog_status == 200
+            and isinstance(dialog_snapshot, dict)
+            and dialog_snapshot.get("identityMatches") is True
+            and expected_npc_id_text.isdecimal()
+            and observed_npc_id_text.isdecimal()
+            and observed_npc_id_text == expected_npc_id_text
+            and (
+                not expected_instance_id_text
+                or expected_instance_id_text.isdecimal()
+                and observed_instance_id_text.isdecimal()
+                and observed_instance_id_text == expected_instance_id_text
+            )
+        )
+        dialog_settled = dialog_verified
+        if dialog_verified and dispatch_lease is not None:
+            dialog_settled = False
+            lock = getattr(self, "_lock", None)
+            if lock is None:
+                lock = threading.RLock()
+                self._lock = lock
+            with lock:
+                existing = records.get(dispatch_lease.target)
+                if (
+                    isinstance(existing, NpcOpenReconciliationRecord)
+                    and existing.lease == dispatch_lease
+                    and self.live_actions.reconcile_fenced(dispatch_lease)
+                ):
+                    records.pop(dispatch_lease.target, None)
+                    dialog_settled = True
+        return (200 if dialog_settled else 502), {
+            "ok": dialog_settled,
             "submitted": True,
+            "delivery_status": dispatch_status.value,
+            "diagnostic_code": diagnostic_code,
             "client_id": resolved_client_id,
-            "dialog": dialog.get("snapshot"),
+            "dialog": dialog_snapshot,
+        }
+
+    def inspect_exact_npc(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Discover resulting NPC identity under an exact durable endpoint lease."""
+
+        if not self.allow_live:
+            return 403, {"ok": False, "error": "live_server_not_authorized"}
+        resolved_client_id, error = self._resolve_client_id(_payload_client_id(payload))
+        if error is not None:
+            return 409, error
+        assert resolved_client_id is not None
+        try:
+            contract = CensusInspectContract.from_payload(payload)
+        except ValueError:
+            return 400, {"ok": False, "error": "npc_census_contract_invalid"}
+
+        actor_key = self._logical_client_key(resolved_client_id)
+        if not isinstance(actor_key, tuple) or len(actor_key) != 2:
+            return 409, {"ok": False, "error": "npc_census_actor_invalid"}
+        pending = self._npc_inspect_journal.get(actor_key)
+        if pending is not None and pending.contract != contract:
+            return 409, {"ok": False, "error": "npc_census_contract_mismatch"}
+        if pending is not None and pending.phase == "reconciled":
+            try:
+                cached_dialogue = json.loads(pending.dialogue_json or "")
+            except json.JSONDecodeError:
+                return 502, {"ok": False, "error": "npc_census_reconciliation_corrupt"}
+            return 200, {
+                "ok": True, "submitted": True,
+                "delivery_status": ActionExecutionStatus.DELIVERY_UNKNOWN.value,
+                "diagnostic_code": "retained_reconciliation",
+                "client_id": resolved_client_id, "dialog": cached_dialogue,
+                "error": None,
+            }
+        retained = self.live_actions.retained_fenced(resolved_client_id, "inspect_exact_npc")
+        lease = self._npc_inspect_leases.get(actor_key) or retained
+        if pending is None and retained is not None:
+            return 502, {"ok": False, "error": "npc_census_reconciliation_missing"}
+
+        def stage(lease: MutationLease) -> None:
+            candidate = PendingCensusInspection(actor_key[0], actor_key[1], contract)
+            with self._lock:
+                self._npc_inspect_journal.stage(candidate)
+                self._npc_inspect_leases[actor_key] = lease
+
+        def rollback(lease: MutationLease) -> None:
+            with self._lock:
+                candidate = self._npc_inspect_journal.get(actor_key)
+                if candidate is not None and self._npc_inspect_leases.get(actor_key) == lease:
+                    self._npc_inspect_journal.clear_exact(candidate)
+                    self._npc_inspect_leases.pop(actor_key, None)
+
+        dispatch = None if pending is not None else self.live_actions.execute_fenced(
+            resolved_client_id,
+            ActionRequest(
+                "inspect_exact_npc", dry_run=False,
+                metadata=contract.action_metadata(),
+            ),
+            on_claimed=stage,
+            on_not_issued=rollback,
+        )
+        status = (
+            ActionExecutionStatus.DELIVERY_UNKNOWN
+            if dispatch is None else dispatch.execution.status
+        )
+        diagnostic = _public_action_diagnostic_code(
+            ActionDiagnosticCode.RETAINED_RECONCILIATION
+            if dispatch is None else dispatch.execution.diagnostic_code
+        )
+        lease = lease if dispatch is None else dispatch.lease
+        if status is ActionExecutionStatus.NOT_ISSUED:
+            return 409, {
+                "ok": False, "submitted": False,
+                "delivery_status": status.value, "diagnostic_code": diagnostic,
+                "error": "npc_census_inspect_not_issued",
+            }
+
+        dialog_status, dialog = self.npc_dialog(
+            resolved_client_id, None, contract.endpoint_id, None,
+        )
+        snapshot = dialog.get("snapshot") if isinstance(dialog, dict) else None
+        verified = dialog_status == 200 and inspection_snapshot_matches(contract, snapshot)
+        settled = False
+        if verified:
+            with self._lock:
+                existing = self._npc_inspect_journal.get(actor_key)
+                if existing is not None and existing.contract == contract \
+                        and existing.phase == "pending" and isinstance(snapshot, dict):
+                    try:
+                        self._npc_inspect_journal.mark_reconciled_exact(existing, snapshot)
+                    except (OSError, ValueError):
+                        settled = False
+                    else:
+                        settled = True
+        return (200 if settled else 502), {
+            "ok": settled,
+            "submitted": True,
+            "delivery_status": status.value,
+            "diagnostic_code": diagnostic,
+            "client_id": resolved_client_id,
+            "dialog": snapshot if isinstance(snapshot, dict) else None,
+            "error": None if settled else "npc_census_reconciliation_pending",
         }
 
     def npc_quest_action(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -544,6 +975,50 @@ class AutomationControlService:
         if error is not None:
             return 409, error
         assert resolved_client_id is not None
+        actor_key = self._logical_client_key(resolved_client_id)
+        pending = self._npc_inspect_journal.get(actor_key) if isinstance(actor_key, tuple) else None
+        if pending is not None:
+            if pending.phase != "reconciled":
+                area_status, area_payload = self.area_npcs(resolved_client_id)
+                area_snapshot = area_payload.get("snapshot") if area_status == 200 else None
+                if not newer_same_area_authority(pending.contract, area_snapshot):
+                    return 409, {"ok": False, "submitted": False, "error": "npc_census_reconciliation_pending"}
+                with self._lock:
+                    current = self._npc_inspect_journal.get(actor_key)
+                    lease = self._npc_inspect_leases.get(actor_key) \
+                        or self.live_actions.retained_fenced(resolved_client_id, "inspect_exact_npc")
+                    if current != pending or lease is None:
+                        return 502, {"ok": False, "submitted": False, "error": "npc_census_abort_barrier_missing"}
+                    if not self._npc_inspect_journal.clear_exact(pending):
+                        return 502, {"ok": False, "submitted": False, "error": "npc_census_abort_clear_conflict"}
+                    if not self.live_actions.reconcile_fenced(lease):
+                        return 502, {"ok": False, "submitted": False, "error": "npc_census_abort_release_failed"}
+                    self._npc_inspect_leases.pop(actor_key, None)
+                return 409, {
+                    "ok": False, "submitted": False,
+                    "error": "npc_census_pending_aborted_on_new_area_authority",
+                }
+            with self._lock:
+                current = self._npc_inspect_journal.get(actor_key)
+                lease = self._npc_inspect_leases.get(actor_key) \
+                    or self.live_actions.retained_fenced(resolved_client_id, "inspect_exact_npc")
+                if current != pending or lease is None:
+                    return 502, {"ok": False, "submitted": False, "error": "npc_census_reconciliation_barrier_missing"}
+                try:
+                    cleared = self._npc_inspect_journal.clear_exact(pending)
+                except (OSError, ValueError):
+                    return 502, {
+                        "ok": False, "submitted": False,
+                        "error": "npc_census_reconciliation_clear_failed",
+                    }
+                if not cleared:
+                    return 502, {
+                        "ok": False, "submitted": False,
+                        "error": "npc_census_reconciliation_clear_conflict",
+                    }
+                if not self.live_actions.reconcile_fenced(lease):
+                    return 502, {"ok": False, "submitted": False, "error": "npc_census_reconciliation_release_failed"}
+                self._npc_inspect_leases.pop(actor_key, None)
         submitted = self.live_actions.execute(
             resolved_client_id,
             ActionRequest("open_area", dry_run=False, metadata={"reason": "control_api"}),
@@ -584,6 +1059,36 @@ class AutomationControlService:
                 }
             stop_event = threading.Event()
             options = self._options_from_payload(payload, browser_client_id=resolved_client_id)
+            mutation_lease = None
+            if payload.get("live") is True:
+                logical_key = self._logical_client_key(resolved_client_id)
+                if logical_key is None:
+                    return 409, {
+                        "ok": False,
+                        "error": "mutation_identity_missing",
+                        "client_id": resolved_client_id,
+                    }
+                mutation_target = MutationTarget(*logical_key)
+                actor_generation = self.mutation_coordinator.bind(
+                    mutation_target, resolved_client_id,
+                )
+                mutation_lease = self.mutation_coordinator.try_acquire(
+                    mutation_target,
+                    f"controller:{resolved_client_id}",
+                    MutationLeaseMode.EXCLUSIVE_RUN,
+                    actor_generation=actor_generation,
+                )
+                if mutation_lease is None:
+                    return 409, {
+                        "ok": False,
+                        "error": "mutation_lease_held",
+                        "client_id": resolved_client_id,
+                    }
+                options = replace(
+                    options,
+                    mutation_coordinator=self.mutation_coordinator,
+                    mutation_lease=mutation_lease,
+                )
             run = ControlRun(
                 client_id=resolved_client_id,
                 thread=threading.Thread(
@@ -595,9 +1100,16 @@ class AutomationControlService:
                 stop_event=stop_event,
                 started_at=time.time(),
                 last_options=dict(payload),
+                mutation_lease=mutation_lease,
             )
             self._runs[resolved_client_id] = run
-            run.thread.start()
+            try:
+                run.thread.start()
+            except Exception:
+                self._runs.pop(resolved_client_id, None)
+                if mutation_lease is not None:
+                    self.mutation_coordinator.release(mutation_lease)
+                raise
         return 200, {"ok": True, "message": "started", "client_id": resolved_client_id, "status": self.status(resolved_client_id)}
 
     def stop(self, payload: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
@@ -636,6 +1148,12 @@ class AutomationControlService:
                 run = self._runs.get(client_id)
                 if run is not None:
                     run.ended_at = time.time()
+                    mutation_lease = run.mutation_lease
+                    run.mutation_lease = None
+                else:
+                    mutation_lease = None
+            if mutation_lease is not None:
+                self.mutation_coordinator.release(mutation_lease)
 
     def _update_status(self, client_id: str, status: dict[str, object]) -> None:
         with self._lock:
@@ -779,6 +1297,7 @@ class AutomationControlService:
             "targetLocationName": payload.get("targetLocationName"),
             "autoNavigateQuestTargets": payload.get("autoNavigateQuestTargets"),
             "autonomousQuestDirector": payload.get("autonomousQuestDirector"),
+            "acceptAvailableQuests": payload.get("acceptAvailableQuests"),
             "pinnedQuestId": payload.get("pinnedQuestId"),
             "confirmDelayMs": payload.get("confirmDelayMs"),
             "betweenItemsDelayMs": payload.get("betweenItemsDelayMs"),
@@ -822,6 +1341,14 @@ def _compact_route_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] |
 def _payload_client_id(payload: dict[str, Any]) -> str | None:
     value = payload.get("clientId") or payload.get("client_id")
     return str(value).strip() if value else None
+
+
+def _public_action_diagnostic_code(value: object) -> str:
+    return (
+        value.value
+        if isinstance(value, ActionDiagnosticCode)
+        else ActionDiagnosticCode.UNSPECIFIED.value
+    )
 
 
 def _short_client_id(client_id: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -11,6 +12,7 @@ from src.antibot_cv.automation.quest_npc_open_navigation import (
     NpcOpenSettleStatus,
     NpcOpenStatus,
     make_pending_npc_open,
+    npc_open_command_payload,
     parse_npc_open_outcome,
     restore_pending_npc_open,
     serialize_pending_npc_open,
@@ -32,7 +34,7 @@ def pending():
         client_id="client-a", profile_id="profile-a", tab_id=42,
         quest_id=ref.id, quest_title=ref.title, quest_accept_ref=ref.accept_ref,
         quest_catalog_page=ref.catalog_page, giver_name=ref.giver_names[0],
-        npc_id="771", npc_name="Башня Вагарда", location_id="125",
+        npc_id="771", route_ref="398", npc_name="Башня Вагарда", location_id="125",
         location_name=ref.location, area_snapshot_id="area-npcs-q269",
         area_generated_at=99.0, issued_at=100.0, settle_timeout_s=20.0,
     )
@@ -84,6 +86,45 @@ def test_legacy_postcondition_failure_is_ambiguous_not_safe_to_retry() -> None:
         assert contradictory.dispatched
 
 
+def test_pending_allows_zero_endpoint_and_persists_canonical_route_ref() -> None:
+    staged = replace(pending(), npc_id="0")
+    restored = restore_pending_npc_open(serialize_pending_npc_open(staged))
+    assert restored == staged
+    assert restored is not None and restored.route_ref == "398"
+
+
+def test_pre_route_ref_schema_two_restores_reconciliation_only() -> None:
+    raw = serialize_pending_npc_open(pending())
+    raw["schema"] = 2
+    raw.pop("route_ref")
+    raw.pop("route_ref_authority")
+    restored = restore_pending_npc_open(raw)
+    assert restored is not None
+    assert restored.route_ref is None
+    assert restored.route_ref_authority == "legacy_checkpoint_missing"
+
+
+@pytest.mark.parametrize("schema", [True, False, 1.0, 2.0, "1", None])
+def test_checkpoint_rejects_non_integer_schema_markers(schema: object) -> None:
+    raw = serialize_pending_npc_open(pending())
+    raw["schema"] = schema
+    with pytest.raises(ValueError, match="invalid pending NPC open checkpoint"):
+        restore_pending_npc_open(raw)
+
+
+def test_npc_open_payload_rejects_noncanonical_route_ref() -> None:
+    metadata = {
+        "expected_snapshot_id": "area-npcs-test",
+        "expected_location_id": "102",
+        "npc_id": "0",
+        "expected_route_ref": "0398",
+        "expected_name": "Торговец Богдан",
+    }
+    assert npc_open_command_payload(metadata) is None
+    metadata["expected_route_ref"] = "398"
+    assert npc_open_command_payload(metadata)["expectedRouteRef"] == "398"
+
+
 def test_q269_settle_requires_exact_fresh_identity_and_npc_page() -> None:
     staged = pending()
     accepted = settle_npc_open_snapshot(
@@ -101,6 +142,73 @@ def test_q269_settle_requires_exact_fresh_identity_and_npc_page() -> None:
             staged, snapshot, client_id=identity[0], profile_id=identity[1], tab_id=identity[2], now=102.0,
         )
         assert decision.status is not NpcOpenSettleStatus.ACCEPT
+
+
+def test_exact_empty_npc_dialog_is_a_local_outcome() -> None:
+    staged = pending()
+    empty = dialog(questActions=[], dialogActions=[])
+
+    decision = settle_npc_open_snapshot(
+        staged, empty, client_id="client-a", profile_id="profile-a",
+        tab_id=42, now=102.0,
+    )
+
+    assert decision.status is NpcOpenSettleStatus.EMPTY
+    assert decision.reason == "npc_open_exact_quest_action_unavailable"
+
+
+def test_exact_npc_with_only_unrelated_actions_is_a_local_outcome() -> None:
+    staged = pending()
+    unrelated = dialog(
+        questActions=[{
+            "questId": "999", "npcId": "771", "action": "open",
+            "title": "Магазин", "visible": True, "disabled": False,
+        }],
+        dialogActions=[],
+    )
+
+    decision = settle_npc_open_snapshot(
+        staged, unrelated, client_id="client-a", profile_id="profile-a",
+        tab_id=42, now=102.0,
+    )
+
+    assert decision.status is NpcOpenSettleStatus.EMPTY
+    assert decision.reason == "npc_open_exact_quest_action_unavailable"
+
+
+def test_npc_open_accepts_exact_already_opened_quest_dialog() -> None:
+    staged = pending()
+    direct_dialog = dialog(
+        questActions=[],
+        dialogActions=[{
+            "questId": "269", "npcId": "771", "action": "answer",
+            "ref": "401", "text": "Что случилось?",
+            "visible": True, "disabled": False,
+        }],
+    )
+
+    decision = settle_npc_open_snapshot(
+        staged, direct_dialog,
+        client_id="client-a", profile_id="profile-a", tab_id=42, now=102.0,
+    )
+
+    assert decision.status is NpcOpenSettleStatus.ACCEPT
+    assert decision.reason == "npc_open_exact_dialog_confirmed"
+
+
+def test_checkpoint_marks_direct_dialog_open_without_reissuing_open(tmp_path) -> None:
+    state = tmp_path / "chain.json"
+    chain = QuestChainRuntime(state_path=state)
+    chain.stage_accepted_ref(quest())
+    staged = pending()
+    chain.stage_npc_open(staged)
+
+    chain.settle_npc_open(staged, quest_opened=True)
+
+    restored = QuestChainRuntime(state_path=state)
+    assert restored.pending_npc_open is None
+    assert restored.pending_npc_dialog is not None
+    assert restored.pending_npc_dialog.quest_opened is True
 
 
 def test_exact_snapshot_at_or_after_deadline_never_settles() -> None:

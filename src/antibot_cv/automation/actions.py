@@ -11,9 +11,13 @@ import time
 
 from src.antibot_cv.automation import action_live_sink as _live
 from src.antibot_cv.automation.action_live_sink import (
+    ActionDiagnosticCode,
+    ActionExecutionResult,
+    ActionExecutionStatus,
     ActionExecutor,
     ActionRequest,
     ActionSink,
+    TypedActionSink,
     BlockedActionSink,
     DryRunActionSink,
     ReplayActionSink,
@@ -36,18 +40,25 @@ class LiveMacActionSink(_live.LiveMacActionSink):
     """
 
     def execute(self, request: ActionRequest) -> bool:
+        return self.execute_outcome(request).issued
+
+    def execute_outcome(self, request: ActionRequest) -> ActionExecutionResult:
         _live.global_browser_injector = global_browser_injector
         _live.time = time
         # Resolve ownership at the router boundary. Unknown actions remain the
         # sink's responsibility so its established blocked-event contract holds.
         action_domain(request.action_type)
-        return super().execute(request)
+        return super().execute_outcome(request)
 
 
 __all__ = [
+    "ActionDiagnosticCode",
+    "ActionExecutionResult",
+    "ActionExecutionStatus",
     "ActionExecutor",
     "ActionRequest",
     "ActionSink",
+    "TypedActionSink",
     "BlockedActionSink",
     "DryRunActionSink",
     "LiveMacActionSink",

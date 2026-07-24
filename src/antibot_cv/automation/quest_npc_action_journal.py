@@ -92,7 +92,7 @@ class PendingNpcQuestAction:
             or not self.expected_generated_at <= self.issued_at < self.deadline
             or not isinstance(self.quest_opened, bool)
             or isinstance(self.dialog_steps, bool) or not isinstance(self.dialog_steps, int)
-            or self.deadline - self.issued_at > 120 or self.dialog_steps < 0 or self.dialog_steps > 20
+            or self.deadline - self.issued_at > 120 or self.dialog_steps < 0 or self.dialog_steps > 64
             or self.capability_version != NPC_ACTION_CAPABILITY or self.origin != "https://3kingdoms.ru"
             or self.provenance != "causal_npc_dialog_snapshot"
             or not isinstance(self.phase, NpcQuestActionPhase)
@@ -204,11 +204,15 @@ def settle_dialog_action(pending: PendingNpcQuestAction, snapshot: object, *, cl
         and item.get("visible") is True and item.get("disabled") is False]
     headers = snapshot.get("headers") if isinstance(snapshot.get("headers"), list) else []
     actions_text = snapshot.get("actions") if isinstance(snapshot.get("actions"), list) else []
-    terminal = not accepts or (
+    terminal = len(accepts) == 1 or not accepts or (
         sum(1 for value in headers if " ".join(str(value or "").casefold().split()) == " ".join(pending.quest_title.casefold().split())) == 1
         and any("ваша цель:" in str(item.get("containerText") or "").casefold() for item in actions_text if isinstance(item, Mapping))
     )
-    bounded_next = len(next_actions) <= 20 and len(accept_actions) <= 10 and len(answers) + len(accepts) == 1 and terminal
+    # Successor executability is a later policy decision.  Multiple bounded
+    # successor choices still prove that the previous exact action advanced;
+    # refusing to settle here used to hold the mutation journal until timeout
+    # and globally stop on ordinary quest puzzles.
+    bounded_next = len(next_actions) <= 20 and len(accept_actions) <= 10 and len(answers) + len(accepts) >= 1 and terminal
     return NpcQuestActionSettle.ACCEPT if not old and changed and bounded_next else NpcQuestActionSettle.WAIT
 
 

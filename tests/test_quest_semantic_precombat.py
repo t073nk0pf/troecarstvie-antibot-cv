@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from dataclasses import replace
 import time
 
 from src.antibot_cv.automation.navigation_runtime import NavigationRuntimeMixin
@@ -10,6 +11,7 @@ from src.antibot_cv.automation.quest_objective_runtime import (
     ObjectiveKind,
     QuestObjective,
 )
+from src.antibot_cv.automation.quest_combat_binding import QuestCombatAdmissionStatus
 
 
 Q304_OBJECTIVE = (
@@ -187,9 +189,51 @@ def test_q304_missing_blood_allows_only_combat_drop_after_inspection_pass() -> N
 
     assert controller._quest_inventory_allows_attack() is False
     assert controller._quest_semantic_precombat_attack_allowed is True
+    assert controller._quest_semantic_combat_binding.target == "Непобедимый кабан"
     assert controller.refreshes == 0
     assert controller.unsafe_reason is None
     assert controller._quest_inventory_allows_attack() is True
+
+
+def test_semantic_combat_target_mismatch_blocks_before_attack_mutation() -> None:
+    controller = _Harness("q280_q304", blood_count=0)
+    objective = controller._quest_director.active_objective
+    controller._quest_director.active_objective = replace(
+        objective,
+        monster=MonsterTarget("Гигантская оса [5]", "Гигантская оса", 5),
+    )
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_semantic_precombat_attack_allowed is False
+    assert getattr(controller, "_quest_semantic_combat_binding", None) is None
+    assert controller.unsafe_reason == "quest_semantic_combat_target_mismatch"
+
+
+def test_stale_semantic_authority_revokes_existing_combat_binding() -> None:
+    controller = _Harness("q280_q304", blood_count=0)
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_inventory_allows_attack() is True
+    old_binding = controller._quest_semantic_combat_binding
+
+    controller._quest_director.active_snapshot_fresh = False
+    request_count = len(controller.action_executor.sink.requests)
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_semantic_combat_binding is None
+    assert controller._quest_semantic_precombat_attack_allowed is False
+    assert controller._quest_semantic_combat_admission.status is QuestCombatAdmissionStatus.WAIT
+    assert len(controller.action_executor.sink.requests) == request_count
+    assert controller.unsafe_reason is None
+
+    controller._quest_director.active_snapshot_fresh = True
+    controller._quest_active_catalog_authority.revision = 2
+    controller._quest_director.active_catalog.revision = 2
+    controller.session.completed_cycles = 1
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_semantic_combat_binding is not None
+    assert controller._quest_semantic_combat_binding == old_binding
+    assert controller._quest_semantic_combat_admission.status is QuestCombatAdmissionStatus.ACTIONABLE
 
 
 def test_legacy_mode_keeps_existing_inventory_behavior() -> None:
@@ -198,4 +242,78 @@ def test_legacy_mode_keeps_existing_inventory_behavior() -> None:
     assert controller._quest_inventory_allows_attack() is False
     assert controller._quest_inventory_terminal_completion_evidence.quest_id == "304"
     assert controller.refreshes == 1
+    assert controller.unsafe_reason is None
+
+
+def test_real_q271_complete_inventory_keeps_combat_blocked_until_turn_in_refresh() -> None:
+    objective_text = (
+        "Убивая Ядовитых Випер, получите 3 Клыка и возращайтесь "
+        "в Лагерь новобранцев к десятнику Бертроду."
+    )
+    controller = _Harness("legacy", provenance=False, blood_count=0)
+    controller._quest_director.active_objective = QuestObjective(
+        ObjectiveKind.MONSTER_HUNT,
+        "271",
+        "Сувениры от десятника",
+        objective_text,
+        "q271-live-fingerprint",
+        MonsterTarget("Ядовитая Випера [2]", "Ядовитая Випера", 2),
+        "Ядовитых Випер",
+        None,
+        None,
+        False,
+        0,
+    )
+    controller._quest_director.active_catalog.result = (
+        ActiveQuestEntry("271", "Сувениры от десятника", {
+            "id": "271",
+            "title": "Сувениры от десятника",
+            "status": "active",
+            "objective": objective_text,
+            "objectiveKind": "collect",
+            "navigation": (
+                {"text": "Ядовитых Випер", "target": "Ядовитая Випера [2]"},
+                {"text": "Лагерь новобранцев", "target": "Лагерь новобранцев"},
+            ),
+            "progress": {"current": None, "required": None, "complete": False},
+        }),
+    )
+    controller._quest_target_names = ("Ядовитая Випера",)
+    controller._quest_target_levels = (2,)
+    controller._quest_target_specs = (("Ядовитая Випера", 2),)
+
+    class _Q271Sink:
+        last_quest_inventory_snapshot = None
+        requests = []
+
+        def execute(self, request) -> bool:
+            self.requests.append(request)
+            self.last_quest_inventory_snapshot = {
+                "ok": True,
+                "category": "quest",
+                "categoryConfirmed": True,
+                "truncated": False,
+                "items": [{
+                    "artAltTitle": "Клык Ядовитой Виперы",
+                    "count": 3,
+                }],
+            }
+            return True
+
+    sink = _Q271Sink()
+    controller.action_executor.sink = sink
+    controller.action_executor.execute = sink.execute
+
+    assert controller._quest_inventory_allows_attack() is False
+    assert controller._quest_inventory_terminal_completion_evidence.quest_id == "271"
+    assert controller._quest_inventory_terminal_completion_evidence.collected == (
+        ("Клык Ядовитой Виперы", 3),
+    )
+    assert controller._quest_target_names == ()
+    assert controller.refreshes == 1
+
+    # A second hunt-frame callback must not fall through to combat while the
+    # completion evidence is waiting for the authoritative active refresh.
+    assert controller._quest_inventory_allows_attack() is False
+    assert len(sink.requests) == 1
     assert controller.unsafe_reason is None

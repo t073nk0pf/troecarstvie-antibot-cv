@@ -12,22 +12,32 @@ from src.antibot_cv.automation.quest_dialogue_runtime import (
     parse_dialogue_objective,
 )
 from src.antibot_cv.automation.runtime_helpers import same_location_name
+from src.antibot_cv.automation.quest_return_clause import (
+    DELIVERY_VERB_PATTERN,
+    RETURN_VERB_PATTERN,
+)
 
 
 _MONSTER_TARGET = re.compile(r"^.+\s\[[1-9]\d*\]$")
 _RETURN_NPC_FIRST = re.compile(
-    r"(?:возвращайтесь|возвращайтесь|возращайтесь|вернитесь|возвратитесь)\s+"
+    rf"{RETURN_VERB_PATTERN}\s+"
     r"к\s+(?P<npc>.+?)\s+(?:в|во|на)\s+(?P<location>[^.;]+)[.!]?",
     re.IGNORECASE,
 )
 _RETURN_LOCATION_FIRST = re.compile(
-    r"(?:возвращайтесь|возращайтесь|вернитесь)\s+"
+    rf"{RETURN_VERB_PATTERN}\s+"
     r"(?:в|во|на)\s+(?P<location>.+?)\s+к\s+(?P<npc>[^.;]+)[.!]?",
     re.IGNORECASE,
 )
 _DELIVER_NPC_FIRST = re.compile(
-    r"(?:отнесите|отнести|передайте|передать)\s+.+?\s+"
+    rf"{DELIVERY_VERB_PATTERN}\s+.+?\s+"
     r"(?P<npc>[^.;]+?)\s+(?:в|во|на)\s+(?P<location>[^.;]+)[.!]?",
+    re.IGNORECASE,
+)
+_RETURN_ITEM_NPC_FIRST = re.compile(
+    r"верните\s+.+?\s+"
+    r"(?P<npc>ремесленнику\s+[^.;]+?)\s+(?:в|во|на)\s+"
+    r"(?P<location>[^.;]+)[.!]?",
     re.IGNORECASE,
 )
 
@@ -56,10 +66,11 @@ def derive_turn_in_ref(entry: ActiveQuestEntry) -> QuestRef | None:
         *_RETURN_NPC_FIRST.finditer(objective),
         *_RETURN_LOCATION_FIRST.finditer(objective),
         *_DELIVER_NPC_FIRST.finditer(objective),
+        *_RETURN_ITEM_NPC_FIRST.finditer(objective),
     ]
     if len(matches) != 1:
         return _dialogue_shaped_turn_in_ref(entry)
-    npc = _clean(matches[0].group("npc"))
+    npc = _canonicalize_npc_role(_clean(matches[0].group("npc")))
     stated_location = _clean(matches[0].group("location"))
     location = locations[0]
     if not npc or not stated_location or not same_location_name(stated_location, location):
@@ -86,3 +97,9 @@ def _dialogue_shaped_turn_in_ref(entry: ActiveQuestEntry) -> QuestRef | None:
 
 def _clean(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip(" ,.!\t\r\n")
+
+
+def _canonicalize_npc_role(value: str) -> str:
+    return re.sub(
+        r"^ремесленнику\b", "Ремесленник", value, flags=re.IGNORECASE
+    )

@@ -1170,6 +1170,38 @@
       }
     });
 
+  const useQuestInventoryItem = async (payload) => {
+    const expectedName = safeString(payload && payload.expectedName, 220).trim();
+    if (!expectedName) return { ok: false, message: "quest_item_name_missing" };
+    const before = await inventorySnapshot({
+      ...(payload || {}), open: true, category: "quest", names: [expectedName],
+    });
+    if (!before || before.ok !== true || before.categoryConfirmed !== true) {
+      return { ok: false, message: "quest_item_inventory_unconfirmed", before };
+    }
+    const normalized = normalizeNpcName(expectedName);
+    const matches = (Array.isArray(before.items) ? before.items : []).filter((item) =>
+      normalizeNpcName(safeString(item && item.artAltTitle, 220)) === normalized
+    );
+    if (matches.length !== 1) {
+      return { ok: matches.length === 0, message: matches.length ? "quest_item_ambiguous" : "quest_item_absent", candidateCount: matches.length, before };
+    }
+    const item = matches[0];
+    if (!item.artikulId) return { ok: false, message: "quest_item_artikul_missing", item, before };
+    const expectedArtikulId = safeString(payload && payload.expectedArtikulId, 80).trim();
+    if (expectedArtikulId && safeString(item.artikulId, 80) !== expectedArtikulId) {
+      return { ok: false, message: "quest_item_artikul_mismatch", item, before };
+    }
+    const countBefore = Math.max(0, toNumber(item.count, 0));
+    const useResult = await requestInventoryArtifactUse(item);
+    if (!useResult || useResult.ok !== true) return { ok: false, message: "quest_item_use_failed", item, before, useResult };
+    return {
+      ok: true, message: "quest_item_use_acknowledged",
+      requiresQuestReconciliation: true,
+      expectedName, item, countBefore, useResult,
+    };
+  };
+
   const executeInventoryItemScript = (match) => {
     const item = match && match.item;
     const href = safeString(item && item.href, 500);

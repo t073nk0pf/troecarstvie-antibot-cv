@@ -4,6 +4,11 @@ import time
 
 from src.antibot_cv.automation.actions import ActionRequest
 from src.antibot_cv.automation.quest_compiler import QuestCompileStatus, compile_quest_plan
+from src.antibot_cv.automation.quest_combat_binding import (
+    QuestCombatAdmission,
+    QuestCombatAdmissionStatus,
+    bind_semantic_combat_target,
+)
 from src.antibot_cv.automation.quest_inventory_evidence import (
     QuestInventoryEvidenceStatus,
     build_quest_inventory_evidence,
@@ -26,6 +31,18 @@ class SemanticQuestPrecombatRuntimeMixin:
     evaluates the semantic quest decision before a combat mutation is allowed.
     """
 
+    def _set_semantic_combat_admission(
+        self,
+        status: QuestCombatAdmissionStatus,
+        reason: str,
+        binding=None,
+    ) -> None:
+        self._quest_semantic_precombat_attack_allowed = (
+            status is QuestCombatAdmissionStatus.ACTIONABLE and binding is not None
+        )
+        self._quest_semantic_combat_binding = binding
+        self._quest_semantic_combat_admission = QuestCombatAdmission(status, reason, binding)
+
     def _quest_inventory_allows_attack(self) -> bool:
         mode = getattr(getattr(self.config, "leveling", None), "quest_engine_mode", "legacy")
         if mode == "legacy":
@@ -38,8 +55,18 @@ class SemanticQuestPrecombatRuntimeMixin:
             or not director.active_snapshot_fresh
             or not director.active_catalog.complete
         ):
-            return True
+            self._set_semantic_combat_admission(
+                QuestCombatAdmissionStatus.WAIT,
+                "semantic_authority_unavailable",
+            )
+            if mode == "shadow":
+                return self._legacy_quest_inventory_allows_attack()
+            return False
         if mode == "q280_q304" and objective.quest_id not in {"280", "304"}:
+            self._set_semantic_combat_admission(
+                QuestCombatAdmissionStatus.WAIT,
+                "explicit_legacy_quest_path",
+            )
             return self._legacy_quest_inventory_allows_attack()
         entries = tuple(
             entry for entry in director.active_catalog.result
@@ -47,6 +74,10 @@ class SemanticQuestPrecombatRuntimeMixin:
         )
         if len(entries) != 1:
             if mode == "shadow":
+                self._set_semantic_combat_admission(
+                    QuestCombatAdmissionStatus.WAIT,
+                    "semantic_active_entry_missing_or_ambiguous",
+                )
                 return self._legacy_quest_inventory_allows_attack()
             self._stop_leveling_unsafe("quest_semantic_active_entry_missing_or_ambiguous")
             return False
@@ -54,10 +85,32 @@ class SemanticQuestPrecombatRuntimeMixin:
         compiled = compile_quest_plan(entry)
         if compiled.status is not QuestCompileStatus.READY or compiled.plan is None:
             if mode == "shadow":
+                self._set_semantic_combat_admission(
+                    QuestCombatAdmissionStatus.WAIT,
+                    f"semantic_compile:{compiled.status.value}",
+                )
                 return self._legacy_quest_inventory_allows_attack()
             self._stop_leveling_unsafe(f"quest_semantic_compile:{compiled.status.value}")
             return False
         plan = compiled.plan
+        authority = getattr(self, "_quest_active_catalog_authority", None)
+        if mode != "shadow" and authority is None:
+            self._set_semantic_combat_admission(
+                QuestCombatAdmissionStatus.WAIT,
+                "semantic_catalog_authority_missing",
+            )
+            return False
+        authority_token = (
+            getattr(authority, "causal_baseline", None),
+            getattr(authority, "revision", None),
+            objective.fingerprint,
+            plan.fingerprint,
+        )
+        if getattr(self, "_quest_semantic_combat_authority_token", None) not in {None, authority_token}:
+            self._set_semantic_combat_admission(
+                QuestCombatAdmissionStatus.WAIT,
+                "semantic_authority_changed",
+            )
         requirements = tuple(
             requirement for requirement in iter_requirements(plan.graph.root)
             if isinstance(requirement, Acquire)
@@ -69,6 +122,7 @@ class SemanticQuestPrecombatRuntimeMixin:
             last_fingerprint != objective.fingerprint
             or last_cycle is None
             or current_cycle - last_cycle >= 1
+            or getattr(self, "_quest_semantic_combat_authority_token", None) != authority_token
         )
         if not inspection_due:
             cached = getattr(self, "_quest_semantic_precombat_attack_allowed", None)
@@ -76,10 +130,6 @@ class SemanticQuestPrecombatRuntimeMixin:
         sink = self.action_executor.sink
         if hasattr(sink, "last_quest_inventory_snapshot"):
             sink.last_quest_inventory_snapshot = None
-        authority = getattr(self, "_quest_active_catalog_authority", None)
-        if mode != "shadow" and authority is None:
-            self._stop_leveling_unsafe("quest_semantic_catalog_authority_missing")
-            return False
         metadata = {
             "quest_id": objective.quest_id,
             "quest_title": objective.quest_title,
@@ -224,14 +274,51 @@ class SemanticQuestPrecombatRuntimeMixin:
         )
         self._quest_semantic_evaluation_context = context
         self._quest_semantic_plan = plan
+        self._quest_semantic_combat_authority_token = authority_token
         atom = outcome.next_atom
         if outcome.status is EvaluationStatus.ACTIONABLE and (
             isinstance(atom, Kill)
             or isinstance(atom, Acquire) and isinstance(atom.source, CombatDrop)
         ):
-            self._quest_semantic_precombat_attack_allowed = True
+            combat_target = atom.target if isinstance(atom, Kill) else atom.source.target
+            legacy_objective_target = getattr(objective, "monster", None)
+            legacy_monster = getattr(legacy_objective_target, "name", None)
+            legacy_names = (
+                (str(legacy_monster).strip(),)
+                if isinstance(legacy_monster, str) and legacy_monster.strip()
+                else tuple(getattr(self, "_quest_target_names", ()))
+            )
+            binding = bind_semantic_combat_target(
+                combat_target,
+                requirement_id=atom.requirement_id,
+                plan_fingerprint=plan.fingerprint,
+                legacy_names=legacy_names,
+                legacy_specs=(),
+            )
+            if binding is None:
+                self._set_semantic_combat_admission(
+                    QuestCombatAdmissionStatus.BLOCKED_UNSAFE,
+                    "quest_semantic_combat_target_mismatch",
+                )
+                self._stop_leveling_unsafe("quest_semantic_combat_target_mismatch")
+                return False
+            self._quest_target_names = (binding.target,)
+            target_level = getattr(legacy_objective_target, "level", None)
+            self._quest_target_specs = (
+                ((binding.target, target_level),)
+                if isinstance(target_level, int) and not isinstance(target_level, bool) and target_level > 0
+                else ()
+            )
+            self._set_semantic_combat_admission(
+                QuestCombatAdmissionStatus.ACTIONABLE,
+                "semantic_combat_target_bound",
+                binding,
+            )
             return False
-        self._quest_semantic_precombat_attack_allowed = False
+        self._set_semantic_combat_admission(
+            QuestCombatAdmissionStatus.WAIT,
+            f"semantic_next_atom:{outcome.status.value}",
+        )
         if outcome.status is EvaluationStatus.ACTIONABLE:
             self._quest_target_names = ()
             self._quest_target_levels = ()

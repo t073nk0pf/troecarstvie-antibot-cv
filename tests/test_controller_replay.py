@@ -14,6 +14,7 @@ from src.antibot_cv.automation.actions import DryRunActionSink
 from src.antibot_cv.automation.death_recovery import RecoveryCheckpoint
 from src.antibot_cv.automation.quest_director_policy import QuestDirectorIntent
 from src.antibot_cv.automation.quest_policy import QuestIntent
+from src.antibot_cv.automation.quest_turnin_outcome import QuestTurnInStartOutcome
 from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.detection.attack import AttackButtonDetection
 from src.antibot_cv.detection.battle_end import BattleEndDetection
@@ -3884,7 +3885,7 @@ def test_same_combat_quest_step_after_victory_returns_to_hunt(
     controller._handle_pending_quest_dialogue = lambda: False
     controller._handle_pending_quest_acceptance = lambda: False
     controller._handle_pending_quest_chat_refresh = lambda **_: False
-    controller._maybe_begin_quest_turn_in = lambda: False
+    controller._maybe_begin_quest_turn_in = lambda: QuestTurnInStartOutcome.NOT_APPLICABLE
     reasons: list[str] = []
     controller._finish_quest_refresh_to_hunt = lambda reason: reasons.append(reason) or True
 
@@ -5434,7 +5435,7 @@ def test_quest_inventory_item_skips_combat_and_routes_to_turn_in_npc(
     assert controller._quest_inventory_terminal_completion_evidence.quest_id == "280"
     director.begin_active_refresh()
     director.ingest_active_page(active_snapshot)
-    assert controller._maybe_begin_quest_turn_in() is True
+    assert controller._maybe_begin_quest_turn_in() is QuestTurnInStartOutcome.STARTED
 
     action_types = [request.action_type for request in sink.requests]
     assert action_types == ["inspect_quest_inventory", "open_location_navigator"]
@@ -5462,6 +5463,27 @@ def test_dialogue_snapshot_retry_is_bounded_to_transient_invalid_states(
     controller._quest_refresh_requested_monotonic = time.monotonic() - 60
     assert not controller._quest_dialogue_snapshot_pending("dialogue_npc_snapshot_invalid")
     assert not controller._quest_dialogue_snapshot_pending("dialogue_action_ambiguous")
+
+
+def test_quest_accept_snapshot_retry_is_bounded_and_identity_mismatch_is_not_retried(
+    test_config: AutomationConfig,
+) -> None:
+    controller = AutomationController(
+        test_config, sink_mode="replay", logger=InMemoryEventLogger()
+    )
+    controller._quest_refresh_requested_monotonic = time.monotonic()
+
+    assert controller._quest_accept_dialog_snapshot_pending(
+        "quest_accept_dialog_snapshot_invalid"
+    )
+    assert not controller._quest_accept_dialog_snapshot_pending(
+        "quest_accept_dialog_identity_mismatch"
+    )
+
+    controller._quest_refresh_requested_monotonic = time.monotonic() - 60
+    assert not controller._quest_accept_dialog_snapshot_pending(
+        "quest_accept_dialog_snapshot_invalid"
+    )
 
 
 def test_dialogue_route_verifies_area_when_navigator_reports_already_arrived(

@@ -36,3 +36,15 @@ class QuarantinedQuest:
     reason: str
     capability_version: str
     recorded_at: float
+
+
+@dataclass(frozen=True)
+class QuestLocalBlock:
+    quest_id: str
+    quest_title: str
+    fingerprint: str
+    phase: str
+    capability_version: str
+    reason: str
+    authority_ids: tuple[str, ...]
+    attempts: int

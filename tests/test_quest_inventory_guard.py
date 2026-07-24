@@ -96,6 +96,143 @@ def test_extracts_singular_and_counted_item_requirements() -> None:
     ]
 
 
+def test_real_q271_typo_extracts_only_acquisition_clause() -> None:
+    current = objective(
+        "Убивая Ядовитых Випер, получите 3 Клыка и возращайтесь "
+        "в Лагерь новобранцев к десятнику Бертроду.",
+        quest_id="271",
+        quest_title="Ядовитые Виперы",
+        monster_name="Ядовитая Випера",
+    )
+
+    assert [(item.name, item.required) for item in quest_item_requirements(current)] == [
+        ("Клыка", 3)
+    ]
+
+
+def test_real_q271_inventory_quantity_drives_complete_and_missing() -> None:
+    current = objective(
+        "Убивая Ядовитых Випер, получите 3 Клыка и возращайтесь "
+        "в Лагерь новобранцев к десятнику Бертроду.",
+        quest_id="271",
+        quest_title="Ядовитые Виперы",
+        monster_name="Ядовитая Випера",
+    )
+
+    complete = evaluate_quest_inventory(current, snapshot("Клык Ядовитой Виперы", 3))
+    missing = evaluate_quest_inventory(current, snapshot("Клык Ядовитой Виперы", 2))
+
+    assert complete.confirmed is True
+    assert complete.complete is True
+    assert complete.requirements[0].name == "Клык Ядовитой Виперы"
+    assert complete.collected == (("Клык Ядовитой Виперы", 3),)
+    assert missing.confirmed is True
+    assert missing.complete is False
+    assert missing.reason == "quest_items_missing"
+
+
+def test_captured_navigation_clause_fails_closed_instead_of_missing() -> None:
+    current = objective(
+        "Получите 3 Клыка а затем возращайтесь в Лагерь новобранцев.",
+        monster_name="Ядовитая Випера",
+    )
+
+    result = evaluate_quest_inventory(current, snapshot("Клык Ядовитой Виперы", 2))
+
+    assert result.confirmed is False
+    assert result.complete is False
+    assert result.reason == "quest_item_requirement_contains_navigation_clause"
+
+
+def test_captured_return_address_without_known_verb_fails_closed() -> None:
+    current = objective(
+        "Получите 3 Клыка и в Лагерь новобранцев к десятнику Бертроду.",
+        monster_name="Ядовитая Випера",
+    )
+
+    result = evaluate_quest_inventory(current, snapshot("Клык Ядовитой Виперы", 2))
+
+    assert result.confirmed is False
+    assert result.reason == "quest_item_requirement_contains_navigation_clause"
+
+
+def test_unknown_navigation_imperative_does_not_become_item_name() -> None:
+    current = objective(
+        "Получите 3 Клыка и двигайтесь в Лагерь новобранцев.",
+        monster_name="Ядовитая Випера",
+    )
+
+    result = evaluate_quest_inventory(current, snapshot("Клык Ядовитой Виперы", 2))
+
+    assert result.confirmed is False
+    assert result.reason == "quest_item_requirement_contains_navigation_clause"
+
+
+def test_unknown_navigation_imperative_without_connector_fails_closed() -> None:
+    for separator in (" ", " — "):
+        current = objective(
+            f"Получите 3 Клыка{separator}двигайтесь в Лагерь новобранцев.",
+            monster_name="Ядовитая Випера",
+        )
+
+        result = evaluate_quest_inventory(
+            current, snapshot("Клык Ядовитой Виперы", 2)
+        )
+
+        assert result.confirmed is False
+        assert result.reason == "quest_item_requirement_contains_navigation_clause"
+
+
+def test_preserves_repeated_verb_multi_item_clauses() -> None:
+    current = objective(
+        "Получите 3 Клыка, соберите 4 Когтя и возвращайтесь к охотнику."
+    )
+
+    assert [(item.name, item.required) for item in quest_item_requirements(current)] == [
+        ("Клыка", 3),
+        ("Когтя", 4),
+    ]
+
+
+def test_splits_counted_multi_item_shorthand_without_contamination() -> None:
+    current = objective(
+        "Получите 3 Клыка и 4 Когтя, затем возвращайтесь к охотнику."
+    )
+
+    assert [(item.name, item.required) for item in quest_item_requirements(current)] == [
+        ("Клыка", 3),
+        ("Когтя", 4),
+    ]
+
+
+def test_splits_comma_counted_shorthand_without_false_complete() -> None:
+    current = objective(
+        "Получите 3 Клыка, 4 Когтя и возвращайтесь к охотнику."
+    )
+
+    assert [(item.name, item.required) for item in quest_item_requirements(current)] == [
+        ("Клыка", 3),
+        ("Когтя", 4),
+    ]
+    result = evaluate_quest_inventory(current, snapshot("Клык", 3))
+    assert result.confirmed is True
+    assert result.complete is False
+    assert result.reason == "quest_items_missing"
+
+
+def test_malformed_comma_counted_tail_cannot_false_complete() -> None:
+    for text in (
+        "Получите 3 Клыка, 4.",
+        "Получите 3 Клыка, 4",
+        "Получите 3 Клыка, 0 Когтей и возвращайтесь к охотнику.",
+    ):
+        result = evaluate_quest_inventory(objective(text), snapshot("Клык", 3))
+
+        assert result.confirmed is False
+        assert result.complete is False
+        assert result.reason == "quest_item_requirement_contains_navigation_clause"
+
+
 def test_inventory_completion_resolves_real_qualified_trophy_title() -> None:
     current = objective(
         "Убивая Кабанов-секачей, получите 10 бивней "

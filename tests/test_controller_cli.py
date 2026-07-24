@@ -300,6 +300,13 @@ class FakeCliInjector:
         self.set_client_calls.append(client_id)
         self.last_client_id = client_id
 
+    def client_snapshot(self, client_id=None):
+        return {
+            "client_id": client_id or self.last_client_id,
+            "profile_id": "profile-cli",
+            "tab_id": 17,
+        }
+
     def execute(self, command, payload=None, **kwargs):
         self.commands.append((command, dict(payload or {})))
         self.timeouts.append((command, kwargs.get("timeout_s")))

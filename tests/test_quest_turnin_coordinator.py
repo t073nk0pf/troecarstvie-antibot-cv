@@ -14,7 +14,9 @@ from src.antibot_cv.automation.quest_inventory_guard import (
     QuestInventoryCompletionEvidence,
 )
 from src.antibot_cv.automation.quest_objective_router import classify_objective
+from src.antibot_cv.automation.quest_npc_directory import QuestNpcDirectory
 from src.antibot_cv.automation.quest_turnin_runtime import QuestTurnInPhase
+from src.antibot_cv.automation.quest_turnin_outcome import QuestTurnInStartOutcome
 from src.antibot_cv.automation.state_machine import GameState
 from src.antibot_cv.telemetry.event_logger import InMemoryEventLogger
 
@@ -107,14 +109,15 @@ def controller(test_config: AutomationConfig) -> tuple[AutomationController, Dry
     return result, sink
 
 
-def test_legacy_completed_lease_blocks_turn_in_without_actions(test_config: AutomationConfig) -> None:
+def test_legacy_completed_lease_without_ref_is_locally_quarantined(test_config: AutomationConfig) -> None:
     result, sink = controller(test_config)
 
     result._handle_quest_refresh()
 
-    assert result.state_machine.state is GameState.STOPPED
-    assert result.last_error_reason == "quest_turn_in_step_ref_missing"
+    assert result.state_machine.state is not GameState.STOPPED
+    assert result.last_error_reason is None
     assert sink.requests == []
+    assert result._quest_director.chain.lease is None
     missing_ref_event = next(
         event for event in result.logger.events
         if event["event_type"] == "quest_turn_in_ref_missing"
@@ -141,7 +144,7 @@ def test_q304_blood_completion_starts_next_area_object_not_turn_in(
         {"artAltTitle": "Кровь Непобедимого кабана", "count": 5}
     ])
 
-    assert result._maybe_begin_quest_turn_in() is False
+    assert result._maybe_begin_quest_turn_in() is QuestTurnInStartOutcome.NOT_APPLICABLE
     assert result._begin_non_combat_quest_executor("304") is True
 
     assert result._quest_turn_in.pending is None
@@ -153,8 +156,12 @@ def test_q304_blood_completion_starts_next_area_object_not_turn_in(
 
 def test_q304_terminal_chat_evidence_remains_eligible_for_turn_in(
     test_config: AutomationConfig,
+    monkeypatch,
 ) -> None:
     result, sink = controller(test_config)
+    result._quest_npc_directory = QuestNpcDirectory.from_files(
+        "docs/3kingdoms/NPC_CATALOG.json", "config/world_registry.json",
+    )
     director = result._quest_director
     assert director is not None
     director.begin_active_refresh()
@@ -165,7 +172,7 @@ def test_q304_terminal_chat_evidence_remains_eligible_for_turn_in(
     director.chain.bind_accepted_ref(
         QuestRef(
             "304", "Цветочная болезнь",
-            location="Пристанище трёх ветров", giver_names=("Колдунья Вилена",),
+            location="Длань Рода", giver_names=("Палатка Вилены",),
         )
     )
     result._quest_chat_terminal_completion_evidence = QuestChatProgressEvidence(
@@ -173,12 +180,107 @@ def test_q304_terminal_chat_evidence_remains_eligible_for_turn_in(
         "304", "Цветочная болезнь", lease.current_fingerprint, True,
     )
 
-    assert result._maybe_begin_quest_turn_in() is True
+    assert result._maybe_begin_quest_turn_in() is QuestTurnInStartOutcome.STARTED
 
     assert result.state_machine.state is not GameState.STOPPED
     assert result._quest_turn_in.pending is not None
+    assert result._quest_turn_in.pending.objective.location == "Длань Рода"
+    assert result._quest_turn_in.pending.location_id == "128"
+    assert result._quest_turn_in.pending.endpoint_npc_id == "4"
+    assert result._quest_turn_in.pending.endpoint_npc_name == "Палатка Вилены"
+    assert result._quest_turn_in.pending.resulting_dialog_npc_id == "110"
+    assert result._quest_turn_in.pending.resulting_dialog_name == "Колдунья Вилена"
     assert result._quest_area_objects.pending is None
     assert [request.action_type for request in sink.requests] == ["open_location_navigator"]
+    assert sink.requests[0].metadata["target"] == "Длань Рода"
+    result.state_machine.state = GameState.ROUTE_RECOVERY
+    result.current_location_name = "Длань Рода"
+    result.current_page_kind = "area"
+    result._route_destination_name = "Длань Рода"
+    assert result._finish_route_arrival("navigator_route_arrived") is True
+
+    snapshot_calls: list[tuple[str, dict[str, object]]] = []
+    snapshots = iter((
+        {
+            "ok": True, "truncated": False,
+            "snapshotId": "area-npcs-q304-vilena",
+            "location": {"id": "128", "name": "Длань Рода"},
+            "items": [{
+                "dataId": "4", "routeRef": "398", "name": "Палатка Вилены", "actionable": True,
+            }],
+        },
+        {
+            "ok": True, "truncated": False, "identityMatches": True,
+            "expectedName": "Колдунья Вилена",
+            "snapshotId": "npc-dialog-q304-vilena",
+            "questActions": [{
+                "questId": "304", "title": "Цветочная болезнь", "action": "open",
+                "npcId": "4", "npcInstanceId": "110",
+                "visible": True, "disabled": False,
+            }],
+            "dialogActions": [], "doneActions": [],
+        },
+    ))
+
+    class FakeInjector:
+        def execute(self, command, payload=None, **_kwargs):
+            snapshot_calls.append((command, dict(payload or {})))
+            return InjectorResult(True, json.dumps(next(snapshots), ensure_ascii=False), "client")
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.browser_injector.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    assert result._handle_pending_quest_turn_in() is True
+    assert result._handle_pending_quest_turn_in() is True
+
+    assert snapshot_calls == [
+        ("area_npc_snapshot", {"expectedName": "Палатка Вилены"}),
+        ("npc_dialog_snapshot", {
+            "expectedName": "Колдунья Вилена", "expectedNpcId": "4",
+            "expectedNpcInstanceId": "110",
+        }),
+    ]
+    assert all(
+        payload.get("expectedName") != "Палатка Вилены"
+        for command, payload in snapshot_calls
+        if command == "npc_dialog_snapshot"
+    )
+    action = sink.requests[-1]
+    assert action.action_type == "npc_quest_action"
+    assert action.metadata["expected_name"] == "Колдунья Вилена"
+    assert action.metadata["npc_id"] == "4"
+    assert action.metadata["expected_npc_instance_id"] == "110"
+
+
+def test_q304_incompatible_bound_location_cannot_mix_route_and_vilena_instance(
+    test_config: AutomationConfig,
+) -> None:
+    result, sink = controller(test_config)
+    result._quest_npc_directory = QuestNpcDirectory.from_files(
+        "docs/3kingdoms/NPC_CATALOG.json", "config/world_registry.json",
+    )
+    director = result._quest_director
+    assert director is not None
+    director.begin_active_refresh()
+    director.ingest_active_page(active_page(q304_composite_item()))
+    entry = director.active_catalog.result[0]
+    director.chain.release_completed("246")
+    lease = director.chain.pin_entry(entry, revision=director.active_catalog.revision)
+    director.chain.bind_accepted_ref(QuestRef(
+        "304", "Цветочная болезнь",
+        location="Пристанище трёх ветров",
+        giver_names=("Колдунья Вилена",),
+    ))
+    result._quest_chat_terminal_completion_evidence = QuestChatProgressEvidence(
+        "chat-q304-terminal", "необходимое", "необходимое",
+        "304", "Цветочная болезнь", lease.current_fingerprint, True,
+    )
+
+    assert result._maybe_begin_quest_turn_in() is QuestTurnInStartOutcome.STOPPED
+    assert result.last_error_reason == "quest_turn_in_ref_location_conflict"
+    assert result._quest_turn_in.pending is None
+    assert sink.requests == []
 
 
 def test_turn_in_plan_after_pin_enters_turn_in_coordinator_not_dialogue(
@@ -218,6 +320,34 @@ def test_turn_in_plan_after_pin_enters_turn_in_coordinator_not_dialogue(
     ]
 
 
+def test_turn_in_local_blocked_is_handled_without_global_stop_or_mutation(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    result, sink = controller(test_config)
+    director = result._quest_director
+    assert director is not None
+    director.begin_active_refresh()
+    director.ingest_active_page(active_page(existing_turn_in_item()))
+    entry = director.active_catalog.result[0]
+    director.chain.release_completed("246")
+    director.chain.pin_entry(entry, revision=director.active_catalog.revision)
+    director.active_route_plan = classify_objective(entry)
+    monkeypatch.setattr(
+        result,
+        "_maybe_begin_quest_turn_in",
+        lambda: QuestTurnInStartOutcome.LOCAL_BLOCKED,
+    )
+
+    assert result._begin_non_combat_quest_executor("280") is True
+
+    assert result.state_machine.state is not GameState.STOPPED
+    assert result.last_error_reason is None
+    assert result._quest_turn_in.pending is None
+    assert result._quest_dialogue.pending is None
+    assert sink.requests == []
+
+
 def test_confirmed_acceptance_to_completed_turn_in_releases_after_fresh_absence(
     test_config: AutomationConfig,
     monkeypatch,
@@ -243,15 +373,17 @@ def test_confirmed_acceptance_to_completed_turn_in_releases_after_fresh_absence(
                 "truncated": False,
                 "snapshotId": "area-npcs-turn-in-1",
                 "location": {"id": "77", "name": "Южная застава"},
-                "items": [{"dataId": "12", "name": "Дом Ратмира", "actionable": True}],
+                "items": [{"dataId": "12", "routeRef": "399", "name": "Дом Ратмира", "actionable": True}],
             },
             {
                 "ok": True,
                 "truncated": False,
                 "identityMatches": True,
+                "expectedName": "Воевода Ратмир",
                 "snapshotId": "npc-dialog-open",
                 "questActions": [{
                     "questId": "246", "title": "Разговор с Ратмиром о волках", "action": "open",
+                    "npcId": "12",
                     "visible": True, "disabled": False,
                 }],
                 "dialogActions": [], "doneActions": [],
@@ -260,6 +392,7 @@ def test_confirmed_acceptance_to_completed_turn_in_releases_after_fresh_absence(
                 "ok": True,
                 "truncated": False,
                 "identityMatches": True,
+                "expectedName": "Воевода Ратмир",
                 "snapshotId": "npc-dialog-answer",
                 "questActions": [],
                 "dialogActions": [{
@@ -272,6 +405,7 @@ def test_confirmed_acceptance_to_completed_turn_in_releases_after_fresh_absence(
                 "ok": True,
                 "truncated": False,
                 "identityMatches": True,
+                "expectedName": "Воевода Ратмир",
                 "snapshotId": "npc-dialog-done",
                 "questActions": [], "dialogActions": [],
                 "doneActions": [{
@@ -337,20 +471,22 @@ def test_turn_in_waits_for_npc_dialogue_to_settle_after_confirmed_open(
         {
             "ok": True, "truncated": False, "snapshotId": "area-npcs-turn-in-1",
             "location": {"id": "77", "name": "Южная застава"},
-            "items": [{"dataId": "12", "name": "Воевода Ратмир", "actionable": True}],
+            "items": [{"dataId": "12", "routeRef": "399", "name": "Воевода Ратмир", "actionable": True}],
         },
         # The UI has accepted the NPC click but has not rendered quest
         # controls yet.  This used to stop the whole quest loop.
         {
             "ok": True, "truncated": False, "identityMatches": True,
+            "expectedName": "Воевода Ратмир",
             "snapshotId": "npc-dialog-loading", "questActions": [],
             "dialogActions": [], "doneActions": [],
         },
         {
             "ok": True, "truncated": False, "identityMatches": True,
+            "expectedName": "Воевода Ратмир",
             "snapshotId": "npc-dialog-open", "questActions": [{
                 "questId": "246", "title": "Разговор с Ратмиром о волках",
-                "action": "open", "visible": True, "disabled": False,
+                "action": "open", "npcId": "12", "visible": True, "disabled": False,
             }], "dialogActions": [], "doneActions": [],
         },
     ])
@@ -457,10 +593,11 @@ def test_turn_in_fresh_next_step_keeps_and_advances_pinned_chain(
     director.ingest_active_page(active_page(next_completed))
     request_count = len(sink.requests)
 
-    assert result._maybe_begin_quest_turn_in() is True
+    assert result._maybe_begin_quest_turn_in() is QuestTurnInStartOutcome.LOCAL_BLOCKED
 
-    assert result.state_machine.state is GameState.STOPPED
-    assert result.last_error_reason == "quest_turn_in_step_ref_missing"
+    assert result.state_machine.state is not GameState.STOPPED
+    assert result.last_error_reason is None
+    assert director.chain.lease is None
     assert len(sink.requests) == request_count
 
 
@@ -509,7 +646,7 @@ def test_turn_in_transient_snapshot_retries_bounded_then_succeeds(
             "truncated": False,
             "snapshotId": "area-npcs-turn-in-retry",
             "location": {"id": "77", "name": "Южная застава"},
-            "items": [{"dataId": "12", "name": "Воевода Ратмир", "actionable": True}],
+            "items": [{"dataId": "12", "routeRef": "399", "name": "Воевода Ратмир", "actionable": True}],
         },
     ])
 

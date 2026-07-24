@@ -552,6 +552,22 @@ class QuestDirectorRuntime:
         self.unsupported_available_entries = ()
         self.refresh_in_progress = True
 
+    def begin_completed_intake_catalog_refresh(self, quest_id: str) -> None:
+        """Refresh available quests while a terminal intake action is settling.
+
+        The active catalogue has already proved that the quest was not accepted;
+        this refresh may only establish that the available card disappeared.
+        """
+
+        pending = self.pending_accept
+        if pending is None or pending.id != str(quest_id or "").strip():
+            raise RuntimeError("completed intake refresh identity mismatch")
+        self.catalog.reset()
+        self.available_snapshot_fresh = False
+        self.available_quests = ()
+        self.unsupported_available_entries = ()
+        self.refresh_in_progress = True
+
     def ingest_catalog_page(self, data: object) -> int | None:
         if not self.refresh_in_progress:
             raise RuntimeError("catalogue refresh has not started")
@@ -947,6 +963,21 @@ class QuestDirectorRuntime:
         if self.chain.lease is None and active_entry is not None:
             self.chain.pin_entry(active_entry, revision=self.active_catalog.revision)
         self._bind_accepted_ref(quest_id)
+        self.pending_accept = None
+
+    def acknowledge_completed_intake(self, quest_id: str, staged_action) -> None:
+        """Finish an available quest whose terminal button completes immediately."""
+
+        pending = self.pending_accept
+        if (
+            pending is None or pending.id != quest_id
+            or not self.available_snapshot_fresh or not self.catalog.complete
+            or any(quest.id == quest_id for quest in self.available_quests)
+        ):
+            raise RuntimeError("completed intake requires fresh available-catalog absence")
+        self.chain.settle_completed_intake(staged_action, expected_ref=pending)
+        if self.intake_queue and self.intake_queue[0] == pending:
+            self.intake_queue = self.intake_queue[1:]
         self.pending_accept = None
 
     def mark_quest_completed(self, quest_id: str) -> None:

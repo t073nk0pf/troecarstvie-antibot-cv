@@ -86,7 +86,7 @@ root.top = root;
 root.window = root;
 vm.runInNewContext(source, { window: root, console, setTimeout, clearTimeout });
 
-async function command() {
+async function command(mutationFence = null) {
   messages.length = 0;
   listeners.message({
     source: root,
@@ -95,7 +95,10 @@ async function command() {
       token: "slow-navigator-search",
       command: {
         type: "navigator_select_target",
-        payload: { target: "Белая Рысь [6]", kind: "monster", searchDelayMs: 250, routeDelayMs: 600 },
+        payload: {
+          target: "Белая Рысь [6]", kind: "monster", searchDelayMs: 250, routeDelayMs: 600,
+          ...(mutationFence ? { mutationFence } : {}),
+        },
       },
     },
   });
@@ -113,13 +116,17 @@ async function command() {
   assert.strictEqual(dispatchCount, 3);
 
   candidatePresent = true;
-  const retry = await command();
+  const retry = await command({ profile_id: "profile-a", tab_id: 17, actor_generation: 2, fencing_token: 9 });
   assert.strictEqual(retry.ok, true);
   assert.strictEqual(retry.message.message, "navigator_target_selected");
   assert.strictEqual(retry.message.section, "монстры");
   assert.strictEqual(retry.message.sectionEvidence, "preceding_sibling_header");
   assert.strictEqual(retry.message.inputDispatched, false);
   assert.strictEqual(dispatchCount, 3);
+  assert.strictEqual(candidateClicks, 1);
+  const stale = await command({ profile_id: "profile-a", tab_id: 17, actor_generation: 2, fencing_token: 8 });
+  assert.strictEqual(stale.ok, false);
+  assert.strictEqual(stale.message.message, "mutation_fence_stale");
   assert.strictEqual(candidateClicks, 1);
 })().catch((error) => { console.error(error); process.exit(1); });
 """

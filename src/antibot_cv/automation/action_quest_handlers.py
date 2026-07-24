@@ -2,7 +2,7 @@
 
 from src.antibot_cv.automation import action_live_sink as live
 
-ACTION_TYPES = frozenset({"open_quests", "open_quest_catalog", "open_active_quest_page", "open_exact_npc", "npc_quest_action", "open_quest_navigator"})
+ACTION_TYPES = frozenset({"open_quests", "open_quest_catalog", "open_active_quest_page", "open_exact_npc", "inspect_exact_npc", "npc_quest_action", "open_quest_navigator"})
 
 json = live.json
 time = live.time
@@ -23,6 +23,35 @@ _log_action = live._log_action
 
 def global_browser_injector():
     return live.global_browser_injector()
+
+
+def _npc_open_diagnostic_code(outcome):
+    if outcome.status is live.NpcOpenStatus.CONFIRMED:
+        return live.ActionDiagnosticCode.NPC_OPEN_CONFIRMED
+    reason = str(outcome.reason or "")
+    if reason == "injector_ack_timeout":
+        return live.ActionDiagnosticCode.INJECTOR_ACK_TIMEOUT
+    if reason == "injector_delivery_timeout":
+        return live.ActionDiagnosticCode.INJECTOR_DELIVERY_TIMEOUT
+    safe_not_issued = {
+        code.value: code
+        for code in (
+            live.ActionDiagnosticCode.AREA_NPC_SNAPSHOT_STALE,
+            live.ActionDiagnosticCode.AREA_NPC_LOCATION_MISMATCH,
+            live.ActionDiagnosticCode.AREA_NPC_SNAPSHOT_TRUNCATED,
+            live.ActionDiagnosticCode.NPC_MATCH_AMBIGUOUS,
+            live.ActionDiagnosticCode.NPC_EXACT_MATCH_MISSING,
+            live.ActionDiagnosticCode.NPC_ROUTE_REF_MISMATCH,
+            live.ActionDiagnosticCode.NPC_ROUTE_NAVIGATION_UNAVAILABLE,
+            live.ActionDiagnosticCode.NPC_INSTANCE_IDENTITY_INVALID,
+            live.ActionDiagnosticCode.NPC_IDENTITY_INVALID,
+        )
+    }
+    if outcome.status is live.NpcOpenStatus.NOT_ISSUED:
+        return safe_not_issued.get(
+            reason, live.ActionDiagnosticCode.NPC_OPEN_NOT_ISSUED,
+        )
+    return live.ActionDiagnosticCode.NPC_OPEN_ACK_PENDING
 
 
 def handle_action(self, request):
@@ -74,29 +103,43 @@ def handle_action(self, request):
         _log_action(self.logger, 'action_blocked', logged_request, block_reason=f'injector_open_active_quest_page_failed:{outcome.reason}')
         return False
 
-    if request.action_type == 'open_exact_npc':
+    if request.action_type in {'open_exact_npc', 'inspect_exact_npc'}:
         metadata = dict(request.metadata or {})
         payload = npc_open_command_payload(metadata)
         self.last_npc_open_outcome = None
         if payload is None:
             _log_action(self.logger, 'action_blocked', request, block_reason='npc_identity_invalid')
-            return False
-        result = self._execute_injector(global_browser_injector(), 'open_exact_npc', payload, timeout_s=6.0)
+            return live.ActionExecutionResult(
+                live.ActionExecutionStatus.NOT_ISSUED,
+                live.ActionDiagnosticCode.NPC_IDENTITY_INVALID,
+            )
+        result = self._execute_injector(
+            global_browser_injector(), request.action_type, payload, timeout_s=6.0,
+        )
         result_metadata = {**metadata, 'injector_message': _compact_injector_message(result.message), 'injector_client_id': result.client_id}
         logged_request = _copy_request(request, metadata=result_metadata)
         outcome = parse_npc_open_outcome(result_ok=result.ok, message=result.message, client_id=result.client_id)
         self.last_npc_open_outcome = outcome
         if outcome.dispatched:
             _log_action(self.logger, 'exact_npc_open_requested', logged_request, dry_run=False)
-            return True
+            status = (
+                live.ActionExecutionStatus.ISSUED
+                if outcome.status is live.NpcOpenStatus.CONFIRMED
+                else live.ActionExecutionStatus.DELIVERY_UNKNOWN
+            )
+            return live.ActionExecutionResult(status, _npc_open_diagnostic_code(outcome))
         _log_action(self.logger, 'action_blocked', logged_request, block_reason=f'injector_open_exact_npc_failed:{_compact_injector_message(result.message)}')
-        return False
+        return live.ActionExecutionResult(
+            live.ActionExecutionStatus.NOT_ISSUED,
+            _npc_open_diagnostic_code(outcome),
+        )
 
     if request.action_type == 'npc_quest_action':
         metadata = dict(request.metadata or {})
         self.last_npc_quest_action_outcome = None
         expected_snapshot_id = str(metadata.get('expected_snapshot_id') or '').strip()
         npc_id = str(metadata.get('npc_id') or '').strip()
+        expected_npc_instance_id = str(metadata.get('expected_npc_instance_id') or '').strip()
         expected_npc_name = str(metadata.get('expected_name') or metadata.get('giver_name') or '').strip()
         quest_id = str(metadata.get('quest_id') or '').strip()
         expected_title = str(metadata.get('expected_title') or '').strip()
@@ -104,11 +147,14 @@ def handle_action(self, request):
         expected_ref = str(metadata.get('expected_ref') or '').strip()
         expected_point_id = str(metadata.get('expected_point_id') or '').strip()
         expected_text = str(metadata.get('expected_text') or '').strip()
-        valid = expected_snapshot_id.startswith('npc-dialog-') and 0 < len(expected_snapshot_id) <= 120 and npc_id.isdecimal() and (int(npc_id) >= 0) and 0 < len(expected_npc_name) <= 180 and quest_id.isdecimal() and (int(quest_id) > 0) and (action == 'done' or 0 < len(expected_title) <= 220) and (action in {'open', 'answer', 'accept', 'done'}) and (action == 'open' or (0 < len(expected_text) <= 1200 and (action == 'accept' or (action == 'done' and expected_point_id.isdecimal() and (int(expected_point_id) > 0)) or (expected_ref.isdecimal() and int(expected_ref) > 0))))
+        valid = expected_snapshot_id.startswith('npc-dialog-') and 0 < len(expected_snapshot_id) <= 120 and npc_id.isdecimal() and (int(npc_id) >= 0) and (not expected_npc_instance_id or (expected_npc_instance_id.isdecimal() and int(expected_npc_instance_id) > 0)) and 0 < len(expected_npc_name) <= 180 and quest_id.isdecimal() and (int(quest_id) > 0) and (action == 'done' or 0 < len(expected_title) <= 220) and (action in {'open', 'answer', 'accept', 'done'}) and (action == 'open' or (0 < len(expected_text) <= 1200 and (action == 'accept' or (action == 'done' and expected_point_id.isdecimal() and (int(expected_point_id) > 0)) or (expected_ref.isdecimal() and int(expected_ref) > 0))))
         if not valid:
             _log_action(self.logger, 'action_blocked', request, block_reason='npc_quest_action_invalid')
             return False
-        result = self._execute_injector(global_browser_injector(), 'npc_quest_action', {'expectedSnapshotId': expected_snapshot_id, 'npcId': npc_id, 'expectedName': expected_npc_name or None, 'questId': quest_id, 'expectedTitle': expected_title, 'action': action, 'expectedRef': expected_ref if action == 'answer' else None, 'expectedPointId': expected_point_id if action == 'done' else None, 'expectedText': expected_text if action in {'answer', 'accept', 'done'} else None}, timeout_s=3.0)
+        payload = {'expectedSnapshotId': expected_snapshot_id, 'npcId': npc_id, 'expectedName': expected_npc_name or None, 'questId': quest_id, 'expectedTitle': expected_title, 'action': action, 'expectedRef': expected_ref if action == 'answer' else None, 'expectedPointId': expected_point_id if action == 'done' else None, 'expectedText': expected_text if action in {'answer', 'accept', 'done'} else None}
+        if expected_npc_instance_id:
+            payload['expectedNpcInstanceId'] = expected_npc_instance_id
+        result = self._execute_injector(global_browser_injector(), 'npc_quest_action', payload, timeout_s=3.0)
         result_metadata = {**metadata, 'injector_message': _compact_injector_message(result.message), 'injector_client_id': result.client_id}
         logged_request = _copy_request(request, metadata=result_metadata)
         outcome = parse_npc_quest_action_outcome(result_ok=result.ok, message=result.message, client_id=result.client_id)

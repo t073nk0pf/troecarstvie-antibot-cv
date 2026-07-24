@@ -32,12 +32,13 @@ def entry(*, navigation: tuple[object, ...] | None = None, objective: str | None
 
 
 def area(*items: dict[str, object], name: str = "Туманные луга") -> dict[str, object]:
+    bound_items = [{**item, "routeRef": item.get("routeRef", str(398 + index))} for index, item in enumerate(items)]
     return {
         "ok": True,
         "truncated": False,
         "snapshotId": "area-npcs-246",
         "location": {"id": "121", "name": name},
-        "items": list(items),
+        "items": bound_items,
     }
 
 
@@ -159,6 +160,7 @@ def test_route_and_area_lookup_emit_exact_snapshot_bound_npc_action() -> None:
         "expected_snapshot_id": "area-npcs-246",
         "expected_location_id": "121",
         "npc_id": "9",
+        "expected_route_ref": "398",
         "expected_name": "Алхимик Филонид",
         "expected_dialog_name": "алхимику Филониду",
         "quest_id": "246",
@@ -225,6 +227,7 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
     assert opened.action_metadata["expected_title"] == (
         "Разговор с Филонидом о подозрительном сене"
     )
+    assert opened.action_metadata["expected_name"] == "алхимику Филониду"
     runtime.acknowledge(opened)
 
     answered = runtime.decide_dialog(
@@ -300,6 +303,27 @@ def test_dialogue_opens_same_quest_answers_and_requests_active_verification() ->
         quest_id="246", previous_fingerprint=pending.objective.fingerprint
     )
     assert runtime.pending is None
+
+
+def test_dialogue_action_uses_quest_npc_identity_after_area_proxy_open() -> None:
+    runtime = QuestDialogueRuntime()
+    runtime.begin(entry(), already_at_location=True)
+    opened_proxy = runtime.decide_area_npc(
+        area({"dataId": "9", "name": "Дом Филонида", "actionable": True})
+    )
+    runtime.acknowledge(opened_proxy)
+
+    opened_quest = runtime.decide_dialog(dialog(questActions=[{
+        "questId": "246",
+        "title": "Разговор с Филонидом о подозрительном сене",
+        "action": "open",
+        "visible": True,
+        "disabled": False,
+    }]))
+
+    assert opened_proxy.action_metadata["expected_name"] == "Дом Филонида"
+    assert opened_proxy.action_metadata["expected_dialog_name"] == "алхимику Филониду"
+    assert opened_quest.action_metadata["expected_name"] == "алхимику Филониду"
 
 
 def test_dialogue_recovers_when_quest_is_already_open_without_open_action() -> None:

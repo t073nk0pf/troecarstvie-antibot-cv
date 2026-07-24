@@ -41,6 +41,9 @@ from src.antibot_cv.automation.quest_dialogue_runtime import (
     QuestDialogueRuntime,
 )
 from src.antibot_cv.automation.quest_intake_runtime import QuestIntakeRuntime
+from src.antibot_cv.automation.quest_inventory_guard import (
+    QuestInventoryCompletionEvidence,
+)
 from src.antibot_cv.automation.quest_objective_router import (
     ObjectiveRouteKind,
     ObjectiveRouteStatus,
@@ -51,6 +54,8 @@ from src.antibot_cv.automation.quest_route_binding import (
     validate_quest_route_binding,
 )
 from src.antibot_cv.automation.quest_turnin_coordinator import QuestTurnInCoordinatorMixin
+from src.antibot_cv.automation.quest_turnin_outcome import QuestTurnInStartOutcome
+from src.antibot_cv.automation.quest_use_item_plan import parse_quest_use_item_plan
 from src.antibot_cv.automation.quest_turnin_runtime import QuestTurnInPhase
 from src.antibot_cv.automation.gathering_activity_runtime import (
     GatheringPlanStatus,
@@ -133,6 +138,13 @@ class QuestRefreshRuntimeMixin(QuestSemanticAreaRuntimeMixin):
             if decision.intent is QuestDirectorIntent.REFRESH_ACTIVE:
                 return self._request_active_quest_snapshot(decision.reason)
             if decision.intent is QuestDirectorIntent.ACCEPT_QUEST:
+                if not config.accept_available_quests:
+                    self.logger.log_event(
+                        "quest_accept_suppressed_active_only",
+                        quest_id=None if decision.quest is None else decision.quest.id,
+                        quest_title=None if decision.quest is None else decision.quest.title,
+                    )
+                    return False
                 if decision.quest is None:
                     return self._stop_leveling_unsafe("quest_accept_identity_missing")
                 return self._begin_quest_acceptance(decision.quest)
@@ -576,6 +588,74 @@ class QuestRefreshRuntimeMixin(QuestSemanticAreaRuntimeMixin):
         )
         if entry is None:
             return self._stop_leveling_unsafe("quest_executor_entry_missing")
+        use_item_plan = parse_quest_use_item_plan(entry)
+        if use_item_plan is not None:
+            result_present = self._quest_use_item_result_present(use_item_plan)
+            if result_present is None:
+                return self._stop_leveling_unsafe("quest_item_result_inventory_unconfirmed")
+            if result_present:
+                lease = director.chain.lease
+                if lease is None or lease.quest_id != use_item_plan.quest_id:
+                    return self._stop_leveling_unsafe("quest_item_result_lease_missing")
+                self._quest_inventory_terminal_completion_evidence = (
+                    QuestInventoryCompletionEvidence(
+                        quest_id=use_item_plan.quest_id,
+                        quest_title=use_item_plan.quest_title,
+                        fingerprint=lease.current_fingerprint,
+                        collected=((use_item_plan.result_item_name or "", 1),),
+                    )
+                )
+                outcome = self._maybe_begin_quest_turn_in()
+                if outcome is QuestTurnInStartOutcome.STARTED:
+                    return True
+                if outcome is QuestTurnInStartOutcome.LOCAL_BLOCKED:
+                    return True
+                return self._stop_leveling_unsafe(
+                    f"quest_item_result_turn_in:{outcome.value}"
+                )
+            request = ActionRequest(
+                "use_quest_item",
+                cycle_id=self.session.cycle_id,
+                battle_id=self.session.battle_id,
+                dry_run=self.config.dry_run,
+                metadata={
+                    "quest_id": use_item_plan.quest_id,
+                    "quest_title": use_item_plan.quest_title,
+                    "expected_name": use_item_plan.item_name,
+                    "expected_result": use_item_plan.expected_result,
+                },
+            )
+            if not self.action_executor.execute(request):
+                return self._stop_leveling_unsafe("quest_item_use_failed")
+            result_present = self._quest_use_item_result_present(use_item_plan)
+            if result_present:
+                lease = director.chain.lease
+                if lease is None or lease.quest_id != use_item_plan.quest_id:
+                    return self._stop_leveling_unsafe("quest_item_result_lease_missing")
+                self._quest_inventory_terminal_completion_evidence = (
+                    QuestInventoryCompletionEvidence(
+                        quest_id=use_item_plan.quest_id,
+                        quest_title=use_item_plan.quest_title,
+                        fingerprint=lease.current_fingerprint,
+                        collected=((use_item_plan.result_item_name or "", 1),),
+                    )
+                )
+                outcome = self._maybe_begin_quest_turn_in()
+                if outcome in {
+                    QuestTurnInStartOutcome.STARTED,
+                    QuestTurnInStartOutcome.LOCAL_BLOCKED,
+                }:
+                    return True
+                return self._stop_leveling_unsafe(
+                    f"quest_item_result_turn_in:{outcome.value}"
+                )
+            if result_present is None:
+                return self._stop_leveling_unsafe("quest_item_result_inventory_unconfirmed")
+            director.invalidate_active_snapshot()
+            self._quest_active_snapshot_requested = False
+            self._quest_active_page_requested = None
+            self._quest_active_request_snapshot_id = None
+            return self._request_active_quest_snapshot("quest_item_use_verify_active")
         area_plan = parse_area_object_plan(entry)
         if area_plan.status is AreaObjectPlanStatus.READY:
             return self._begin_quest_area_object_executor(area_plan)
@@ -607,7 +687,8 @@ class QuestRefreshRuntimeMixin(QuestSemanticAreaRuntimeMixin):
             # check therefore could not see a lease yet.  Re-enter the typed
             # turn-in coordinator now that the exact quest/fingerprint is
             # pinned; never downgrade a completed step to a dialogue route.
-            if self._maybe_begin_quest_turn_in():
+            turn_in_outcome = self._maybe_begin_quest_turn_in()
+            if turn_in_outcome is not QuestTurnInStartOutcome.NOT_APPLICABLE:
                 return True
             return self._stop_leveling_unsafe("quest_turn_in_not_initialized_after_pin")
         if route_plan.kind in {
@@ -641,6 +722,54 @@ class QuestRefreshRuntimeMixin(QuestSemanticAreaRuntimeMixin):
         if plan.status is GatheringPlanStatus.READY:
             return self._defer_active_quest(quest_id, "gathering_node_discovery_required")
         return self._defer_active_quest(quest_id, f"gathering_plan:{plan.reason}")
+
+    def _quest_use_item_result_present(self, plan) -> bool | None:
+        expected = str(plan.result_item_name or "").strip()
+        if not expected:
+            return False
+        authority = getattr(self, "_quest_active_catalog_authority", None)
+        metadata = {
+            "quest_id": plan.quest_id,
+            "quest_title": plan.quest_title,
+            "names": [expected],
+            "inventory_open_delay_ms": self.config.item_recovery.inventory_open_delay_ms,
+            "quest_category_load_delay_ms": 1500,
+            "command_timeout_ms": 20000,
+            "timeout_s": 20.0,
+            "reason": "quest_use_item_result_guard",
+        }
+        causal_baseline = str(getattr(authority, "causal_baseline", "") or "")
+        minimum_revision = getattr(authority, "revision", None)
+        if causal_baseline and isinstance(minimum_revision, int) and not isinstance(minimum_revision, bool):
+            metadata.update({
+                "causal_baseline": causal_baseline,
+                "minimum_revision": minimum_revision,
+            })
+        request = ActionRequest(
+            "inspect_quest_inventory",
+            cycle_id=self.session.cycle_id,
+            battle_id=self.session.battle_id,
+            dry_run=self.config.dry_run,
+            metadata=metadata,
+        )
+        if not self.action_executor.execute(request):
+            return None
+        snapshot = getattr(self.action_executor.sink, "last_quest_inventory_snapshot", None)
+        if not isinstance(snapshot, dict):
+            return None
+        items = snapshot.get("items")
+        if not isinstance(items, list):
+            return None
+        matches = [
+            item for item in items
+            if isinstance(item, dict)
+            and str(item.get("artAltTitle") or item.get("name") or "").strip().casefold()
+            == expected.casefold()
+            and isinstance(item.get("count"), int)
+            and not isinstance(item.get("count"), bool)
+            and item.get("count", 0) > 0
+        ]
+        return len(matches) == 1
 
     def _quest_area_inventory_items(self, plan) -> list[dict[str, object]] | None:
         sink = self.action_executor.sink

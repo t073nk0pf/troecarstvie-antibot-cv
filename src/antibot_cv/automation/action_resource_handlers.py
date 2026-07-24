@@ -2,7 +2,7 @@
 
 from src.antibot_cv.automation import action_live_sink as live
 
-ACTION_TYPES = frozenset({"inspect_quest_inventory", "area_object_snapshot", "inspect_area_object", "use_recovery_items"})
+ACTION_TYPES = frozenset({"inspect_quest_inventory", "area_object_snapshot", "inspect_area_object", "use_quest_item", "use_recovery_items"})
 
 json = live.json
 time = live.time
@@ -61,6 +61,9 @@ def handle_action(self, request):
                 "names": metadata.get("names", []),
                 "inventoryOpenDelayMs": max(
                     0, int(metadata.get("inventory_open_delay_ms", 1500) or 1500)
+                ),
+                "commandTimeoutMs": max(
+                    1000, int(metadata.get("command_timeout_ms", 10000) or 10000)
                 ),
             },
             timeout_s=max(10.0, float(metadata.get("timeout_s", 10.0) or 10.0)),
@@ -130,6 +133,39 @@ def handle_action(self, request):
             inventory_ok=accepted,
             inventory_message=_compact_injector_message(result.message),
             **inventory_observation,
+        )
+        return accepted
+    if request.action_type == 'use_quest_item':
+        metadata = dict(request.metadata or {})
+        expected_name = str(metadata.get('expected_name') or '').strip()
+        expected_artikul_id = str(metadata.get('expected_artikul_id') or '').strip()
+        if not expected_name or len(expected_name) > 220:
+            _log_action(self.logger, 'action_blocked', request, block_reason='quest_item_name_invalid')
+            return False
+        result = self._execute_injector(
+            global_browser_injector(), 'use_quest_item',
+            {
+                'expectedName': expected_name,
+                'expectedArtikulId': expected_artikul_id or None,
+                'inventoryOpenDelayMs': int(metadata.get('inventory_open_delay_ms', 800) or 800),
+                'categoryWaitMs': int(metadata.get('category_wait_ms', 3000) or 3000),
+                'commandTimeoutMs': int(metadata.get('command_timeout_ms', 20000) or 20000),
+            },
+            timeout_s=max(22.0, float(metadata.get('timeout_s', 25.0) or 25.0)),
+        )
+        parsed = _parse_injector_dict(result.message)
+        message = str(parsed.get('message') or '') if isinstance(parsed, dict) else ''
+        accepted = bool(
+            result.ok
+            and message in {
+                'quest_item_used', 'quest_item_use_acknowledged', 'quest_item_absent',
+            }
+        )
+        _log_action(
+            self.logger, 'quest_item_use_result', request,
+            injector_client_id=result.client_id,
+            injector_message=_compact_injector_message(result.message),
+            quest_item_used=accepted,
         )
         return accepted
     if request.action_type == 'use_recovery_items':

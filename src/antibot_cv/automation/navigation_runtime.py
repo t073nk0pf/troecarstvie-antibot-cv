@@ -52,6 +52,12 @@ NAVIGATOR_AREA_HANDOFF_KINDS = {
 
 
 class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
+    def _stop_or_abandon_quest_accept_route(self, reason: str) -> None:
+        if self._route_recovery_kind == "quest_accept":
+            self._abandon_quest_accept_navigation(reason)
+        else:
+            self._stop_leveling_unsafe(reason)
+
     def _clear_location_route_tracking(self) -> None:
         """Clear controller-local route ownership after a terminal handoff."""
 
@@ -144,7 +150,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             and self._route_deadline_monotonic is not None
             and now >= self._route_deadline_monotonic
         ):
-            self._stop_leveling_unsafe("navigator_route_deadline_exhausted")
+            self._stop_or_abandon_quest_accept_route(
+                "navigator_route_deadline_exhausted"
+            )
             return
         started = self._navigator_opened_monotonic or time.monotonic()
         timeout_ms = max(1000, int(self.config.leveling.navigator_timeout_ms))
@@ -152,7 +160,7 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
         child = self._find_navigator_client()
         if child is None:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
-                self._stop_leveling_unsafe("navigator_child_timeout")
+                self._stop_or_abandon_quest_accept_route("navigator_child_timeout")
             return
         resolved_client_id = str(child.get("client_id") or "") or None
         if resolved_client_id != self._navigator_client_id:
@@ -167,7 +175,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             return
         if self._navigator_requires_target_selection:
             if (time.monotonic() - started) * 1000 >= timeout_ms:
-                self._stop_leveling_unsafe("navigator_target_selection_timeout")
+                self._stop_or_abandon_quest_accept_route(
+                    "navigator_target_selection_timeout"
+                )
                 return
             bound = self._navigator_client_bound_monotonic or time.monotonic()
             if time.monotonic() - bound < NAVIGATOR_TARGET_INPUT_SETTLE_S:
@@ -194,7 +204,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
                 + NAVIGATOR_SELECTION_DEADLINE_RESERVE_MS
             )
             if remaining_ms < one_attempt_budget_ms:
-                self._stop_leveling_unsafe("navigator_target_selection_budget_exhausted")
+                self._stop_or_abandon_quest_accept_route(
+                    "navigator_target_selection_budget_exhausted"
+                )
                 return
             attempt_count = NAVIGATOR_SELECTION_MAX_ATTEMPTS if remaining_ms >= two_attempt_budget_ms else 1
             command_timeout_ms = min(
@@ -230,7 +242,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
                 },
             )
             if not self.action_executor.execute(request):
-                self._stop_leveling_unsafe("navigator_target_selection_failed_or_ambiguous")
+                self._stop_or_abandon_quest_accept_route(
+                    "navigator_target_selection_failed_or_ambiguous"
+                )
                 return
             self._navigator_requires_target_selection = False
             return
@@ -480,7 +494,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             self._route_step_submitted_monotonic is not None
             and now - self._route_step_submitted_monotonic >= ROUTE_STEP_PROGRESS_DEADLINE_S
         ):
-            self._stop_leveling_unsafe("navigator_route_step_progress_deadline_exhausted")
+            self._stop_or_abandon_quest_accept_route(
+                "navigator_route_step_progress_deadline_exhausted"
+            )
             return
         previous_snapshot_success = self._last_state_snapshot_success_monotonic
         snapshot = self._state_snapshot_via_injector(force=True)
@@ -540,7 +556,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             if self._observe_route_fingerprint(base_fingerprint, now):
                 return
             if deadline_exceeded:
-                self._stop_leveling_unsafe("navigator_route_result_unconfirmed")
+                self._stop_or_abandon_quest_accept_route(
+                    "navigator_route_result_unconfirmed"
+                )
             return
         if page_kind in {"area", "hunt", "main"}:
             self.current_page_kind = page_kind
@@ -574,7 +592,9 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
                 self._finish_route_arrival("navigator_route_confirmed")
                 return
         if deadline_exceeded:
-            self._stop_leveling_unsafe("navigator_route_result_unconfirmed")
+            self._stop_or_abandon_quest_accept_route(
+                "navigator_route_result_unconfirmed"
+            )
             return
         route_snapshot = self._location_route_snapshot_via_injector()
         transition = route_snapshot.get("nextTransition") if isinstance(route_snapshot, dict) else None
@@ -949,6 +969,13 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             metadata["allowed_levels"] = list(allowed_levels)
         if allowed_names:
             metadata["names"] = list(allowed_names)
+        semantic_binding = getattr(self, "_quest_semantic_combat_binding", None)
+        if getattr(self, "_quest_semantic_precombat_attack_allowed", None) is True:
+            if semantic_binding is None or tuple(allowed_names) != (semantic_binding.target,):
+                self._stop_leveling_unsafe("quest_semantic_combat_target_mismatch")
+                return False
+            metadata["semantic_authoritative"] = True
+            metadata["semantic_binding"] = semantic_binding.metadata()
         target_specs = [
             {"name": name, "level": level}
             for name, level in getattr(self, "_quest_target_specs", ())
@@ -1005,9 +1032,29 @@ class NavigationRuntimeMixin(SemanticQuestPrecombatRuntimeMixin):
             or not director.active_catalog.complete
         ):
             return True
+        current_cycle = self.session.completed_cycles
+        terminal_evidence = getattr(
+            self, "_quest_inventory_terminal_completion_evidence", None
+        )
+        if (
+            terminal_evidence is not None
+            and terminal_evidence.quest_id == objective.quest_id
+            and terminal_evidence.quest_title == objective.quest_title
+            and terminal_evidence.fingerprint == objective.fingerprint
+            and terminal_evidence.terminal_collection
+        ):
+            # Inventory completion remains authoritative until a newer active
+            # catalogue fingerprint proves that the step advanced.  A cached
+            # pre-combat callback must never re-authorize farming while the
+            # refresh/turn-in handoff is pending.
+            self._quest_target_names = ()
+            self._quest_target_levels = ()
+            self._quest_target_specs = ()
+            self._next_quest_refresh_cycle = current_cycle
+            self._maybe_start_quest_refresh()
+            return False
         last_fingerprint = getattr(self, "_quest_inventory_checked_fingerprint", None)
         last_cycle = getattr(self, "_quest_inventory_checked_cycle", None)
-        current_cycle = self.session.completed_cycles
         inspection_due = (
             last_fingerprint != objective.fingerprint
             or last_cycle is None

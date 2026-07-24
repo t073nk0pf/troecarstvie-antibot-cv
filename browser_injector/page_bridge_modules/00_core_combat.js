@@ -1,4 +1,4 @@
-  const BRIDGE_VERSION = "2026-07-17-chat-delivery-retention-v74";
+  const BRIDGE_VERSION = "2026-07-21-npc-census-v80";
   const CONTENT_SOURCE = `antibot-cv-content:${BRIDGE_VERSION}`;
   const INJECTOR_SOURCE = `antibot-cv-injector:${BRIDGE_VERSION}`;
 

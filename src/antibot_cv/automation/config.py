@@ -155,6 +155,7 @@ class LevelingConfig:
     quest_refresh_timeout_ms: int = 10000
     auto_navigate_quest_targets: bool = False
     autonomous_quest_director: bool = False
+    accept_available_quests: bool = True
     quest_engine_mode: str = "legacy"
     pinned_quest_id: str = ""
     ignored_quest_ids: tuple[str, ...] = ()

@@ -468,6 +468,34 @@ def test_inflight_chat_refresh_yields_to_active_catalog_pagination() -> None:
     assert runtime._quest_chat_refresh_pending is pending
 
 
+def test_chat_refresh_waits_for_item_recovery_navigation_settle() -> None:
+    original = collection_entry(objective="Соберите 5 осиных крыльев.", current=4)
+    fingerprint, _ = quest_step_fingerprint(original)
+    assert fingerprint is not None
+    base = pending_refresh(fingerprint)
+    now = time.monotonic()
+    pending = PendingQuestChatRefresh(
+        base.evidence,
+        base.trigger_revision,
+        base.trigger_snapshot_id,
+        now,
+        now + 60,
+        base.attempts,
+        base.dedicated_refresh_started,
+    )
+    runtime = SimpleNamespace(
+        _quest_chat_refresh_pending=pending,
+        _quest_active_snapshot_requested=False,
+        _search_pause_until_monotonic=now + 1.0,
+        _request_active_quest_snapshot=lambda reason: (_ for _ in ()).throw(
+            AssertionError(reason)
+        ),
+    )
+
+    assert QuestRuntimeMixin._handle_pending_quest_chat_refresh(runtime) is True
+    assert runtime._quest_chat_refresh_pending is pending
+
+
 def test_evidence_is_staged_from_cached_authoritative_step_during_inflight_refresh() -> None:
     observed_now = datetime.now(timezone.utc)
     original = collection_entry(objective="Соберите 5 осиных крыльев.", current=4)

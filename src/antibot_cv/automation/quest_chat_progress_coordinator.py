@@ -159,6 +159,19 @@ class QuestChatProgressCoordinatorMixin:
             # barrier.  Inside the refresh handler, yield so its pagination
             # branch can request page 1..N and eventually reconcile us.
             return not allow_active_progress
+        # Item recovery can finish while its scheduled main-frame reload is
+        # still settling.  Starting catalogue navigation in that bounded
+        # window lets the delayed recovery navigation overwrite the quest
+        # page, leaving a mutation-possible ACK_PENDING that must never be
+        # reissued.  Reuse the recovery owner's existing settle lease before
+        # staging the first catalogue mutation.
+        recovery_settle_until = getattr(self, "_search_pause_until_monotonic", None)
+        if (
+            isinstance(recovery_settle_until, (int, float))
+            and not isinstance(recovery_settle_until, bool)
+            and now < float(recovery_settle_until)
+        ):
+            return True
         if now < pending.next_retry_monotonic:
             return True
         self._quest_chat_refresh_pending = replace(

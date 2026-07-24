@@ -15,6 +15,10 @@ from src.antibot_cv.automation.gathering_activity_runtime import (
 )
 from src.antibot_cv.automation.quest_objective_runtime import QuestObjective
 from src.antibot_cv.automation.quest_chat_progress import resource_matches_objective
+from src.antibot_cv.automation.quest_return_clause import (
+    NAVIGATION_VERB_PATTERN,
+    contains_navigation_clause,
+)
 
 
 @dataclass(frozen=True)
@@ -38,45 +42,107 @@ class QuestInventoryCompletionEvidence:
 _COUNTED = re.compile(
     r"(?:получите|добудьте|соберите|найдите|принесите)\s+"
     r"(?P<count>[1-9]\d*)\s+(?P<name>[^,.;]+?)"
-    r"(?=\s+и\s+(?:возвращ|вернит|отнес|переда)|[,.;]|$)",
+    rf"(?=\s+и\s+{NAVIGATION_VERB_PATTERN}\b|[,.;]|$)",
     re.IGNORECASE,
 )
 _SINGULAR = re.compile(
     r"(?:получите|добудьте|найдите|снимите)\s+"
     r"(?P<name>[^,.;]+?)"
-    r"(?=(?:,\s*)?(?:после чего|и)\s+(?:возвращ|вернит|отнес|переда)|[.;]|$)",
+    rf"(?=(?:,\s*)?(?:после чего|и)\s+{NAVIGATION_VERB_PATTERN}\b|[.;]|$)",
+    re.IGNORECASE,
+)
+_COUNTED_ITEM_SEPARATOR = re.compile(r"\s+и\s+(?=[1-9]\d*\s+)", re.IGNORECASE)
+_COUNTED_ITEM_CONTINUATION = re.compile(
+    r"(?P<count>[1-9]\d*)\s+(?P<name>.+)", re.IGNORECASE
+)
+# Any digit immediately after a comma is a prospective counted continuation.
+# The stricter parser below must consume it completely; otherwise a partial
+# parse could incorrectly declare the objective complete from its first item.
+_COUNTED_COMMA_PREFIX = re.compile(r"\s*,\s*\d")
+_COUNTED_COMMA_CONTINUATION = re.compile(
+    r"\s*,\s*(?P<count>[1-9]\d*)\s+(?P<name>[^,.;]+?)"
+    rf"(?=\s+и\s+{NAVIGATION_VERB_PATTERN}\b|[,.;]|$)",
     re.IGNORECASE,
 )
 
 
+@dataclass(frozen=True)
+class _RequirementParseResult:
+    requirements: tuple[GatheringRequirement, ...]
+    navigation_clause_captured: bool = False
+
+
 def quest_item_requirements(objective: QuestObjective | None) -> tuple[GatheringRequirement, ...]:
+    return _parse_quest_item_requirements(objective).requirements
+
+
+def _parse_quest_item_requirements(
+    objective: QuestObjective | None,
+) -> _RequirementParseResult:
     if objective is None or not isinstance(objective.objective, str):
-        return ()
+        return _RequirementParseResult(())
     text = " ".join(objective.objective.split())
     requirements: list[GatheringRequirement] = []
     occupied: list[tuple[int, int]] = []
     for match in _COUNTED.finditer(text):
-        name = _clean_name(match.group("name"))
-        if name:
-            requirements.append(GatheringRequirement(name, int(match.group("count"))))
-            occupied.append(match.span())
+        parts = _COUNTED_ITEM_SEPARATOR.split(match.group("name"))
+        counted_parts: list[tuple[str, int]] = [
+            (parts[0], int(match.group("count")))
+        ]
+        for continuation in parts[1:]:
+            continued = _COUNTED_ITEM_CONTINUATION.fullmatch(continuation)
+            if continued is None:
+                return _RequirementParseResult((), True)
+            counted_parts.append(
+                (continued.group("name"), int(continued.group("count")))
+            )
+        occupied_end = match.end()
+        while _COUNTED_COMMA_PREFIX.match(text, occupied_end):
+            continued = _COUNTED_COMMA_CONTINUATION.match(text, occupied_end)
+            if continued is None:
+                return _RequirementParseResult((), True)
+            counted_parts.append(
+                (continued.group("name"), int(continued.group("count")))
+            )
+            occupied_end = continued.end()
+        for raw_name, count in counted_parts:
+            name = _clean_name(raw_name)
+            if name and contains_navigation_clause(name):
+                return _RequirementParseResult((), True)
+            if name:
+                requirements.append(GatheringRequirement(name, count))
+        if any(_clean_name(raw_name) for raw_name, _ in counted_parts):
+            occupied.append((match.start(), occupied_end))
     for match in _SINGULAR.finditer(text):
         if any(start <= match.start() < end for start, end in occupied):
             continue
         name = _clean_name(match.group("name"))
+        if name and contains_navigation_clause(name):
+            return _RequirementParseResult((), True)
         if name:
             requirements.append(GatheringRequirement(name, 1))
     unique = {(item.name.casefold(), item.required) for item in requirements}
-    return tuple(requirements) if len(unique) == len(requirements) else ()
+    return _RequirementParseResult(
+        tuple(requirements) if len(unique) == len(requirements) else ()
+    )
 
 
 def evaluate_quest_inventory(
     objective: QuestObjective | None,
     snapshot: object,
 ) -> QuestInventoryGuardResult:
-    requirements = quest_item_requirements(objective)
+    parsed = _parse_quest_item_requirements(objective)
+    requirements = parsed.requirements
     if objective is None:
         return QuestInventoryGuardResult(False, False, (), (), "quest_objective_missing")
+    if parsed.navigation_clause_captured:
+        return QuestInventoryGuardResult(
+            False,
+            False,
+            (),
+            (),
+            "quest_item_requirement_contains_navigation_clause",
+        )
     if not isinstance(snapshot, Mapping) or snapshot.get("ok") is not True:
         return QuestInventoryGuardResult(False, False, requirements, (), "inventory_snapshot_invalid")
     if snapshot.get("category") != "quest" or snapshot.get("categoryConfirmed") is not True:

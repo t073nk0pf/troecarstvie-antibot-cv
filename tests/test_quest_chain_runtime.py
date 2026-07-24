@@ -53,6 +53,28 @@ def test_chain_advances_to_unsupported_dialogue_without_releasing_lease() -> Non
     assert chain.lease.completed_steps == 1
 
 
+def test_advanced_fingerprint_can_bind_the_next_turn_in_ref() -> None:
+    first = _entry("108", "Сулемайт", objective="Вернитесь к Сулемайту")
+    second = _entry("108", "Рокош", objective="Отправляйтесь к Рокошу")
+    chain = QuestChainRuntime()
+    chain.pin_entry(first, revision=1)
+    chain.bind_accepted_ref(QuestRef(
+        "108", "Quest 108", location="Прокалённое плато",
+        giver_names=("Ремесленник Сулемайт",),
+    ))
+
+    advanced = chain.reconcile((second,), current_level_cap=5)
+    rebound = chain.bind_accepted_ref(QuestRef(
+        "108", "Quest 108", location="Заросли терновника",
+        giver_names=("Герой Рокош",),
+    ))
+
+    assert advanced.state is ChainRefreshState.EXECUTOR_REQUIRED
+    assert rebound.accepted_ref is not None
+    assert rebound.accepted_ref.giver_names == ("Герой Рокош",)
+    assert rebound.turn_in_ref_fingerprint == rebound.current_fingerprint
+
+
 def test_chain_rejects_fingerprint_loop_and_unverified_removal() -> None:
     first = _entry("2", "Волк [5]")
     objective = select_monster_hunt_objective((first,), current_level_cap=5).objective

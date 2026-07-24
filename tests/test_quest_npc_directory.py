@@ -48,3 +48,26 @@ def test_directory_does_not_resolve_same_name_without_location() -> None:
     directory = QuestNpcDirectory.from_files("docs/3kingdoms/NPC_CATALOG.json")
     result = directory.resolve("Идол Перуна")
     assert result.status is NpcResolutionStatus.AMBIGUOUS
+
+
+def test_location_bounded_adjacent_transposition_resolves_canonical_giver() -> None:
+    directory = QuestNpcDirectory.from_files("docs/3kingdoms/NPC_CATALOG.json")
+
+    result = directory.resolve(
+        "десятнику Бертроду",
+        location_name="Лагерь новобранцев",
+    )
+
+    assert result.status is NpcResolutionStatus.RESOLVED
+    assert result.reason == "location_bounded_adjacent_transposition"
+    assert result.entry is not None
+    assert result.entry.canonical_name == "Десятник Берторд"
+    assert result.entry.location_id == "276"
+
+
+def test_adjacent_transposition_never_resolves_without_location_binding() -> None:
+    directory = QuestNpcDirectory.from_files("docs/3kingdoms/NPC_CATALOG.json")
+
+    result = directory.resolve("десятнику Бертроду")
+
+    assert result.status is NpcResolutionStatus.NOT_FOUND

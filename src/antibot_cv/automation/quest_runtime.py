@@ -53,6 +53,7 @@ from src.antibot_cv.automation.quest_route_binding import (
     validate_quest_route_binding,
 )
 from src.antibot_cv.automation.quest_turnin_coordinator import QuestTurnInCoordinatorMixin
+from src.antibot_cv.automation.quest_turnin_outcome import QuestTurnInStartOutcome
 from src.antibot_cv.automation.quest_turnin_runtime import QuestTurnInPhase
 from src.antibot_cv.automation.gathering_activity_runtime import (
     GatheringPlanStatus,
@@ -116,6 +117,28 @@ class QuestRuntimeMixin(
             self._quest_npc_directory = QuestNpcDirectory()
             self.logger.log_event(
                 "quest_npc_directory_unavailable",
+                state=self.state_machine.state.value,
+                cycle_id=self.session.cycle_id,
+                reason=str(exc),
+            )
+        try:
+            from src.antibot_cv.automation.npc_census_binder import (
+                bind_npc_observations,
+                overlay_verified_census,
+            )
+            from src.antibot_cv.automation.npc_census_store import NpcCensusStore
+
+            census = NpcCensusStore(Path(self.config.runs_dir) / "npc_census.json")
+            census.load()
+            decisions = bind_npc_observations(
+                self._quest_npc_directory.entries, census.areas, census.dialogues,
+            )
+            self._quest_npc_directory = QuestNpcDirectory(
+                overlay_verified_census(self._quest_npc_directory.entries, decisions),
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.logger.log_event(
+                "quest_npc_census_unavailable",
                 state=self.state_machine.state.value,
                 cycle_id=self.session.cycle_id,
                 reason=str(exc),
@@ -751,6 +774,7 @@ class QuestRuntimeMixin(
     def _handle_quest_refresh(self) -> None:
         if self._handle_pending_quest_turn_in():
             return
+
         if self._handle_pending_quest_dialogue():
             return
         if self._handle_pending_quest_acceptance():
@@ -770,7 +794,8 @@ class QuestRuntimeMixin(
             if not self._quest_director.active_catalog.complete:
                 self._request_active_quest_snapshot("quest_active_next_page")
                 return
-        if self._maybe_begin_quest_turn_in():
+        turn_in_outcome = self._maybe_begin_quest_turn_in()
+        if turn_in_outcome is not QuestTurnInStartOutcome.NOT_APPLICABLE:
             return
         if self._quest_director is not None and self._quest_director.refresh_in_progress:
             if self._quest_catalog_page_requested is not None:
@@ -942,6 +967,27 @@ class QuestRuntimeMixin(
         timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
         if (time.monotonic() - started) * 1000 >= timeout_ms:
             self._stop_leveling_unsafe("quest_refresh_timeout")
+
+    def _resume_durable_quest_workflow(self) -> None:
+        """Route restored quest journals to their reconciliation state."""
+
+        director = self._quest_director
+        if director is None:
+            return
+        chain = director.chain
+        if (
+            director.pending_accept is not None
+            or chain.pending_accepted_ref is not None
+            or chain.pending_npc_open is not None
+            or chain.pending_npc_dialog is not None
+            or chain.pending_npc_action is not None
+            or chain.pending_catalog_navigation is not None
+            or chain.pending_active_catalog_navigation is not None
+        ):
+            self._safe_transition(
+                GameState.QUEST_REFRESH_PENDING,
+                reason="durable_quest_workflow_restored",
+            )
 
     def _recover_quest_refresh_from_orphan_npc_page(self) -> bool:
         if (

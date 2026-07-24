@@ -28,6 +28,7 @@ from src.antibot_cv.automation.quest_dialog_answer_stability import (
     answer_snapshot_can_wait,
     assess_answer_stability,
 )
+from src.antibot_cv.automation.quest_dialogue_recipe import dialogue_recipe_timeout_s
 from src.antibot_cv.automation.quest_npc_action_journal import (
     NpcQuestActionKind,
     NpcQuestActionPhase,
@@ -51,6 +52,8 @@ _LOCAL_INTAKE_QUARANTINE_REASONS = frozenset({
     "quest_accept_terminal_evidence_missing",
     "quest_accept_submit_action_missing_or_ambiguous",
     "quest_accept_dialog_step_limit_exceeded",
+    "quest_accept_exact_npc_has_no_quest_action",
+    "quest_accept_navigation_unavailable",
 })
 
 
@@ -119,6 +122,29 @@ class QuestAcceptanceCoordinatorMixin:
         if not same_location_name(self.current_location_name, pending.location):
             return self._stop_leveling_unsafe("quest_accept_route_arrival_mismatch")
         return self._open_area_for_quest_accept(reason)
+
+    def _abandon_quest_accept_navigation(self, detail: str) -> bool:
+        """Release one pre-NPC route failure without stopping the session."""
+
+        self._clear_location_route_tracking()
+        if not self._quarantine_pending_quest_accept(
+            "quest_accept_navigation_unavailable"
+        ):
+            return False
+        self.logger.log_event(
+            "quest_accept_navigation_abandoned",
+            state=self.state_machine.state.value,
+            cycle_id=self.session.cycle_id,
+            reason=detail,
+        )
+        if self.state_machine.state is GameState.NAVIGATOR_PENDING:
+            self._safe_transition(
+                GameState.LOCATION_SEARCH,
+                reason="quest_accept_navigation_abandoned",
+            )
+        return self._open_area_for_quest_accept(
+            "quest_accept_navigation_return_to_location"
+        )
 
     def _handle_pending_quest_acceptance(self) -> bool:
         pending = self._quest_intake.pending
@@ -267,6 +293,15 @@ class QuestAcceptanceCoordinatorMixin:
         try:
             decision = self._quest_intake.decide_dialog(snapshot)
         except QuestIntakeDecisionError as exc:
+            if self._quest_accept_dialog_snapshot_pending(exc.unsafe_reason):
+                self.logger.log_event(
+                    "quest_accept_dialog_snapshot_wait",
+                    state=self.state_machine.state.value,
+                    cycle_id=self.session.cycle_id,
+                    quest_id=pending.quest_id,
+                    reason=exc.unsafe_reason,
+                )
+                return True
             dialog_is_durable = bool(
                 self._quest_director is not None
                 and self._quest_director.chain.pending_npc_dialog is not None
@@ -279,11 +314,22 @@ class QuestAcceptanceCoordinatorMixin:
             ):
                 stage = self._quest_director.chain.pending_npc_dialog
                 now = time.time()
+                generated = snapshot_epoch_seconds(snapshot.get("generatedAt")) if isinstance(snapshot, dict) else None
+                snapshot_id = str((snapshot or {}).get("snapshotId") or "") if isinstance(snapshot, dict) else ""
+                if (
+                    stage is not None
+                    and stage.answer_ambiguity_generated_at is not None
+                    and generated is not None
+                    and generated > stage.answer_ambiguity_generated_at
+                    and snapshot_id != stage.answer_ambiguity_snapshot_id
+                ):
+                    self._quest_answer_stability = None
+                    return self._quarantine_pending_quest_accept(exc.unsafe_reason)
                 if stage is not None and answer_snapshot_can_wait(
                     stage, snapshot, client_id=result.client_id or "",
                     profile_id=profile_id, tab_id=tab_id, now=now,
                 ):
-                    generated = snapshot_epoch_seconds(snapshot.get("generatedAt"))
+                    assert generated is not None
                     try:
                         stage = self._quest_director.chain.record_npc_dialog_ambiguity(
                             stage, snapshot_id=str(snapshot.get("snapshotId") or ""),
@@ -371,7 +417,31 @@ class QuestAcceptanceCoordinatorMixin:
             self._quest_active_page_requested = None
             self._quest_active_request_snapshot_id = None
             return self._request_active_quest_snapshot("quest_accept_action_verify_active")
+        if updated_action.action is NpcQuestActionKind.DONE:
+            self._quest_director.expire_available_snapshot()
+            self._quest_director.invalidate_active_snapshot()
+            self._quest_active_snapshot_requested = False
+            self._quest_active_page_requested = None
+            self._quest_active_request_snapshot_id = None
+            return self._request_active_quest_snapshot(
+                "quest_done_action_verify_active"
+            )
+        # The game replaces dialogue controls asynchronously after an answer.
+        # Bound transient invalid observations to this mutation, rather than to
+        # the much older moment when the NPC page was first opened.
+        self._quest_refresh_requested_monotonic = time.monotonic()
         return True
+
+    def _quest_accept_dialog_snapshot_pending(self, unsafe_reason: str) -> bool:
+        """Allow only a bounded re-observation of a transitional dialog frame."""
+
+        if unsafe_reason != "quest_accept_dialog_snapshot_invalid":
+            return False
+        started = self._quest_refresh_requested_monotonic
+        if started is None:
+            return False
+        timeout_ms = max(1000, int(self.config.leveling.quest_refresh_timeout_ms))
+        return (time.monotonic() - started) * 1000 < timeout_ms
 
     def _stage_quest_accept_npc_open(self, pending, observed_client_id):
         director = self._quest_director
@@ -403,11 +473,13 @@ class QuestAcceptanceCoordinatorMixin:
             quest_accept_ref=quest_ref.accept_ref,
             quest_catalog_page=quest_ref.catalog_page,
             giver_name=pending.giver_name, npc_id=pending.npc_id,
+            route_ref=pending.route_ref,
             npc_name=pending.npc_name,
             location_id=pending.location_id, location_name=pending.location,
             area_snapshot_id=pending.area_snapshot_id,
             area_generated_at=pending.area_generated_at,
             issued_at=issued_at,
+            settle_timeout_s=dialogue_recipe_timeout_s(pending.quest_id, pending.title),
         )
         director.chain.stage_npc_open(staged)
         return staged
@@ -481,6 +553,58 @@ class QuestAcceptanceCoordinatorMixin:
             except (OSError, RuntimeError, ValueError) as exc:
                 return self._stop_leveling_unsafe(f"quest_accept_action_active_settle:{exc}")
             return False
+        if staged.action is NpcQuestActionKind.DONE:
+            if not director.active_snapshot_fresh:
+                if self._quest_active_page_requested is None:
+                    return self._request_active_quest_snapshot(
+                        "quest_done_action_verify_active"
+                    )
+                return True
+            active_matches = [
+                entry for entry in director.active_catalog.result
+                if entry.id == staged.quest_id and entry.title == staged.quest_title
+            ] if director.active_catalog.complete else []
+            if active_matches:
+                try:
+                    director.chain.recover_staged_active_ref(
+                        active_matches[0],
+                        revision=director.active_catalog.revision,
+                        expected_ref=director.pending_accept,
+                    )
+                    self._quest_intake.mark_accept_submitted()
+                    director.acknowledge_accept(staged.quest_id)
+                    self._quest_intake.finish(staged.quest_id)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    return self._stop_leveling_unsafe(
+                        f"quest_done_action_active_settle:{exc}"
+                    )
+                return False
+            if not director.active_catalog.complete:
+                return True
+            if not director.available_snapshot_fresh:
+                if not director.refresh_in_progress:
+                    director.begin_completed_intake_catalog_refresh(staged.quest_id)
+                if self._quest_catalog_page_requested is None:
+                    return self._request_available_quest_page(
+                        "quest_complete_verify_available",
+                        failure_reason="quest_complete_catalog_open_failed",
+                    )
+                return True
+            if not director.catalog.complete or any(
+                ref.id == staged.quest_id for ref in director.available_quests
+            ):
+                return self._stop_leveling_unsafe("quest_complete_available_proof_missing")
+            try:
+                director.acknowledge_completed_intake(staged.quest_id, staged)
+                self._quest_intake.mark_accept_submitted()
+                self._quest_intake.finish(staged.quest_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return self._stop_leveling_unsafe(f"quest_complete_settle:{exc}")
+            self.logger.log_event(
+                "quest_intake_completed", quest_id=staged.quest_id,
+                quest_title=staged.quest_title,
+            )
+            return False
         from src.antibot_cv.automation.browser_injector import global_browser_injector
 
         injector = global_browser_injector()
@@ -514,7 +638,7 @@ class QuestAcceptanceCoordinatorMixin:
             if staged.action is NpcQuestActionKind.OPEN:
                 self._quest_intake.mark_quest_opened()
             else:
-                self._quest_intake.mark_dialog_answered()
+                self._quest_intake.mark_dialog_answer_settled()
         except (OSError, RuntimeError, ValueError) as exc:
             return self._stop_leveling_unsafe(f"quest_accept_action_settle:{exc}")
         self._invalidate_quest_snapshot_cache()
@@ -562,11 +686,28 @@ class QuestAcceptanceCoordinatorMixin:
                 reason=settle.reason, deadline=staged.deadline,
             )
             return True
+        if settle.status is NpcOpenSettleStatus.EMPTY:
+            try:
+                director.chain.clear_npc_open(staged)
+            except (OSError, RuntimeError, ValueError) as exc:
+                return self._stop_leveling_unsafe(
+                    f"quest_accept_empty_npc_rollback:{exc}"
+                )
+            if not self._quarantine_pending_quest_accept(
+                "quest_accept_exact_npc_has_no_quest_action"
+            ):
+                return False
+            return self._open_area_for_quest_accept(
+                "quest_accept_empty_npc_return_to_location"
+            )
         if settle.status is not NpcOpenSettleStatus.ACCEPT:
             return self._stop_leveling_unsafe(settle.reason)
+        quest_already_open = settle.reason == "npc_open_exact_dialog_confirmed"
         try:
-            director.chain.settle_npc_open(staged)
+            director.chain.settle_npc_open(staged, quest_opened=quest_already_open)
             self._quest_intake.mark_npc_opened()
+            if quest_already_open:
+                self._quest_intake.mark_quest_opened()
         except (OSError, RuntimeError, ValueError) as exc:
             return self._stop_leveling_unsafe(f"quest_accept_npc_settle:{exc}")
         self._invalidate_quest_snapshot_cache()

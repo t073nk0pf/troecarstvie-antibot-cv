@@ -17,6 +17,8 @@ class WorldRegistry:
             "edges": {},
             "npcs": {},
             "instances": {},
+            "mapNpcs": {},
+            "mapSources": {},
         }
         self.load()
 
@@ -27,9 +29,15 @@ class WorldRegistry:
         if not isinstance(candidate, dict) or candidate.get("schemaVersion") != 1:
             raise ValueError("unsupported world registry schema")
         candidate.setdefault("edges", {})
+        candidate.setdefault("mapNpcs", {})
+        candidate.setdefault("mapSources", {})
         for section in ("locations", "edges", "npcs", "instances"):
             if not isinstance(candidate.get(section), dict):
                 raise ValueError(f"invalid world registry section: {section}")
+        if not isinstance(candidate["mapNpcs"], dict) or not isinstance(
+            candidate["mapSources"], dict
+        ):
+            raise ValueError("invalid world registry map evidence")
         self.data = candidate
 
     def save(self) -> None:
@@ -118,7 +126,15 @@ class WorldRegistry:
                 "locationId": location_id,
                 "name": name,
             }
-            if self.data["npcs"].get(key) != value:
+            existing = self.data["npcs"].get(key)
+            if isinstance(existing, dict):
+                same_identity = (
+                    existing.get("areaObjectId") == object_id
+                    and existing.get("locationId") == location_id
+                )
+                if same_identity and _identity(existing.get("npcInstanceId")):
+                    value["npcInstanceId"] = _identity(existing["npcInstanceId"])
+            if existing != value:
                 self.data["npcs"][key] = value
                 changed = True
         if changed:
@@ -137,6 +153,8 @@ class WorldRegistry:
             if isinstance(action, dict)
         }
         instance_ids.discard("")
+        if len(instance_ids) > 1:
+            raise ValueError("conflicting npc instance identity in dialog snapshot")
         wanted_location_id = _identity(location_id)
         candidates = [
             value for value in self.data["npcs"].values()
@@ -152,8 +170,11 @@ class WorldRegistry:
         changed = False
         for value in candidates:
             if instance_ids:
-                npc_instance_id = sorted(instance_ids, key=int)[0]
-                if value.get("npcInstanceId") != npc_instance_id:
+                npc_instance_id = next(iter(instance_ids))
+                current_instance_id = _identity(value.get("npcInstanceId"))
+                if current_instance_id and current_instance_id != npc_instance_id:
+                    raise ValueError("conflicting npc instance identity")
+                if current_instance_id != npc_instance_id:
                     value["npcInstanceId"] = npc_instance_id
                     changed = True
         if changed:

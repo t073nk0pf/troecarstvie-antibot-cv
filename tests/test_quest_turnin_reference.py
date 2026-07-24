@@ -40,6 +40,18 @@ def test_derives_location_first_return_wording() -> None:
     assert ref.giver_names == ("десятнику Бертроду",)
 
 
+def test_shared_return_grammar_keeps_correctly_spelled_location_first_wording() -> None:
+    entry = _entry(
+        "Получите 3 клыка и возвращайтесь в Лагерь новобранцев к десятнику Бертроду.",
+        [{"target": "Лагерь новобранцев"}],
+    )
+
+    ref = derive_turn_in_ref(entry)
+
+    assert ref is not None
+    assert ref.giver_names == ("десятнику Бертроду",)
+
+
 def test_derives_deliver_to_npc_turn_in_wording() -> None:
     entry = _entry(
         "Убивая Свирепых кентавров найдите ступку, "
@@ -55,6 +67,21 @@ def test_derives_deliver_to_npc_turn_in_wording() -> None:
     assert ref is not None
     assert ref.location == "Курганы Бренности"
     assert ref.giver_names == ("ведунье Ильмет",)
+
+
+def test_derives_return_item_to_npc_turn_in_wording() -> None:
+    entry = _entry(
+        "Используя точильный камень, наточите топор Рокоша. "
+        "Наточив топор, верните точильный камень ремесленнику Сулемайту "
+        "на Прокалённое плато.",
+        [{"target": "Прокалённое плато"}],
+    )
+
+    ref = derive_turn_in_ref(entry)
+
+    assert ref is not None
+    assert ref.location == "Прокалённое плато"
+    assert ref.giver_names == ("Ремесленник Сулемайту",)
 
 
 def test_rejects_missing_or_ambiguous_non_monster_route() -> None:

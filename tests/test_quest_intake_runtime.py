@@ -17,12 +17,13 @@ def quest(*, givers: tuple[str, ...] = ("Моряк Кентур",)) -> QuestRef
 
 
 def area_snapshot(*items: dict[str, object]) -> dict[str, object]:
+    bound_items = [{**item, "routeRef": item.get("routeRef", str(398 + index))} for index, item in enumerate(items)]
     return {
         "ok": True,
         "snapshotId": "area-npcs-1",
         "generatedAt": time.time(),
         "location": {"id": "125", "name": "Порт"},
-        "items": list(items),
+        "items": bound_items,
         "truncated": False,
     }
 
@@ -75,6 +76,7 @@ def test_intake_requires_one_giver_and_returns_snapshot_bound_npc_intent() -> No
         "expected_snapshot_id": "area-npcs-1",
         "expected_location_id": "125",
         "npc_id": "6",
+        "expected_route_ref": "398",
         "expected_name": "Моряк Кентур",
             "expected_dialog_name": "Моряк Кентур",
             "quest_id": "314",
@@ -228,45 +230,17 @@ def test_dialog_prefers_the_only_reply_without_refusal_language() -> None:
     assert decision.action_metadata["expected_ref"] == "401"
 
 
-@pytest.mark.parametrize(
-    "dialog_actions",
-    (
-        [
-            {
-                "questId": "314",
-                "npcId": "6",
-                "action": "answer",
-                "visible": True,
-                "disabled": False,
-                "ref": "501",
-                "text": "Я не выполню это поручение.",
-            }
-        ],
-        [
-            {
-                "questId": "314",
-                "npcId": "6",
-                "action": "answer",
-                "visible": True,
-                "disabled": False,
-                "ref": "502",
-                "text": "Далее",
-            },
-            {
-                "questId": "314",
-                "npcId": "6",
-                "action": "answer",
-                "visible": True,
-                "disabled": False,
-                "ref": "502",
-                "text": "Далее",
-            },
-        ],
-    ),
-)
-def test_dialog_policy_blocks_sole_refusal_and_duplicate_controls(
-    dialog_actions: list[dict[str, object]],
-) -> None:
+def test_dialog_policy_blocks_duplicate_controls() -> None:
+    dialog_actions = [
+        {
+            "questId": "314", "npcId": "6", "action": "answer",
+            "visible": True, "disabled": False, "ref": "502", "text": "Далее",
+        },
+        {
+            "questId": "314", "npcId": "6", "action": "answer",
+            "visible": True, "disabled": False, "ref": "502", "text": "Далее",
+        },
+    ]
     runtime = ready_dialog_runtime()
     runtime.acknowledge(
         runtime.decide_dialog(
@@ -288,6 +262,86 @@ def test_dialog_policy_blocks_sole_refusal_and_duplicate_controls(
         runtime.decide_dialog(dialog_snapshot(dialogActions=dialog_actions))
 
     assert exc_info.value.unsafe_reason == "quest_accept_dialog_action_ambiguous"
+
+
+def test_dialog_policy_always_advances_one_exact_answer() -> None:
+    runtime = ready_dialog_runtime()
+    runtime.acknowledge(runtime.decide_dialog(dialog_snapshot(questActions=[{
+        "questId": "314", "title": "Письмо моряку", "action": "open",
+        "visible": True, "disabled": False,
+    }])))
+
+    decision = runtime.decide_dialog(dialog_snapshot(dialogActions=[{
+        "questId": "314", "npcId": "6", "action": "answer",
+        "visible": True, "disabled": False, "ref": "501",
+        "text": "Я не выполню это поручение.",
+    }]))
+
+    assert decision.intent is QuestIntakeIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "501"
+
+
+def test_dialog_policy_explores_first_non_refusal_puzzle_action() -> None:
+    runtime = ready_dialog_runtime()
+    runtime.acknowledge(runtime.decide_dialog(dialog_snapshot(questActions=[{
+        "questId": "314", "title": "Письмо моряку", "action": "open",
+        "visible": True, "disabled": False,
+    }])))
+    actions = [
+        {
+            "questId": "314", "npcId": "6", "action": "answer",
+            "visible": True, "disabled": False, "ref": "3931",
+            "text": "*Один раз повернуть Гранатовый ключ.*",
+        },
+        {
+            "questId": "314", "npcId": "6", "action": "answer",
+            "visible": True, "disabled": False, "ref": "3932",
+            "text": "*Один раз повернуть Изумрудный ключ.*",
+        },
+    ]
+
+    decision = runtime.decide_dialog(dialog_snapshot(dialogActions=actions))
+
+    assert decision.intent is QuestIntakeIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "3931"
+
+
+def test_dialog_policy_accepts_one_bound_neutral_story_question() -> None:
+    runtime = ready_dialog_runtime()
+    runtime.acknowledge(
+        runtime.decide_dialog(
+            dialog_snapshot(
+                questActions=[
+                    {
+                        "questId": "314",
+                        "title": "Письмо моряку",
+                        "action": "open",
+                        "visible": True,
+                        "disabled": False,
+                    }
+                ]
+            )
+        )
+    )
+
+    decision = runtime.decide_dialog(
+        dialog_snapshot(
+            dialogActions=[
+                {
+                    "questId": "314",
+                    "npcId": "6",
+                    "action": "answer",
+                    "visible": True,
+                    "disabled": False,
+                    "ref": "3925",
+                    "text": "Что приключилось, Василиса? Чем могу помочь тебе?",
+                }
+            ]
+        )
+    )
+
+    assert decision.intent is QuestIntakeIntent.ANSWER_DIALOG
+    assert decision.action_metadata["expected_ref"] == "3925"
 
 
 @pytest.mark.parametrize(
@@ -331,3 +385,21 @@ def test_terminal_accept_requires_title_objective_and_unique_action() -> None:
         runtime.decide_dialog(missing_objective)
 
     assert raised.value.unsafe_reason == "quest_accept_terminal_evidence_missing"
+
+
+def test_exact_done_action_is_terminal_evidence_without_objective_copy() -> None:
+    runtime = ready_dialog_runtime()
+    runtime.mark_quest_opened()
+    action = {
+        "questId": "314", "npcId": "6", "action": "accept",
+        "visible": True, "disabled": False, "text": "Взять задание",
+    }
+    snapshot = dialog_snapshot(
+        headers=["Письмо моряку"], acceptActions=[action],
+        doneActions=[{**action, "action": "done"}],
+    )
+
+    decision = runtime.decide_dialog(snapshot)
+
+    assert decision.intent is QuestIntakeIntent.COMPLETE_QUEST
+    assert decision.action_metadata["action"] == "done"

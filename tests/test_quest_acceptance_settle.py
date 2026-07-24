@@ -37,7 +37,7 @@ def area_snapshot(
         "generatedAt": time.time() if generated_at is None else generated_at,
         "location": {"id": location_id, "name": location_name},
         "items": (
-            [{"dataId": "2", "name": "Царевич Придон", "actionable": True}]
+            [{"dataId": "2", "routeRef": "402", "name": "Царевич Придон", "actionable": True}]
             if items is None
             else items
         ),
@@ -79,6 +79,44 @@ def acceptance_controller(
     controller._quest_intake.begin(quest, already_at_location=True)
     assert controller._open_area_for_quest_accept("test_accept_settle") is True
     return controller, sink
+
+
+def test_ambiguous_navigator_target_quarantines_only_current_acceptance(
+    test_config: AutomationConfig,
+) -> None:
+    controller, _ = acceptance_controller(test_config)
+
+    class RejectSelectionSink:
+        def __init__(self) -> None:
+            self.requests = []
+
+        def execute(self, request) -> bool:
+            self.requests.append(request)
+            return request.action_type == "open_area"
+
+    sink = RejectSelectionSink()
+    controller.action_executor.sink = sink
+    controller.state_machine.state = GameState.NAVIGATOR_PENDING
+    controller._route_recovery_kind = "quest_accept"
+    controller._navigator_target_name = "Недоступная локация"
+    controller._navigator_client_id = "navigator-client"
+    controller._navigator_requires_target_selection = True
+    controller._navigator_opened_monotonic = time.monotonic()
+    controller._navigator_client_bound_monotonic = time.monotonic() - 5
+    controller._find_navigator_client = lambda: {"client_id": "navigator-client"}
+
+    controller._handle_navigator_pending()
+
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert controller.last_error_reason is None
+    assert [request.action_type for request in sink.requests] == [
+        "navigator_select_target",
+        "open_area",
+    ]
+    director = controller._quest_director
+    assert director is not None
+    assert director.chain.intake_quarantines
+    assert director.pending_accept is None
 
 
 def install_snapshots(
@@ -213,7 +251,7 @@ def q269_ref() -> QuestRef:
 def prepare_q269_opened_dialog(controller, monkeypatch) -> None:
     install_snapshots(monkeypatch, [area_snapshot(
         "area-npcs-q269", location_id="132", location_name="След Велета",
-        items=[{"dataId": "10", "name": "Башня Вагарда", "actionable": True}],
+        items=[{"dataId": "10", "routeRef": "410", "name": "Башня Вагарда", "actionable": True}],
     )])
     assert controller._handle_pending_quest_acceptance() is True
     install_snapshots(monkeypatch, [npc_open_proof(controller)])
@@ -259,6 +297,106 @@ def test_missing_location_then_exact_giver_opens_npc_once(
     assert [request.action_type for request in sink.requests] == ["open_area", "open_exact_npc"]
     assert sink.requests[-1].metadata["npc_id"] == "2"
     assert sink.requests[-1].metadata["expected_name"] == "Царевич Придон"
+
+
+def test_exact_empty_npc_returns_to_area_and_continues_with_next_quest(
+    test_config: AutomationConfig,
+    monkeypatch,
+) -> None:
+    controller, sink = acceptance_controller(test_config)
+    install_snapshots(monkeypatch, [area_snapshot("area-npcs-empty-dialog")])
+    assert controller._handle_pending_quest_acceptance() is True
+    director = controller._quest_director
+    assert director is not None and director.chain.pending_npc_open is not None
+    staged = director.chain.pending_npc_open
+    empty = {
+        "ok": True, "truncated": False,
+        "snapshotId": "npc-dialog-empty-exact",
+        "generatedAt": time.time(), "pageKind": "npc",
+        "href": f"https://3kingdoms.ru/npc.php?f_id={staged.npc_id}",
+        "expectedName": staged.giver_name, "expectedNpcId": staged.npc_id,
+        "identityMatches": True, "npcId": staged.npc_id,
+        "matchingHeaders": ["Царевич Придон"],
+        "questActions": [], "dialogActions": [],
+    }
+    install_snapshots(monkeypatch, [empty])
+
+    assert controller._handle_pending_quest_acceptance() is True
+
+    assert controller.last_error_reason is None
+    assert [request.action_type for request in sink.requests] == [
+        "open_area", "open_exact_npc", "open_area",
+    ]
+    assert director.chain.pending_npc_open is None
+    assert controller._quest_intake.pending is None
+    assert director.chain.intake_quarantines[-1].quest_id == "236"
+    assert director.chain.intake_quarantines[-1].reason == (
+        "quest_accept_exact_npc_has_no_quest_action"
+    )
+    assert director.decision().reason == "quest_intake_quarantine_recorded"
+    decision = director.decision()
+    assert decision.quest is not None and decision.quest.id == "237"
+
+
+def test_quest_accept_navigator_timeout_is_local_and_returns_to_area(
+    test_config: AutomationConfig,
+) -> None:
+    controller, sink = acceptance_controller(test_config)
+    controller.state_machine.state = GameState.NAVIGATOR_PENDING
+    controller._route_recovery_kind = "quest_accept"
+    controller._navigator_target_name = "Просторы безмолвия"
+    controller._navigator_requires_target_selection = True
+    controller._navigator_opened_monotonic = time.monotonic() - 60
+    controller._navigator_client_id = "navigator-client"
+    controller._navigator_client_bound_monotonic = time.monotonic() - 60
+    controller._find_navigator_client = lambda: {"client_id": "navigator-client"}
+
+    controller._handle_navigator_pending()
+
+    director = controller._quest_director
+    assert director is not None
+    assert controller.last_error_reason is None
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert [request.action_type for request in sink.requests] == ["open_area", "open_area"]
+    assert controller._quest_intake.pending is None
+    assert director.chain.intake_quarantines[-1].reason == (
+        "quest_accept_navigation_unavailable"
+    )
+    assert controller._route_recovery_kind is None
+
+
+def test_quest_accept_long_route_deadline_is_local_after_intermediate_progress(
+    test_config: AutomationConfig,
+) -> None:
+    controller, sink = acceptance_controller(test_config)
+    controller.state_machine.state = GameState.ROUTE_RECOVERY
+    controller._route_recovery_kind = "quest_accept"
+    controller._route_destination_name = "Жемчужный залив"
+    controller._route_go_submitted_monotonic = time.monotonic() - 60
+    controller._route_started_monotonic = time.monotonic() - 60
+    controller._route_deadline_monotonic = time.monotonic() - 0.01
+    controller._state_snapshot_via_injector = lambda force=False: {
+        "schemaVersion": 1,
+        "sections": {
+            "location": {"data": {
+                "pageKind": "area", "semanticName": "Курганы бренности",
+            }},
+            "battle": {"data": {"rawHasFight": False, "hasFight": False}},
+            "deathRevive": {"data": {"dead": False}},
+        },
+    }
+
+    controller._handle_route_recovery()
+
+    director = controller._quest_director
+    assert director is not None
+    assert controller.last_error_reason is None
+    assert controller.state_machine.state is GameState.QUEST_REFRESH_PENDING
+    assert controller.current_location_name == "Курганы бренности"
+    assert [request.action_type for request in sink.requests] == ["open_area", "open_area"]
+    assert director.chain.intake_quarantines[-1].reason == (
+        "quest_accept_navigation_unavailable"
+    )
 
 
 @pytest.mark.parametrize("confirmed", [False, True])
@@ -559,8 +697,8 @@ def test_ambiguous_giver_and_lookup_client_provenance_stop_immediately(
     ambiguous = area_snapshot(
         "area-npcs-ambiguous",
         items=[
-            {"dataId": "2", "name": "Царевич Придон", "actionable": True},
-            {"dataId": "3", "name": "Царевич Придон", "actionable": True},
+            {"dataId": "2", "routeRef": "402", "name": "Царевич Придон", "actionable": True},
+            {"dataId": "3", "routeRef": "403", "name": "Царевич Придон", "actionable": True},
         ],
     )
     install_snapshots(monkeypatch, [ambiguous])
@@ -648,7 +786,7 @@ def test_q269_transient_duplicate_waits_for_two_fresh_unique_answer_snapshots(
     controller, sink = acceptance_controller(test_config, q269)
     install_snapshots(monkeypatch, [area_snapshot(
         "area-npcs-q269", location_id="132", location_name="След Велета",
-        items=[{"dataId": "10", "name": "Башня Вагарда", "actionable": True}],
+        items=[{"dataId": "10", "routeRef": "410", "name": "Башня Вагарда", "actionable": True}],
     )])
     assert controller._handle_pending_quest_acceptance() is True
     install_snapshots(monkeypatch, [npc_open_proof(controller)])
@@ -849,8 +987,8 @@ def test_executor_failure_and_quarantine_binding_mismatch_remain_global(
     ambiguous = area_snapshot(
         "area-npcs-binding-mismatch",
         items=[
-            {"dataId": "2", "name": "Царевич Придон", "actionable": True},
-            {"dataId": "3", "name": "Царевич Придон", "actionable": True},
+            {"dataId": "2", "routeRef": "402", "name": "Царевич Придон", "actionable": True},
+            {"dataId": "3", "routeRef": "403", "name": "Царевич Придон", "actionable": True},
         ],
     )
     install_snapshots(monkeypatch, [ambiguous])
@@ -946,3 +1084,26 @@ def test_settle_policy_rejects_wrong_location_and_reused_snapshot() -> None:
     assert wrong.reason == "quest_accept_location_mismatch"
     assert reused.intent is AcceptanceSettleIntent.WAIT
     assert reused.reason == "quest_accept_npc_snapshot_not_fresh"
+
+
+def test_settle_policy_accepts_zero_id_building_proxy_for_inflected_giver() -> None:
+    decision = assess_acceptance_area_snapshot(
+        {
+            "ok": True,
+            "truncated": False,
+            "snapshotId": "area-npcs-live-vasilisa",
+            "generatedAt": "2026-07-20T12:59:56.420Z",
+            "location": {"id": "127", "name": "Пристанище трёх ветров"},
+            "items": [
+                {"name": "Дом Василисы", "dataId": "0", "routeRef": "420", "actionable": True},
+                {"name": "Дом Торвара", "dataId": "3", "routeRef": "423", "actionable": True},
+            ],
+        },
+        expected_location="Пристанище трёх ветров",
+        expected_giver="крестьянки Василисы",
+        previous_snapshot_id=None,
+        area_opened_epoch=1_700_000_000.0,
+    )
+
+    assert decision.intent is AcceptanceSettleIntent.READY
+    assert decision.reason == "quest_accept_giver_ready"

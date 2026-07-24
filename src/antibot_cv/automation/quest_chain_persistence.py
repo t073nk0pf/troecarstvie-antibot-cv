@@ -5,6 +5,7 @@ from typing import Mapping
 from src.antibot_cv.automation.quest_chain_state import (
     PendingTurnInCompletion,
     QuarantinedQuest,
+    QuestLocalBlock,
 )
 from src.antibot_cv.automation.quest_director_policy import QuestRef
 
@@ -48,6 +49,75 @@ def valid_capability(value: str) -> bool:
     return bool(value) and len(value) <= 80 and all(
         char.islower() or char.isdigit() or char in {"_", "."} for char in value
     )
+
+
+def valid_phase(value: str) -> bool:
+    return bool(value) and len(value) <= 80 and all(
+        char.islower() or char.isdigit() or char == "_" for char in value
+    )
+
+
+def valid_authority_id(value: str) -> bool:
+    return bool(value) and len(value) <= 200 and all(
+        char.islower() or char.isdigit() or char in {"_", ".", ":", "-"}
+        for char in value
+    )
+
+
+def serialize_local_block(item: QuestLocalBlock) -> dict[str, object]:
+    return {
+        "quest_id": item.quest_id,
+        "quest_title": item.quest_title,
+        "fingerprint": item.fingerprint,
+        "phase": item.phase,
+        "capability_version": item.capability_version,
+        "reason": item.reason,
+        "authority_ids": list(item.authority_ids),
+        "attempts": item.attempts,
+    }
+
+
+def restore_local_blocks(raw: object, *, max_items: int) -> tuple[QuestLocalBlock, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, (list, tuple)) or len(raw) > max_items:
+        raise ValueError("invalid quest local block history")
+    restored: list[QuestLocalBlock] = []
+    keys: set[tuple[str, str, str, str]] = set()
+    for value in raw:
+        if not isinstance(value, Mapping):
+            raise ValueError("invalid quest local block evidence")
+        quest_id = str(value.get("quest_id") or "").strip()
+        title = str(value.get("quest_title") or "").strip()
+        fingerprint = str(value.get("fingerprint") or "").strip()
+        phase = str(value.get("phase") or "").strip()
+        capability = str(value.get("capability_version") or "").strip()
+        reason = str(value.get("reason") or "").strip()
+        authority_raw = value.get("authority_ids")
+        attempts = value.get("attempts")
+        legacy_refresh_claimed = value.get("refresh_claimed", False)
+        if not isinstance(authority_raw, (list, tuple)):
+            raise ValueError("invalid quest local block evidence")
+        authority_ids = tuple(str(item or "").strip() for item in authority_raw)
+        key = (quest_id, fingerprint, phase, capability)
+        if (
+            not quest_id.isdecimal() or int(quest_id) <= 0 or not title
+            or not fingerprint or len(fingerprint) > 512 or not valid_phase(phase)
+            or not valid_capability(capability) or not valid_reason(reason)
+            or isinstance(attempts, bool) or not isinstance(attempts, int)
+            or attempts <= 0 or attempts > 100 or attempts != len(authority_ids)
+            or not isinstance(legacy_refresh_claimed, bool)
+            or len(set(authority_ids)) != len(authority_ids)
+            or any(not valid_authority_id(item) for item in authority_ids)
+            or key in keys
+        ):
+            raise ValueError("invalid quest local block evidence")
+        keys.add(key)
+        restored.append(QuestLocalBlock(
+            quest_id, title, fingerprint, phase, capability, reason,
+            authority_ids, attempts,
+        ))
+    return tuple(restored)
 
 
 def serialize_quarantine(item: QuarantinedQuest) -> dict[str, object]:

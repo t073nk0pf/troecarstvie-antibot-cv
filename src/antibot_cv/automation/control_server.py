@@ -49,6 +49,8 @@ class AutomationControlApi(AutomationControlService):
             return self.location_route_step(payload or {})
         if path == "/api/open-exact-npc" and method == "POST":
             return self.open_exact_npc(payload or {})
+        if path == "/api/inspect-exact-npc" and method == "POST":
+            return self.inspect_exact_npc(payload or {})
         if path == "/api/npc-quest-action" and method == "POST":
             return self.npc_quest_action(payload or {})
         if path == "/api/open-active-quest-page" and method == "POST":

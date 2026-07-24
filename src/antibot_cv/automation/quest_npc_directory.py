@@ -95,6 +95,29 @@ class QuestNpcDirectory:
             return NpcResolution(NpcResolutionStatus.RESOLVED, surname_matches, "proper_name_stem")
         if len(surname_matches) > 1:
             return NpcResolution(NpcResolutionStatus.AMBIGUOUS, surname_matches, "proper_name_stem_ambiguous")
+        # Some quest texts contain a stable adjacent-letter typo in the proper
+        # name while the map catalogue and the live area agree on the canonical
+        # spelling (for example Бертрод -> Берторд).  Recover only inside an
+        # explicitly bound location and only when the role stems are exact and
+        # one final proper-name stem differs by a single adjacent transposition.
+        # This is deliberately narrower than fuzzy name matching.
+        if wanted_id or wanted_location:
+            transposed = tuple(
+                entry for entry in candidates
+                if _location_bounded_transposition_match(query, entry.canonical_name)
+            )
+            if len(transposed) == 1:
+                return NpcResolution(
+                    NpcResolutionStatus.RESOLVED,
+                    transposed,
+                    "location_bounded_adjacent_transposition",
+                )
+            if len(transposed) > 1:
+                return NpcResolution(
+                    NpcResolutionStatus.AMBIGUOUS,
+                    transposed,
+                    "location_bounded_adjacent_transposition_ambiguous",
+                )
         return NpcResolution(NpcResolutionStatus.NOT_FOUND, (), "npc_not_in_directory")
 
 
@@ -158,6 +181,27 @@ def _merge_runtime(
 
 def _signature(value: object) -> tuple[str, ...]:
     return tuple(_stem(token) for token in re.findall(r"[a-zа-я0-9]+", str(value or "").casefold().replace("ё", "е")))
+
+
+def _location_bounded_transposition_match(expected: object, canonical: object) -> bool:
+    expected_signature = _signature(expected)
+    canonical_signature = _signature(canonical)
+    if (
+        len(expected_signature) != len(canonical_signature)
+        or not expected_signature
+        or expected_signature[:-1] != canonical_signature[:-1]
+    ):
+        return False
+    left, right = expected_signature[-1], canonical_signature[-1]
+    if len(left) != len(right) or len(left) < 5 or left == right:
+        return False
+    differences = [index for index, pair in enumerate(zip(left, right)) if pair[0] != pair[1]]
+    return (
+        len(differences) == 2
+        and differences[1] == differences[0] + 1
+        and left[differences[0]] == right[differences[1]]
+        and left[differences[1]] == right[differences[0]]
+    )
 
 
 def _stem(token: str) -> str:

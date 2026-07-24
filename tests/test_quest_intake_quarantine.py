@@ -12,6 +12,7 @@ from src.antibot_cv.automation.quest_intake_quarantine import (
     intake_ref_fingerprint,
 )
 from src.antibot_cv.automation.quest_intake_runtime import QuestIntakeRuntime
+from src.antibot_cv.automation.quest_npc_open_navigation import make_pending_npc_open
 
 
 def _ref(
@@ -219,6 +220,38 @@ def test_director_quarantine_is_atomic_exact_and_action_free(tmp_path) -> None:
     decision = director.decision()
     assert decision.intent is QuestDirectorIntent.WAIT
     assert decision.reason == "quest_intake_quarantine_recorded"
+
+
+def test_director_quarantine_atomically_clears_settled_dialog_stage(tmp_path) -> None:
+    quest_ref = _ref()
+    director, other = _pending_director(
+        quest_ref,
+        state_path=tmp_path / "chain.json",
+    )
+    stage = make_pending_npc_open(
+        client_id="client-a", profile_id="profile-a", tab_id=42,
+        quest_id=quest_ref.id, quest_title=quest_ref.title,
+        quest_accept_ref=quest_ref.accept_ref, quest_catalog_page=0,
+        giver_name=quest_ref.giver_names[0], npc_id="4", route_ref="100",
+        npc_name=quest_ref.giver_names[0], location_id="127",
+        location_name=quest_ref.location or "", area_snapshot_id="area-npcs-1",
+        area_generated_at=10.0, issued_at=11.0,
+    )
+    director.chain.stage_npc_open(stage)
+    director.chain.settle_npc_open(stage)
+
+    director.quarantine_pending_accept(
+        quest_ref,
+        "quest_accept_dialog_action_ambiguous",
+    )
+
+    assert director.chain.pending_accepted_ref is None
+    assert director.chain.pending_npc_dialog is None
+    assert director.chain.pending_npc_action is None
+    assert director.intake_queue == (other,)
+    restored = QuestChainRuntime(state_path=tmp_path / "chain.json")
+    assert restored.pending_npc_dialog is None
+    assert restored.intake_quarantines[-1].quest_id == quest_ref.id
 
 
 @pytest.mark.parametrize("mismatch", ("pending", "staged", "queue", "eligible"))

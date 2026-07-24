@@ -348,7 +348,7 @@
     const generatedAt = new Date().toISOString();
     stateSnapshotSequence += 1;
     const snapshotId = `${Date.now().toString(36)}-${stateSnapshotSequence.toString(36)}`;
-    const allowed = new Set(["player", "location", "deathRevive", "battle", "hunt", "quests", "questChatProgress", "shopInventory"]);
+    const allowed = new Set(["player", "location", "deathRevive", "battle", "hunt", "quests", "questChatProgress", "shopInventory", "v2Capabilities"]);
     const includeProvided = Array.isArray(payload && payload.include);
     const requested = includeProvided
       ? payload.include.map((value) => safeString(value, 40)).filter((value) => allowed.has(value))
@@ -364,6 +364,10 @@
       else if (name === "quests") sections.quests = questSnapshot({ snapshotId, generatedAt });
       else if (name === "questChatProgress") sections.questChatProgress = questChatProgressSnapshot({ snapshotId, generatedAt });
       else if (name === "shopInventory") sections.shopInventory = shopInventorySnapshot();
+      else if (name === "v2Capabilities") sections.v2Capabilities = v2CapabilityObservation({
+        snapshotId,
+        revision: stateSnapshotSequence,
+      });
     }
     return {
       ok: true,
@@ -641,6 +645,36 @@
     };
   };
 
+  const mutationFenceState = new Map();
+  const acceptMutationFence = (payload) => {
+    const fence = payload && payload.mutationFence;
+    if (fence == null) {
+      return { ok: true, legacy: true };
+    }
+    if (!fence || typeof fence !== "object" || Array.isArray(fence)) {
+      return { ok: false, reason: "mutation_fence_malformed" };
+    }
+    const profileId = safeString(fence.profile_id, 180);
+    const tabId = Number(fence.tab_id);
+    const generation = Number(fence.actor_generation);
+    const token = Number(fence.fencing_token);
+    if (!profileId || !Number.isInteger(tabId) || tabId < 0
+        || !Number.isInteger(generation) || generation <= 0
+        || !Number.isInteger(token) || token <= 0) {
+      return { ok: false, reason: "mutation_fence_invalid" };
+    }
+    const key = `${profileId}:${tabId}`;
+    const current = mutationFenceState.get(key);
+    if (current && (generation < current.generation
+        || (generation === current.generation && token < current.token))) {
+      return { ok: false, reason: "mutation_fence_stale" };
+    }
+    if (!current || generation > current.generation || token > current.token) {
+      mutationFenceState.set(key, { generation, token });
+    }
+    return { ok: true, legacy: false };
+  };
+
   window.addEventListener("message", (event) => {
     if (event.source !== window) {
       return;
@@ -650,6 +684,11 @@
       return;
     }
     try {
+      const fenceDecision = acceptMutationFence(data.command.payload || {});
+      if (!fenceDecision.ok) {
+        send(data.token, false, { message: fenceDecision.reason });
+        return;
+      }
       if (data.command.type === "open_hunt") {
         openHunt(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))
@@ -688,6 +727,12 @@
         openExactNpc(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))
           .catch((error) => send(data.token, false, `open_exact_npc_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "inspect_exact_npc") {
+        openExactNpc(data.command.payload || {}, { discoverResultingIdentity: true })
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch(() => send(data.token, false, "inspect_exact_npc_error"));
         return;
       }
       if (data.command.type === "npc_quest_action") {
@@ -845,6 +890,12 @@
         inventorySnapshot(data.command.payload || {})
           .then((result) => send(data.token, Boolean(result.ok), result))
           .catch((error) => send(data.token, false, `inventory_snapshot_error:${safeString(error && error.message ? error.message : error, 200)}`));
+        return;
+      }
+      if (data.command.type === "use_quest_item") {
+        useQuestInventoryItem(data.command.payload || {})
+          .then((result) => send(data.token, Boolean(result.ok), result))
+          .catch((error) => send(data.token, false, `use_quest_item_error:${safeString(error && error.message ? error.message : error, 200)}`));
         return;
       }
       if (data.command.type === "confirm_action_form") {

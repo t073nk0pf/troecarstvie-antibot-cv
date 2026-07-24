@@ -31,6 +31,7 @@ class NpcOpenStatus(str, Enum):
 
 class NpcOpenSettleStatus(str, Enum):
     ACCEPT = "accept"
+    EMPTY = "empty"
     WAIT = "wait"
     STOP_IDENTITY = "stop_identity"
     STOP_EXPIRED = "stop_expired"
@@ -63,6 +64,7 @@ class PendingNpcOpen:
     capability_version: str
     giver_name: str
     npc_id: str
+    route_ref: str | None
     npc_name: str
     location_id: str
     location_name: str
@@ -78,6 +80,7 @@ class PendingNpcOpen:
     answer_ambiguity_snapshot_id: str | None = None
     answer_ambiguity_generated_at: float | None = None
     game_origin: str = QUEST_GAME_ORIGIN
+    route_ref_authority: str = "bound"
 
     def __post_init__(self) -> None:
         if (
@@ -96,14 +99,22 @@ class PendingNpcOpen:
                 (NPC_OPEN_CAPABILITY, CAUSAL_STAGE_SOURCE, "observed_area_snapshot"),
                 (LEGACY_NPC_OPEN_CAPABILITY, LEGACY_STAGE_SOURCE, "derived_event_issued_at"),
             }
-            or not _bounded(self.giver_name, 180) or not _positive_id(self.npc_id, 80)
+            or not _bounded(self.giver_name, 180) or not _canonical_id(self.npc_id, 80, positive=False)
+            or (
+                not _canonical_id(self.route_ref, 40, positive=True)
+                if self.capability_version == NPC_OPEN_CAPABILITY
+                else self.route_ref is not None and not _canonical_id(self.route_ref, 40, positive=True)
+            )
+            and self.route_ref_authority != "legacy_checkpoint_missing"
+            or self.route_ref_authority not in {"bound", "legacy_checkpoint_missing"}
+            or self.route_ref_authority == "legacy_checkpoint_missing" and self.route_ref is not None
             or not _bounded(self.npc_name, 180)
             or not _positive_id(self.location_id, 80) or not _bounded(self.location_name, 180)
             or not _bounded(self.area_snapshot_id, 120) or not self.area_snapshot_id.startswith("area-npcs-")
             or not all(math.isfinite(value) for value in (self.area_generated_at, self.issued_at, self.deadline))
             or self.area_generated_at <= 0 or not self.area_generated_at <= self.issued_at < self.deadline
             or not isinstance(self.quest_opened, bool)
-            or isinstance(self.dialog_steps, bool) or not 0 <= self.dialog_steps <= 20
+            or isinstance(self.dialog_steps, bool) or not 0 <= self.dialog_steps <= 64
             or len(self.dialog_step_fingerprints) != self.dialog_steps
             or any(not _bounded(value, 64) for value in self.dialog_step_fingerprints)
             or (self.answer_ambiguity_snapshot_id is None) != (self.answer_ambiguity_generated_at is None)
@@ -132,7 +143,7 @@ class NpcOpenSettleDecision:
 def make_pending_npc_open(
     *, client_id: str, profile_id: str, tab_id: int,
     quest_id: str, quest_title: str, quest_accept_ref: str | None,
-    quest_catalog_page: int, giver_name: str, npc_id: str, npc_name: str,
+    quest_catalog_page: int, giver_name: str, npc_id: str, route_ref: str | None, npc_name: str,
     location_id: str, location_name: str, area_snapshot_id: str,
     area_generated_at: object, issued_at: float, settle_timeout_s: float = 20.0,
     capability_version: str = NPC_OPEN_CAPABILITY,
@@ -151,7 +162,8 @@ def make_pending_npc_open(
         str(client_id).strip(), str(profile_id).strip(), tab_id,
         quest_ref.id, quest_ref.title, quest_ref.accept_ref, quest_catalog_page,
         intake_ref_fingerprint(quest_ref), capability_version,
-        str(giver_name).strip(), str(npc_id).strip(), str(npc_name).strip(),
+        str(giver_name).strip(), str(npc_id).strip(),
+        None if route_ref is None else str(route_ref).strip(), str(npc_name).strip(),
         str(location_id).strip(), str(location_name).strip(),
         str(area_snapshot_id).strip(), generated, float(issued_at), float(issued_at) + timeout,
         stage_source, area_timestamp_source,
@@ -162,20 +174,41 @@ def npc_open_command_payload(metadata: Mapping[str, object]) -> dict[str, object
     snapshot_id = str(metadata.get("expected_snapshot_id") or "").strip()
     location_id = str(metadata.get("expected_location_id") or "").strip()
     npc_id = str(metadata.get("npc_id") or "").strip()
+    route_ref = str(metadata.get("expected_route_ref") or "").strip()
     expected_name = str(metadata.get("expected_name") or "").strip()
     dialog_name = str(metadata.get("expected_dialog_name") or expected_name).strip()
+    raw_instance_id = metadata.get("expected_npc_instance_id")
+    if raw_instance_id is None or raw_instance_id == "":
+        instance_id = None
+    elif isinstance(raw_instance_id, bool) or not isinstance(raw_instance_id, (str, int)):
+        return None
+    else:
+        instance_id = str(raw_instance_id).strip()
+        if (
+            not instance_id
+            or len(instance_id) > 40
+            or not instance_id.isascii()
+            or not instance_id.isdecimal()
+            or int(instance_id) <= 0
+        ):
+            return None
     if (
         not snapshot_id.startswith("area-npcs-") or len(snapshot_id) > 120
         or not _bounded(location_id, 80)
         or not npc_id.isdecimal() or len(npc_id) > 80 or int(npc_id) < 0
+        or not _canonical_id(route_ref, 40, positive=True)
         or not _bounded(expected_name, 180) or not _bounded(dialog_name, 180)
     ):
         return None
-    return {
+    payload = {
         "expectedSnapshotId": snapshot_id, "expectedLocationId": location_id,
-        "npcId": npc_id, "expectedName": expected_name, "expectedDialogName": dialog_name,
+        "npcId": npc_id, "expectedRouteRef": route_ref,
+        "expectedName": expected_name, "expectedDialogName": dialog_name,
         "verifyTimeoutMs": 2500, "commandTimeoutMs": 5500,
     }
+    if instance_id is not None:
+        payload["expectedNpcInstanceId"] = instance_id
+    return payload
 
 
 def parse_npc_open_outcome(*, result_ok: bool, message: object, client_id: object) -> NpcOpenOutcome:
@@ -238,6 +271,43 @@ def settle_npc_open_snapshot(
         and str(item.get("title") or "").strip() == pending.quest_title
         and item.get("visible") is True and item.get("disabled") is False
     ]
+    dialog_actions = snapshot.get("dialogActions")
+    exact_dialog_actions = [] if not isinstance(dialog_actions, list) else [
+        item for item in dialog_actions
+        if isinstance(item, Mapping)
+        and str(item.get("questId") or "") == pending.quest_id
+        and str(item.get("npcId") or "") == pending.npc_id
+        and str(item.get("action") or "") == "answer"
+        and item.get("visible") is True and item.get("disabled") is False
+    ]
+    exact_surface = (
+        len(exact_actions) == 1
+        or (
+            not exact_actions
+            and isinstance(dialog_actions, list)
+            and 1 <= len(exact_dialog_actions) <= 20
+            and len(exact_dialog_actions) == len(dialog_actions)
+        )
+    )
+    exact_unavailable_surface = (
+        snapshot.get("ok") is True and snapshot.get("truncated") is False
+        and snapshot.get("pageKind") == "npc" and snapshot.get("identityMatches") is True
+        and snapshot.get("expectedName") == pending.giver_name
+        and str(snapshot.get("expectedNpcId") or "") == pending.npc_id
+        and str(snapshot.get("npcId") or "") == pending.npc_id
+        and snapshot_id.startswith("npc-dialog-") and len(snapshot_id) <= 120
+        and isinstance(matching_headers, list) and len(matching_headers) == 1
+        and bool(str(matching_headers[0] or "").strip())
+        and generated is not None
+        and pending.issued_at <= generated <= min(now, pending.deadline)
+        and exact_game_origin_href(snapshot.get("href")) and href.path == "/npc.php"
+        and isinstance(actions, list) and not exact_actions
+        and isinstance(dialog_actions, list) and not exact_dialog_actions
+    )
+    if exact_unavailable_surface:
+        return NpcOpenSettleDecision(
+            NpcOpenSettleStatus.EMPTY, "npc_open_exact_quest_action_unavailable"
+        )
     exact = (
         snapshot.get("ok") is True and snapshot.get("truncated") is False
         and snapshot.get("pageKind") == "npc" and snapshot.get("identityMatches") is True
@@ -250,32 +320,45 @@ def settle_npc_open_snapshot(
         and generated is not None
         and pending.issued_at <= generated <= min(now, pending.deadline)
         and exact_game_origin_href(snapshot.get("href")) and href.path == "/npc.php"
-        and len(exact_actions) == 1
+        and exact_surface
     )
     if exact:
-        return NpcOpenSettleDecision(NpcOpenSettleStatus.ACCEPT, "npc_open_exact_snapshot_confirmed")
+        reason = (
+            "npc_open_exact_dialog_confirmed"
+            if not exact_actions else "npc_open_exact_snapshot_confirmed"
+        )
+        return NpcOpenSettleDecision(NpcOpenSettleStatus.ACCEPT, reason)
     return _npc_wait_or_expire(pending, now)
 
 
 def serialize_pending_npc_open(value: PendingNpcOpen) -> dict[str, object]:
-    return {"schema": 2, **value.__dict__, "dialog_step_fingerprints": list(value.dialog_step_fingerprints)}
+    return {"schema": 3, **value.__dict__, "dialog_step_fingerprints": list(value.dialog_step_fingerprints)}
 
 
 def restore_pending_npc_open(raw: object) -> PendingNpcOpen | None:
     if raw is None:
         return None
+    schema = raw.get("schema") if isinstance(raw, Mapping) else None
+    if isinstance(schema, bool) or not isinstance(schema, int):
+        raise ValueError("invalid pending NPC open checkpoint")
     fields = set(PendingNpcOpen.__dataclass_fields__)
-    legacy_fields = fields - {"answer_ambiguity_snapshot_id", "answer_ambiguity_generated_at"}
+    schema_2_fields = fields - {"route_ref", "route_ref_authority"}
+    schema_1_fields = schema_2_fields - {"answer_ambiguity_snapshot_id", "answer_ambiguity_generated_at"}
     if not isinstance(raw, Mapping) or (
-        raw.get("schema") == 2 and set(raw) != {"schema", *fields}
+        schema == 3 and set(raw) != {"schema", *fields}
     ) or (
-        raw.get("schema") == 1 and set(raw) != {"schema", *legacy_fields}
-    ) or raw.get("schema") not in {1, 2}:
+        schema == 2 and set(raw) != {"schema", *schema_2_fields}
+    ) or (
+        schema == 1 and set(raw) != {"schema", *schema_1_fields}
+    ) or schema not in {1, 2, 3}:
         raise ValueError("invalid pending NPC open checkpoint")
     try:
         values = {field: raw[field] for field in fields if field in raw}
         values.setdefault("answer_ambiguity_snapshot_id", None)
         values.setdefault("answer_ambiguity_generated_at", None)
+        if schema in {1, 2}:
+            values["route_ref"] = None
+            values["route_ref_authority"] = "legacy_checkpoint_missing"
         fingerprints = values.get("dialog_step_fingerprints")
         if not isinstance(fingerprints, (list, tuple)):
             raise ValueError("invalid pending NPC open checkpoint")
@@ -297,3 +380,13 @@ def _bounded(value: object, limit: int) -> bool:
 
 def _positive_id(value: object, limit: int) -> bool:
     return _bounded(value, limit) and value.isdecimal() and int(value) > 0
+
+
+def _canonical_id(value: object, limit: int, *, positive: bool) -> bool:
+    return (
+        _bounded(value, limit)
+        and value.isascii()
+        and value.isdecimal()
+        and str(int(value)) == value
+        and (int(value) > 0 if positive else int(value) >= 0)
+    )

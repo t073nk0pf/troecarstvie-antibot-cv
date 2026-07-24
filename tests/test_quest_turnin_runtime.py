@@ -48,12 +48,13 @@ def identities(entry: ActiveQuestEntry) -> tuple[QuestChainLease, QuestRef]:
 
 
 def area(*items: dict[str, object]) -> dict[str, object]:
+    bound_items = [{**item, "routeRef": item.get("routeRef", str(398 + index))} for index, item in enumerate(items)]
     return {
         "ok": True,
         "truncated": False,
         "snapshotId": "area-npcs-turn-in-1",
         "location": {"id": "77", "name": "Южная застава"},
-        "items": list(items),
+        "items": bound_items,
     }
 
 
@@ -62,12 +63,16 @@ def dialog(**updates: object) -> dict[str, object]:
         "ok": True,
         "truncated": False,
         "identityMatches": True,
+        "expectedName": "Воевода Ратмир",
         "snapshotId": "npc-dialog-turn-in-1",
         "questActions": [],
         "dialogActions": [],
         "doneActions": [],
     }
     result.update(updates)
+    for key in ("questActions", "dialogActions", "doneActions"):
+        for action in result.get(key) or []:
+            action.setdefault("npcId", "12")
     return result
 
 
@@ -100,6 +105,7 @@ def test_completed_identity_routes_to_exact_snapshot_bound_npc() -> None:
         "expected_snapshot_id": "area-npcs-turn-in-1",
         "expected_location_id": "77",
         "npc_id": "12",
+        "expected_route_ref": "398",
         "expected_name": "Воевода Ратмир",
         "expected_dialog_name": "Воевода Ратмир",
         "quest_id": "246",
@@ -136,6 +142,180 @@ def test_turn_in_proxy_click_keeps_quest_giver_as_dialog_identity() -> None:
     assert decision.action_metadata["npc_id"] == "0"
     assert decision.action_metadata["expected_name"] == "Дом Ратмира"
     assert decision.action_metadata["expected_dialog_name"] == "Воевода Ратмир"
+
+
+def test_vilena_proxy_keeps_endpoint_and_resulting_dialogue_identities_separate() -> None:
+    entry = ActiveQuestEntry("304", "Цветочная болезнь", MappingProxyType({
+        "id": "304", "title": "Цветочная болезнь", "status": "active",
+        "objective": "Вернитесь к колдунье Вилене.",
+        "navigation": (MappingProxyType({
+            "text": "Пристанище трёх ветров",
+            "target": "Пристанище трёх ветров",
+        }),),
+        "progress": MappingProxyType({"current": 1, "required": 1, "complete": True}),
+    }))
+    fingerprint, reason = quest_step_fingerprint(entry)
+    assert fingerprint is not None, reason
+    lease = QuestChainLease("304", entry.title, 3, fingerprint, (fingerprint,))
+    quest_ref = QuestRef(
+        "304",
+        "Цветочная болезнь",
+        location="Длань Рода",
+        giver_names=("Колдунья Вилена",),
+    )
+    runtime = QuestTurnInRuntime()
+    pending = runtime.begin(
+        entry, lease=lease, quest_ref=quest_ref, already_at_location=True,
+        resulting_dialog_npc_id="110",
+        expected_resulting_dialog_name="Колдунья Вилена",
+        expected_location_id="128",
+        expected_endpoint_npc_id="4",
+        expected_endpoint_npc_name="Палатка Вилены",
+    )
+    snapshot = area({"dataId": "4", "name": "Палатка Вилены", "actionable": True})
+    snapshot["location"] = {"id": "128", "name": "Длань Рода"}
+
+    opened_proxy = runtime.decide_area_npc(snapshot)
+    pending = runtime.acknowledge(opened_proxy)
+
+    assert pending.endpoint_npc_id == "4"
+    assert pending.endpoint_npc_name == "Палатка Вилены"
+    assert pending.resulting_dialog_npc_id == "110"
+    assert pending.resulting_dialog_name == "Колдунья Вилена"
+    opened_quest = runtime.decide_dialog(dialog(
+        expectedName="Колдунья Вилена",
+        questActions=[{
+            "questId": "304", "title": "Цветочная болезнь", "action": "open",
+            "npcId": "4", "npcInstanceId": "110",
+            "visible": True, "disabled": False,
+        }],
+    ))
+    assert opened_quest.action_metadata["npc_id"] == "4"
+    assert opened_quest.action_metadata["expected_npc_instance_id"] == "110"
+    assert opened_quest.action_metadata["expected_name"] == "Колдунья Вилена"
+    runtime.acknowledge(opened_quest)
+
+    answered = runtime.decide_dialog(dialog(
+        expectedName="Колдунья Вилена",
+        dialogActions=[{
+            "questId": "304", "npcId": "4", "npcInstanceId": "110",
+            "action": "answer", "ref": "81",
+            "text": "Вот цветы.", "visible": True, "disabled": False,
+        }],
+    ))
+    assert answered.action_metadata["expected_name"] == "Колдунья Вилена"
+    runtime.acknowledge(answered)
+
+    completed = runtime.decide_dialog(dialog(
+        expectedName="Колдунья Вилена",
+        doneActions=[{
+            "questId": "304", "npcId": "4", "npcInstanceId": "110",
+            "action": "done", "pointId": "9",
+            "text": "Получить награду", "visible": True, "disabled": False,
+        }],
+    ))
+    assert completed.action_metadata["expected_name"] == "Колдунья Вилена"
+    assert runtime.acknowledge(completed, active_catalog_revision=7).phase is QuestTurnInPhase.VERIFY_ACTIVE
+    assert runtime.verify_terminal((), catalog_complete=True, catalog_revision=8) == "304"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "expected_location_id",
+        "expected_endpoint_npc_id",
+        "expected_endpoint_npc_name",
+        "expected_resulting_dialog_name",
+    ],
+)
+def test_canonical_turn_in_target_rejects_every_partial_identity(missing: str) -> None:
+    entry = completed_entry()
+    lease, quest_ref = identities(entry)
+    identity = {
+        "expected_location_id": "128",
+        "expected_endpoint_npc_id": "4",
+        "expected_endpoint_npc_name": "Палатка Вилены",
+        "resulting_dialog_npc_id": "110",
+        "expected_resulting_dialog_name": "Колдунья Вилена",
+    }
+    identity[missing] = None
+
+    with pytest.raises(QuestTurnInError) as exc:
+        QuestTurnInRuntime().begin(
+            entry,
+            lease=lease,
+            quest_ref=quest_ref,
+            already_at_location=True,
+            **identity,
+        )
+
+    assert exc.value.unsafe_reason == "turn_in_endpoint_identity_invalid"
+
+
+def test_canonical_turn_in_target_allows_unobserved_optional_dialog_instance() -> None:
+    entry = completed_entry()
+    lease, quest_ref = identities(entry)
+
+    pending = QuestTurnInRuntime().begin(
+        entry,
+        lease=lease,
+        quest_ref=quest_ref,
+        already_at_location=True,
+        resulting_dialog_npc_id=None,
+        expected_resulting_dialog_name="Десятник Берторд",
+        expected_location_id="276",
+        expected_endpoint_npc_id="9",
+        expected_endpoint_npc_name="Десятник Берторд",
+    )
+
+    assert pending.location_id == "276"
+    assert pending.endpoint_npc_id == "9"
+    assert pending.endpoint_npc_name == "Десятник Берторд"
+    assert pending.resulting_dialog_name == "Десятник Берторд"
+    assert pending.resulting_dialog_npc_id is None
+
+
+@pytest.mark.parametrize("invalid", [True, "1" * 41, "１２", "110x", 0, -1])
+def test_explicit_invalid_dialog_instance_never_weakens_to_absent(invalid: object) -> None:
+    entry = completed_entry()
+    lease, quest_ref = identities(entry)
+
+    with pytest.raises(QuestTurnInError) as exc:
+        QuestTurnInRuntime().begin(
+            entry,
+            lease=lease,
+            quest_ref=quest_ref,
+            already_at_location=True,
+            resulting_dialog_npc_id=invalid,  # type: ignore[arg-type]
+            expected_resulting_dialog_name="Десятник Берторд",
+            expected_location_id="276",
+            expected_endpoint_npc_id="9",
+            expected_endpoint_npc_name="Десятник Берторд",
+        )
+
+    assert exc.value.unsafe_reason == "turn_in_dialog_identity_invalid"
+
+
+def test_dialogue_snapshot_resulting_identity_is_checked_before_state_mutation() -> None:
+    runtime = begun()
+    issued = runtime.decide_dialog(dialog(questActions=[{
+        "questId": "246", "title": "Охота", "action": "open",
+        "visible": True, "disabled": False,
+    }]))
+    before = runtime.pending
+
+    with pytest.raises(QuestTurnInError) as exc:
+        runtime.decide_dialog(dialog(
+            expectedName="Палатка Вилены",
+            questActions=[{
+                "questId": "246", "title": "Охота", "action": "open",
+                "visible": True, "disabled": False,
+            }],
+        ))
+
+    assert exc.value.unsafe_reason == "turn_in_dialog_identity_mismatch"
+    assert runtime.pending == before
+    assert runtime.acknowledge(issued).quest_opened is True
 
 def test_dialogue_emits_existing_guarded_actions_and_requires_terminal_refresh() -> None:
     runtime = begun()
@@ -240,6 +420,7 @@ def test_open_action_is_selected_by_quest_id_when_dialogue_title_differs() -> No
     assert decision.action_metadata["expected_title"] == (
         "Разговор с Ратмиром о дневнике бандита"
     )
+    assert decision.action_metadata["expected_name"] == "Воевода Ратмир"
 
 
 def test_fresh_advanced_step_continues_same_quest_chain() -> None:

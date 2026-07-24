@@ -92,7 +92,10 @@ def assess_acceptance_area_snapshot(
         return _stop("quest_accept_giver_identity_invalid", snapshot_id)
     actor_id = _bounded_text(actor.get("dataId"), 80)
     actor_name = _bounded_text(actor.get("name"), 180)
-    if not actor_id.isdecimal() or int(actor_id) <= 0 or not actor_name:
+    # Area NPC endpoints are map-local object identities.  The live map uses
+    # ``0`` for valid building proxies (for example ``Дом Василисы``), while
+    # dialogue instance identities remain strictly positive elsewhere.
+    if not actor_id.isdecimal() or int(actor_id) < 0 or not actor_name:
         return _stop("quest_accept_giver_identity_invalid", snapshot_id)
     return AcceptanceSettleDecision(AcceptanceSettleIntent.READY, "quest_accept_giver_ready", snapshot_id)
 

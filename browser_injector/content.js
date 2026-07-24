@@ -3,7 +3,7 @@
     return;
   }
 
-  const bridgeVersion = "2026-07-17-chat-delivery-retention-v74";
+  const bridgeVersion = "2026-07-21-npc-census-v80";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
   let clientId = "";

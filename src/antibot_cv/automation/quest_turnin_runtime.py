@@ -60,12 +60,26 @@ class PendingQuestTurnIn:
     objective: QuestTurnInObjective
     phase: QuestTurnInPhase
     location_id: str | None = None
-    npc_id: str | None = None
-    npc_name: str | None = None
+    endpoint_npc_id: str | None = None
+    endpoint_npc_name: str | None = None
+    resulting_dialog_npc_id: str | None = None
+    resulting_dialog_name: str | None = None
     quest_opened: bool = False
     dialog_steps: int = 0
     last_answer_ref: str | None = None
     completion_after_revision: int | None = None
+
+    @property
+    def npc_id(self) -> str | None:
+        """Compatibility alias for coordinators that bind the endpoint ID."""
+
+        return self.endpoint_npc_id
+
+    @property
+    def npc_name(self) -> str | None:
+        """Compatibility alias for the exact area endpoint/proxy label."""
+
+        return self.endpoint_npc_name
 
 
 @dataclass(frozen=True)
@@ -94,6 +108,11 @@ class QuestTurnInRuntime:
         already_at_location: bool,
         terminal_collection_confirmed: bool = False,
         admission_token: TurnInAdmissionToken | None = None,
+        resulting_dialog_npc_id: str | None = None,
+        expected_resulting_dialog_name: str | None = None,
+        expected_location_id: str | None = None,
+        expected_endpoint_npc_id: str | None = None,
+        expected_endpoint_npc_name: str | None = None,
     ) -> PendingQuestTurnIn:
         if self.pending is not None:
             raise RuntimeError("quest turn-in is already in progress")
@@ -104,9 +123,68 @@ class QuestTurnInRuntime:
             terminal_collection_confirmed=terminal_collection_confirmed,
             admission_token=admission_token,
         )
+        raw_dialog_npc_id = resulting_dialog_npc_id
+        if raw_dialog_npc_id is None or raw_dialog_npc_id == "":
+            dialog_npc_id = None
+        elif isinstance(raw_dialog_npc_id, bool) or not isinstance(
+            raw_dialog_npc_id, (str, int)
+        ):
+            raise QuestTurnInError(
+                "turn_in_dialog_identity_invalid",
+                "resulting NPC instance identity is invalid",
+            )
+        else:
+            dialog_npc_id = str(raw_dialog_npc_id).strip()
+            if (
+                not dialog_npc_id
+                or len(dialog_npc_id) > 40
+                or not dialog_npc_id.isascii()
+                or not dialog_npc_id.isdecimal()
+                or int(dialog_npc_id) <= 0
+            ):
+                raise QuestTurnInError(
+                    "turn_in_dialog_identity_invalid",
+                    "resulting NPC instance identity is invalid",
+                )
+        canonical_dialog_name = _text(expected_resulting_dialog_name, 180) or None
+        location_id = _text(expected_location_id, 80) or None
+        endpoint_id = _text(expected_endpoint_npc_id, 80) or None
+        endpoint_name = _text(expected_endpoint_npc_name, 180) or None
+        required_canonical_identity = (
+            location_id,
+            endpoint_id,
+            endpoint_name,
+            canonical_dialog_name,
+        )
+        if any(value is not None for value in required_canonical_identity) and not all(
+            value is not None for value in required_canonical_identity
+        ):
+            raise QuestTurnInError(
+                "turn_in_endpoint_identity_invalid",
+                "canonical turn-in target identity is incomplete",
+            )
+        if location_id is not None and (
+            not location_id.isdecimal() or int(location_id) <= 0
+        ):
+            raise QuestTurnInError(
+                "turn_in_endpoint_identity_invalid",
+                "endpoint location identity is invalid",
+            )
+        if endpoint_id is not None and (
+            not endpoint_id.isdecimal() or int(endpoint_id) < 0
+        ):
+            raise QuestTurnInError(
+                "turn_in_endpoint_identity_invalid",
+                "endpoint NPC identity is invalid",
+            )
         self.pending = PendingQuestTurnIn(
             objective,
             QuestTurnInPhase.NPC_LOOKUP if already_at_location else QuestTurnInPhase.ROUTE,
+            location_id=location_id,
+            endpoint_npc_id=endpoint_id,
+            endpoint_npc_name=endpoint_name,
+            resulting_dialog_npc_id=dialog_npc_id,
+            resulting_dialog_name=canonical_dialog_name or objective.giver_name,
         )
         self._pending_decision = None
         return self.pending
@@ -130,45 +208,99 @@ class QuestTurnInRuntime:
             raise QuestTurnInError("turn_in_npc_snapshot_invalid", "area NPC snapshot identity is missing")
         if not location_name or _normalize(location_name) != _normalize(pending.objective.location):
             raise QuestTurnInError("turn_in_location_mismatch", "area snapshot is from another location")
-        try:
-            match = resolve_unique_giver(pending.objective.giver_name, snapshot.get("items"))
-        except ValueError as exc:
-            raise QuestTurnInError("turn_in_npc_missing_or_ambiguous", str(exc)) from exc
+        if pending.location_id is not None and location_id != pending.location_id:
+            raise QuestTurnInError("turn_in_location_mismatch", "area snapshot location ID mismatches")
+        if pending.endpoint_npc_id is not None and pending.endpoint_npc_name is not None:
+            matches = tuple(
+                item for item in (snapshot.get("items") or ())
+                if isinstance(item, dict)
+                and _text(item.get("dataId"), 80) == pending.endpoint_npc_id
+                and _normalize(_text(item.get("name"), 180))
+                == _normalize(pending.endpoint_npc_name)
+                and item.get("actionable") is True
+            )
+            if len(matches) != 1:
+                raise QuestTurnInError(
+                    "turn_in_npc_missing_or_ambiguous",
+                    "bound endpoint NPC is missing or ambiguous",
+                )
+            match = matches[0]
+        else:
+            try:
+                match = resolve_unique_giver(pending.objective.giver_name, snapshot.get("items"))
+            except ValueError as exc:
+                raise QuestTurnInError("turn_in_npc_missing_or_ambiguous", str(exc)) from exc
         npc_id = _text(match.get("dataId"), 80)
         npc_name = _text(match.get("name"), 180)
-        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name:
+        route_ref = _text(match.get("routeRef"), 40)
+        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name or not route_ref.isascii() or not route_ref.isdecimal() or int(route_ref) <= 0:
             raise QuestTurnInError("turn_in_npc_identity_invalid", "matched NPC identity is invalid")
-        self.pending = replace(pending, location_id=location_id, npc_id=npc_id, npc_name=npc_name)
+        self.pending = replace(
+            pending,
+            location_id=location_id,
+            endpoint_npc_id=npc_id,
+            endpoint_npc_name=npc_name,
+        )
+        open_metadata = dict(
+            expected_snapshot_id=snapshot_id,
+            expected_location_id=location_id,
+            npc_id=npc_id,
+            expected_route_ref=route_ref,
+            expected_name=npc_name,
+            expected_dialog_name=pending.resulting_dialog_name,
+            quest_id=pending.objective.quest_id,
+        )
+        if pending.resulting_dialog_npc_id is not None:
+            open_metadata["expected_npc_instance_id"] = pending.resulting_dialog_npc_id
         return self._remember(QuestTurnInDecision(
             QuestTurnInIntent.OPEN_NPC,
             "open_exact_npc",
-            _metadata(expected_snapshot_id=snapshot_id, expected_location_id=location_id, npc_id=npc_id,
-                      expected_name=npc_name, expected_dialog_name=pending.objective.giver_name,
-                      quest_id=pending.objective.quest_id),
+            _metadata(**open_metadata),
             "quest_turn_in_npc_open_failed", pending.objective.quest_id, snapshot_id,
         ))
 
     def decide_dialog(self, snapshot: object, *, max_steps: int = 20) -> QuestTurnInDecision:
         pending = self._require(QuestTurnInPhase.NPC_DIALOG)
-        self._pending_decision = None
         if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if (not isinstance(snapshot, dict) or snapshot.get("ok") is not True
                 or snapshot.get("truncated") is not False or snapshot.get("identityMatches") is not True):
             raise QuestTurnInError("turn_in_dialog_snapshot_invalid", "NPC dialogue snapshot is not authoritative")
         snapshot_id = _text(snapshot.get("snapshotId"), 120)
-        if not snapshot_id.startswith("npc-dialog-") or not pending.npc_id:
+        resulting_dialog_name = _text(snapshot.get("expectedName"), 180)
+        if not snapshot_id.startswith("npc-dialog-") or not pending.endpoint_npc_id:
             raise QuestTurnInError("turn_in_dialog_snapshot_invalid", "NPC dialogue identity is missing")
-        common = dict(expected_snapshot_id=snapshot_id, npc_id=pending.npc_id,
+        if (
+            not pending.resulting_dialog_name
+            or not resulting_dialog_name
+            or _normalize(resulting_dialog_name) != _normalize(pending.resulting_dialog_name)
+        ):
+            raise QuestTurnInError(
+                "turn_in_dialog_identity_mismatch",
+                "NPC dialogue snapshot is bound to another resulting identity",
+            )
+        self._pending_decision = None
+        common = dict(expected_snapshot_id=snapshot_id, npc_id=pending.endpoint_npc_id,
+                      expected_name=pending.resulting_dialog_name,
                       quest_id=pending.objective.quest_id, expected_title=pending.objective.quest_title)
+        if pending.resulting_dialog_npc_id is not None:
+            common["expected_npc_instance_id"] = pending.resulting_dialog_npc_id
         answers = _actions(snapshot.get("dialogActions"), quest_id=pending.objective.quest_id,
-                           action="answer", npc_id=pending.npc_id)
+                           action="answer", npc_id=pending.endpoint_npc_id,
+                           npc_instance_id=pending.resulting_dialog_npc_id)
         completions = _actions(snapshot.get("doneActions"), quest_id=pending.objective.quest_id,
-                               action="done", npc_id=pending.npc_id)
+                               action="done", npc_id=pending.endpoint_npc_id,
+                               npc_instance_id=pending.resulting_dialog_npc_id)
         effective_pending = pending
         inferred_already_open = False
         if not pending.quest_opened:
-            opens = _actions(snapshot.get("questActions"), quest_id=pending.objective.quest_id, action="open")
+            opens = _actions(
+                snapshot.get("questActions"),
+                quest_id=pending.objective.quest_id,
+                action="open",
+                npc_id=pending.endpoint_npc_id,
+                npc_instance_id=pending.resulting_dialog_npc_id,
+            )
             if len(opens) == 1:
                 if answers or completions:
                     raise QuestTurnInError(
@@ -395,7 +527,14 @@ def _turn_in_objective(
     return QuestTurnInObjective(entry.id, entry.title, quest_ref.giver_names[0], quest_ref.location, fingerprint)
 
 
-def _actions(raw: object, *, quest_id: str, action: str, npc_id: str | None = None) -> tuple[dict[str, object], ...]:
+def _actions(
+    raw: object,
+    *,
+    quest_id: str,
+    action: str,
+    npc_id: str | None = None,
+    npc_instance_id: str | None = None,
+) -> tuple[dict[str, object], ...]:
     if not isinstance(raw, list):
         raise QuestTurnInError("turn_in_action_collection_invalid", "dialogue action collection is invalid")
     result = []
@@ -417,6 +556,18 @@ def _actions(raw: object, *, quest_id: str, action: str, npc_id: str | None = No
                 raise QuestTurnInError("turn_in_action_collection_invalid", "relevant dialogue NPC identity is invalid")
             if item_npc_id != npc_id:
                 raise QuestTurnInError("turn_in_action_collection_invalid", "relevant dialogue NPC identity mismatches")
+        if npc_instance_id is not None:
+            item_instance_id = str(item.get("npcInstanceId") or "")
+            if not item_instance_id.isdecimal() or int(item_instance_id) <= 0:
+                raise QuestTurnInError(
+                    "turn_in_action_collection_invalid",
+                    "relevant dialogue NPC instance identity is invalid",
+                )
+            if item_instance_id != npc_instance_id:
+                raise QuestTurnInError(
+                    "turn_in_action_collection_invalid",
+                    "relevant dialogue NPC instance identity mismatches",
+                )
         result.append(item)
     return tuple(result)
 

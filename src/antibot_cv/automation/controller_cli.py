@@ -850,19 +850,45 @@ def _execute_cli_live_action(args: argparse.Namespace, request: ActionRequest) -
     logger = InMemoryEventLogger(dry_run=False)
     server = global_browser_injector()
     server.start()
+    resolved_client_id = getattr(args, "client_id", None) or server.last_client_id
+    client_snapshot = server.client_snapshot(resolved_client_id)
+    profile_id = str(client_snapshot.get("profile_id") or "")
+    tab_id = client_snapshot.get("tab_id")
+    if not profile_id or isinstance(tab_id, bool) or not isinstance(tab_id, int):
+        print(json.dumps({"ok": False, "blocked": True, "reason": "mutation_identity_missing"}), file=sys.stderr)
+        return 2
+    from src.antibot_cv.automation.mutation_lease import (
+        MutationLeaseCoordinator, MutationLeaseMode, MutationTarget,
+    )
+    mutation_coordinator = MutationLeaseCoordinator(generation_seed=int(time.time()))
+    mutation_target = MutationTarget(profile_id, tab_id)
+    generation = mutation_coordinator.bind(mutation_target, str(resolved_client_id))
+    mutation_lease = mutation_coordinator.try_acquire(
+        mutation_target, f"direct-cli:{resolved_client_id}:{request.action_type}",
+        MutationLeaseMode.TRANSIENT, actor_generation=generation,
+    )
+    if mutation_lease is None:
+        print(json.dumps({"ok": False, "blocked": True, "reason": "mutation_lease_held"}), file=sys.stderr)
+        return 2
     session = SessionState(requested_cycles=max(1, int(config.max_cycles)))
     executor = ActionExecutor(
         guard=SafetyGuard(config),
         session=session,
         sink=LiveMacActionSink(logger, browser_client_id=getattr(args, "client_id", None)),
         logger=logger,
+        mutation_fence_validator=mutation_coordinator.matches_fence,
+        mutation_fence_provider=mutation_lease.fence_data,
     )
-    ok = executor.execute(request)
+    outcome = executor.execute_outcome(request)
+    ok = outcome.issued
+    if ok or outcome.status.value == "not_issued":
+        mutation_coordinator.release(mutation_lease)
     payload: dict[str, object] = {
         "ok": ok,
         "server_url": f"http://{DEFAULT_INJECTOR_HOST}:{server.port}",
         "client_id": server.last_client_id,
         "events": logger.events,
+        "transport_status": outcome.status.value,
     }
     if not ok:
         payload["extension_path"] = str((Path.cwd() / "browser_injector").resolve())

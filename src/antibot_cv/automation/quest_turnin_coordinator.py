@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -22,12 +23,15 @@ from src.antibot_cv.automation.quest_turnin_runtime import (
     QuestTurnInRuntime,
 )
 from src.antibot_cv.automation.quest_turnin_reference import derive_turn_in_ref
+from src.antibot_cv.automation.quest_turnin_outcome import QuestTurnInStartOutcome
 from src.antibot_cv.automation.quest_objective_router import (
     ObjectiveRouteKind,
     ObjectiveRouteStatus,
     classify_objective,
 )
 from src.antibot_cv.automation.quest_plan_evaluator import evaluate_quest_plan
+from src.antibot_cv.automation.quest_local_outcome import local_quarantine_reason
+from src.antibot_cv.automation.quest_local_block_journal import LocalBlockEnsureState
 from src.antibot_cv.automation.quest_turnin_admission import (
     TurnInAdmissionStatus,
     admit_turn_in,
@@ -42,18 +46,18 @@ class QuestTurnInCoordinatorMixin:
         self._quest_turn_in_started_monotonic = None
         self._quest_turn_in_verify_retries = 0
 
-    def _maybe_begin_quest_turn_in(self) -> bool:
+    def _maybe_begin_quest_turn_in(self) -> QuestTurnInStartOutcome:
         if self._quest_turn_in.pending is not None:
-            return True
+            return QuestTurnInStartOutcome.STARTED
         director = self._quest_director
         if director is None or not director.active_snapshot_fresh or not director.active_catalog.complete:
-            return False
+            return QuestTurnInStartOutcome.NOT_APPLICABLE
         lease = director.chain.lease
         if lease is None:
-            return False
+            return QuestTurnInStartOutcome.NOT_APPLICABLE
         matches = [entry for entry in director.active_catalog.result if entry.id == lease.quest_id]
         if len(matches) != 1:
-            return False
+            return QuestTurnInStartOutcome.NOT_APPLICABLE
         semantic_slice = (
             self.config.leveling.quest_engine_mode == "q280_q304"
             and lease.quest_id in {"280", "304"}
@@ -73,7 +77,7 @@ class QuestTurnInCoordinatorMixin:
                 or quest_ref is None
             ):
                 self._stop_leveling_unsafe("quest_turn_in_semantic_context_missing")
-                return True
+                return QuestTurnInStartOutcome.STOPPED
             evaluation = evaluate_quest_plan(
                 compiled.plan,
                 tuple(getattr(self, "_quest_semantic_evidence", ())),
@@ -105,10 +109,59 @@ class QuestTurnInCoordinatorMixin:
                 self._stop_leveling_unsafe(
                     f"quest_turn_in_semantic_admission:{admission.reason}"
                 )
-                return True
+                return QuestTurnInStartOutcome.STOPPED
             if admission.status is TurnInAdmissionStatus.BLOCKED:
-                return True
+                observation_id = _turn_in_authority_id(authority)
+                try:
+                    block_result = director.chain.ensure_local_block(
+                        entry.id,
+                        entry.title,
+                        lease.current_fingerprint,
+                        phase="turn_in",
+                        capability_version="semantic_turn_in_v1",
+                        reason=admission.reason,
+                        authority_id=observation_id,
+                        max_attempts=2,
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._stop_leveling_unsafe(f"quest_turn_in_local_block:{exc}")
+                    return QuestTurnInStartOutcome.STOPPED
+                self.logger.log_event(
+                    "quest_turn_in_local_blocked",
+                    state=self.state_machine.state.value,
+                    cycle_id=self.session.cycle_id,
+                    quest_id=entry.id,
+                    reason=admission.reason,
+                    attempts=block_result.attempts,
+                    transition=block_result.state.value,
+                    counted=block_result.counted,
+                    observation_id=observation_id,
+                )
+                if block_result.state is LocalBlockEnsureState.QUARANTINE_REQUIRED:
+                    try:
+                        director.quarantine_active_quest(
+                            entry.id,
+                            local_quarantine_reason("turn_in_no_progress", admission.reason),
+                        )
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        self._stop_leveling_unsafe(f"quest_turn_in_quarantine:{exc}")
+                        return QuestTurnInStartOutcome.STOPPED
+                elif block_result.state is LocalBlockEnsureState.REFRESH_REQUIRED:
+                    self._request_active_quest_snapshot("quest_turn_in_local_blocked_refresh")
+                    if self.state_machine.state is GameState.STOPPED:
+                        return QuestTurnInStartOutcome.STOPPED
+                return QuestTurnInStartOutcome.LOCAL_BLOCKED
             admission_token = admission.token
+            try:
+                director.chain.clear_local_block(
+                    entry.id,
+                    lease.current_fingerprint,
+                    phase="turn_in",
+                    capability_version="semantic_turn_in_v1",
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                self._stop_leveling_unsafe(f"quest_turn_in_local_block_clear:{exc}")
+                return QuestTurnInStartOutcome.STOPPED
         progress = matches[0].data.get("progress")
         terminal_collection_confirmed = False
         if not semantic_slice:
@@ -139,7 +192,7 @@ class QuestTurnInCoordinatorMixin:
         if not semantic_slice and not terminal_collection_confirmed and not explicit_turn_in and (
             not isinstance(progress, Mapping) or progress.get("complete") is not True
         ):
-            return False
+            return QuestTurnInStartOutcome.NOT_APPLICABLE
         if lease.accepted_ref is None or lease.turn_in_ref_fingerprint != lease.current_fingerprint:
             recovered_ref = derive_turn_in_ref(matches[0])
             if recovered_ref is None:
@@ -157,8 +210,18 @@ class QuestTurnInCoordinatorMixin:
                     route_kind=route_plan.kind.value,
                     route_reason=route_plan.reason,
                 )
-                self._stop_leveling_unsafe("quest_turn_in_step_ref_missing")
-                return True
+                try:
+                    director.quarantine_active_quest(
+                        matches[0].id,
+                        local_quarantine_reason(
+                            "turn_in_ref_missing",
+                            "quest_turn_in_step_ref_missing",
+                        ),
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._stop_leveling_unsafe(f"quest_turn_in_ref_quarantine:{exc}")
+                    return QuestTurnInStartOutcome.STOPPED
+                return QuestTurnInStartOutcome.LOCAL_BLOCKED
             directory = getattr(self, "_quest_npc_directory", None)
             if directory is not None:
                 resolution = directory.resolve(
@@ -166,6 +229,11 @@ class QuestTurnInCoordinatorMixin:
                     location_name=recovered_ref.location,
                 )
                 canonical = resolution.entry
+                if canonical is None:
+                    fallback = directory.resolve(recovered_ref.giver_names[0])
+                    canonical = fallback.entry
+                    if canonical is not None:
+                        resolution = fallback
                 if canonical is not None:
                     recovered_ref = replace(
                         recovered_ref,
@@ -189,8 +257,61 @@ class QuestTurnInCoordinatorMixin:
                 lease = director.chain.bind_accepted_ref(recovered_ref)
             except (OSError, RuntimeError, ValueError) as exc:
                 self._stop_leveling_unsafe(f"quest_turn_in_step_ref_bind:{exc}")
-                return True
+                return QuestTurnInStartOutcome.STOPPED
         try:
+            resulting_dialog_npc_id = None
+            expected_resulting_dialog_name = None
+            expected_location_id = None
+            expected_endpoint_npc_id = None
+            expected_endpoint_npc_name = None
+            directory = getattr(self, "_quest_npc_directory", None)
+            if directory is not None:
+                resulting_resolution = directory.resolve(
+                    lease.accepted_ref.giver_names[0],
+                    location_name=lease.accepted_ref.location,
+                )
+                resulting_entry = resulting_resolution.entry
+                if resulting_entry is None:
+                    fallback_entry = directory.resolve(
+                        lease.accepted_ref.giver_names[0],
+                    ).entry
+                    if fallback_entry is not None:
+                        self._stop_leveling_unsafe("quest_turn_in_ref_location_conflict")
+                        return QuestTurnInStartOutcome.STOPPED
+                if resulting_entry is not None:
+                    endpoint_name = (
+                        resulting_entry.proxy_names[0]
+                        if len(resulting_entry.proxy_names) == 1
+                        else None
+                    )
+                    required_canonical_values = (
+                        resulting_entry.location_id,
+                        resulting_entry.area_object_id,
+                        endpoint_name,
+                        resulting_entry.canonical_name,
+                    )
+                    if all(required_canonical_values):
+                        (
+                            expected_location_id,
+                            expected_endpoint_npc_id,
+                            expected_endpoint_npc_name,
+                            expected_resulting_dialog_name,
+                        ) = required_canonical_values
+                        # The endpoint is authoritative even when the first
+                        # dialogue instance has not yet been observed.  The
+                        # guarded open contract treats that instance as an
+                        # explicit optional binding and later snapshots still
+                        # require exact endpoint + canonical dialogue identity.
+                        resulting_dialog_npc_id = resulting_entry.npc_instance_id
+                    elif any((
+                        resulting_entry.area_object_id,
+                        endpoint_name,
+                        resulting_entry.npc_instance_id,
+                    )):
+                        self._stop_leveling_unsafe(
+                            "quest_turn_in_canonical_target_incomplete"
+                        )
+                        return QuestTurnInStartOutcome.STOPPED
             pending = self._quest_turn_in.begin(
                 matches[0],
                 lease=lease,
@@ -198,11 +319,16 @@ class QuestTurnInCoordinatorMixin:
                 already_at_location=same_location_name(self.current_location_name, lease.accepted_ref.location),
                 terminal_collection_confirmed=terminal_collection_confirmed,
                 admission_token=admission_token,
+                resulting_dialog_npc_id=resulting_dialog_npc_id,
+                expected_resulting_dialog_name=expected_resulting_dialog_name,
+                expected_location_id=expected_location_id,
+                expected_endpoint_npc_id=expected_endpoint_npc_id,
+                expected_endpoint_npc_name=expected_endpoint_npc_name,
             )
         except (QuestTurnInError, RuntimeError, ValueError) as exc:
             reason = exc.unsafe_reason if isinstance(exc, QuestTurnInError) else str(exc)
             self._stop_leveling_unsafe(f"quest_turn_in_begin:{reason}")
-            return True
+            return QuestTurnInStartOutcome.STOPPED
         self._quest_turn_in_started_monotonic = (
             None if pending.phase is QuestTurnInPhase.ROUTE else time.monotonic()
         )
@@ -218,7 +344,7 @@ class QuestTurnInCoordinatorMixin:
             )
         else:
             self._open_area_for_quest_turn_in("quest_turn_in_already_at_location")
-        return True
+        return QuestTurnInStartOutcome.STARTED
 
     def _open_area_for_quest_turn_in(self, reason: str) -> bool:
         request = ActionRequest(
@@ -236,7 +362,6 @@ class QuestTurnInCoordinatorMixin:
         if self.state_machine.state is not GameState.QUEST_REFRESH_PENDING:
             self._safe_transition(GameState.QUEST_REFRESH_PENDING, reason=reason)
         return True
-
     def _quest_turn_in_snapshot_pending(self, unsafe_reason: str) -> bool:
         if unsafe_reason not in {
             "turn_in_npc_snapshot_invalid",
@@ -369,7 +494,7 @@ class QuestTurnInCoordinatorMixin:
                 return self._stop_leveling_unsafe("quest_turn_in_area_page_timeout")
             result = global_browser_injector().execute(
                 "area_npc_snapshot",
-                {"expectedName": pending.objective.giver_name},
+                {"expectedName": pending.endpoint_npc_name or pending.objective.giver_name},
                 timeout_s=2.5,
                 client_id=self.browser_client_id,
             )
@@ -385,12 +510,15 @@ class QuestTurnInCoordinatorMixin:
                     return True
                 return self._stop_leveling_unsafe(f"quest_turn_in_npc:{reason}")
         else:
+            dialog_payload = {
+                "expectedName": pending.resulting_dialog_name,
+                "expectedNpcId": pending.npc_id,
+            }
+            if pending.resulting_dialog_npc_id is not None:
+                dialog_payload["expectedNpcInstanceId"] = pending.resulting_dialog_npc_id
             result = global_browser_injector().execute(
                 "npc_dialog_snapshot",
-                {
-                    "expectedName": pending.objective.giver_name,
-                    "expectedNpcId": pending.npc_id,
-                },
+                dialog_payload,
                 timeout_s=2.5,
                 client_id=self.browser_client_id,
             )
@@ -451,3 +579,20 @@ class QuestTurnInCoordinatorMixin:
             self._quest_turn_in_verify_retries = 0
             return self._request_active_quest_snapshot("quest_turn_in_verify_active")
         return True
+
+
+def _turn_in_authority_id(authority: object) -> str:
+    identity = (
+        getattr(authority, "snapshot_id", None),
+        getattr(authority, "revision", None),
+        getattr(authority, "client_id", None),
+        getattr(authority, "profile_id", None),
+        getattr(authority, "tab_id", None),
+        getattr(authority, "causal_baseline", None),
+        getattr(authority, "plan_fingerprint", None),
+        getattr(authority, "lease_fingerprint", None),
+    )
+    if any(value is None or value == "" for value in identity):
+        raise ValueError("turn-in authority identity is incomplete")
+    encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

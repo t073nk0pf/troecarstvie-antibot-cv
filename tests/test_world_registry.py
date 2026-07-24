@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.antibot_cv.automation.world_registry import WorldRegistry
 
 
@@ -65,3 +67,45 @@ def test_npc_instance_id_is_scoped_by_parent_location(tmp_path) -> None:
 
     assert registry.data["npcs"]["122:0"]["npcInstanceId"] == "81"
     assert "npcInstanceId" not in registry.data["npcs"]["128:0"]
+
+
+def test_area_observation_preserves_learned_npc_instance_id_across_roundtrip(tmp_path) -> None:
+    path = tmp_path / "world.json"
+    registry = WorldRegistry(path)
+    area_snapshot = {
+        "location": {"id": "128", "name": "Длань Рода"},
+        "items": [{"dataId": "0", "name": "Палатка Вилены"}],
+    }
+
+    assert registry.observe_area_npcs(area_snapshot) is True
+    assert registry.observe_npc_dialog(
+        {"npcId": "0", "questActions": [{"npcInstanceId": "75"}]},
+        location_id="128",
+    ) is True
+    assert registry.observe_area_npcs(area_snapshot) is False
+
+    reloaded = WorldRegistry(path)
+    assert reloaded.data["npcs"]["128:0"]["npcInstanceId"] == "75"
+    assert reloaded.observe_area_npcs(area_snapshot) is False
+    assert WorldRegistry(path).data["npcs"]["128:0"]["npcInstanceId"] == "75"
+
+
+def test_conflicting_authoritative_npc_instance_id_fails_closed(tmp_path) -> None:
+    registry = WorldRegistry(tmp_path / "world.json")
+    registry.observe_area_npcs({
+        "location": {"id": "128", "name": "Длань Рода"},
+        "items": [{"dataId": "0", "name": "Палатка Вилены"}],
+    })
+    registry.observe_npc_dialog(
+        {"npcId": "0", "questActions": [{"npcInstanceId": "75"}]},
+        location_id="128",
+    )
+
+    with pytest.raises(ValueError, match="conflicting npc instance identity"):
+        registry.observe_npc_dialog(
+            {"npcId": "0", "dialogActions": [{"npcInstanceId": "81"}]},
+            location_id="128",
+        )
+
+    assert registry.data["npcs"]["128:0"]["npcInstanceId"] == "75"
+    assert WorldRegistry(registry.path).data["npcs"]["128:0"]["npcInstanceId"] == "75"

@@ -9,8 +9,10 @@ from types import MappingProxyType
 
 from src.antibot_cv.automation.quest_director_policy import QuestRef
 from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+    select_exploratory_dialogue_action,
     select_progress_dialogue_action,
 )
+from src.antibot_cv.automation.quest_dialogue_recipe import DialogueRecipeCursor
 from src.antibot_cv.automation.quest_giver import resolve_unique_giver
 from src.antibot_cv.automation.quest_catalog_navigation import snapshot_epoch_seconds
 from src.antibot_cv.automation.quest_npc_open_navigation import PendingNpcOpen
@@ -29,6 +31,7 @@ class QuestIntakeIntent(str, Enum):
     OPEN_QUEST = "OPEN_QUEST"
     ANSWER_DIALOG = "ANSWER_DIALOG"
     ACCEPT_QUEST = "ACCEPT_QUEST"
+    COMPLETE_QUEST = "COMPLETE_QUEST"
 
 
 class QuestIntakeDecisionError(ValueError):
@@ -62,6 +65,7 @@ class PendingQuestAccept:
     phase: QuestAcceptPhase
     location_id: str | None = None
     npc_id: str | None = None
+    route_ref: str | None = None
     npc_name: str | None = None
     area_snapshot_id: str | None = None
     area_generated_at: float | None = None
@@ -77,6 +81,7 @@ class QuestIntakeRuntime:
         self.pending: PendingQuestAccept | None = None
         self._pending_ref: QuestRef | None = None
         self._pending_decision: QuestIntakeDecision | None = None
+        self._dialogue_recipe = DialogueRecipeCursor()
 
     def begin(self, quest: QuestRef, *, already_at_location: bool) -> PendingQuestAccept:
         if self.pending is not None:
@@ -88,6 +93,7 @@ class QuestIntakeRuntime:
         if len(quest.giver_names) != 1 or not quest.giver_names[0].strip():
             raise ValueError("quest acceptance requires exactly one giver")
         self._pending_decision = None
+        self._dialogue_recipe.reset()
         self._pending_ref = quest
         self.pending = PendingQuestAccept(
             quest_id=quest.id,
@@ -117,7 +123,7 @@ class QuestIntakeRuntime:
                 f"quest_accept_npc_snapshot:{exc}",
                 str(exc),
             ) from exc
-        if not observed.location_id or not observed.npc_id or not observed.npc_name or not observed.area_snapshot_id or observed.area_generated_at is None:
+        if not observed.location_id or not observed.npc_id or not observed.route_ref or not observed.npc_name or not observed.area_snapshot_id or observed.area_generated_at is None:
             raise QuestIntakeDecisionError(
                 "quest_accept_npc_snapshot:quest giver NPC was not observed",
                 "quest giver NPC was not observed",
@@ -129,6 +135,7 @@ class QuestIntakeRuntime:
                 expected_snapshot_id=observed.area_snapshot_id,
                 expected_location_id=observed.location_id,
                 npc_id=observed.npc_id,
+                expected_route_ref=observed.route_ref,
                 expected_name=observed.npc_name,
                 expected_dialog_name=observed.giver_name,
                 quest_id=observed.quest_id,
@@ -171,19 +178,23 @@ class QuestIntakeRuntime:
         if not npc_id.isdecimal() or int(npc_id) < 0:
             raise ValueError("quest giver NPC identity is invalid")
         npc_name = _bounded_text(match.get("name"), max_length=180)
+        route_ref = _bounded_text(match.get("routeRef"), max_length=40)
+        if not route_ref.isascii() or not route_ref.isdecimal() or int(route_ref) <= 0:
+            raise ValueError("quest giver NPC route identity is invalid")
         if not npc_name or len(pending.giver_name) > 180:
             raise ValueError("quest giver NPC name is invalid")
         self.pending = replace(
             pending,
             location_id=location_id,
             npc_id=npc_id,
+            route_ref=route_ref,
             npc_name=npc_name,
             area_snapshot_id=snapshot_id,
             area_generated_at=generated_at,
         )
         return self.pending
 
-    def decide_dialog(self, snapshot: object, *, max_steps: int = 20) -> QuestIntakeDecision:
+    def decide_dialog(self, snapshot: object, *, max_steps: int = 64) -> QuestIntakeDecision:
         """Choose the sole safe open, answer, or accept action from a dialog snapshot."""
 
         self._pending_decision = None
@@ -259,9 +270,26 @@ class QuestIntakeRuntime:
             npc_id=pending.npc_id,
             action="answer",
         )
-        selected_dialog_action = select_progress_dialogue_action(dialog_actions)
+        selected_dialog_action = self._dialogue_recipe.select(
+            quest_id=pending.quest_id, title=pending.title, actions=dialog_actions,
+        )
+        recipe_role = self._dialogue_recipe.pending_role
+        if selected_dialog_action is None:
+            selected_dialog_action = select_progress_dialogue_action(dialog_actions)
+        if selected_dialog_action is None and len(dialog_actions) == 1:
+            # A sole exact control is not a branch choice.  Advancing it is the
+            # only way to continue observing the quest, even when its prose
+            # resembles a refusal out of context.
+            selected_dialog_action = dialog_actions[0]
+        elif selected_dialog_action is None and len(dialog_actions) > 1:
+            # Prefer the semantic winner above.  If several non-refusal story
+            # or puzzle continuations remain, bounded exploration advances the
+            # first exact transport-bound option instead of abandoning the
+            # whole quest.  Durable action reconciliation still prevents an
+            # unobserved mutation from being reissued.
+            selected_dialog_action = select_exploratory_dialogue_action(dialog_actions)
         if selected_dialog_action is not None:
-            if pending.dialog_steps >= max_steps:
+            if pending.dialog_steps >= max_steps and recipe_role is None:
                 raise QuestIntakeDecisionError(
                     "quest_accept_dialog_step_limit_exceeded",
                     "quest dialogue step limit exceeded",
@@ -283,6 +311,7 @@ class QuestIntakeRuntime:
                         action="answer",
                         expected_ref=expected_ref,
                         expected_text=expected_text,
+                        recipe_role=recipe_role,
                     ),
                     action_failure_reason="quest_accept_dialog_action_failed",
                     quest_id=pending.quest_id,
@@ -301,7 +330,14 @@ class QuestIntakeRuntime:
             1 for header in headers if _normalized_title(header) == _normalized_title(pending.title)
         ) == 1
         objective_present = any("\u0432\u0430\u0448\u0430 \u0446\u0435\u043b\u044c:" in text.casefold() for text in observed_actions)
-        if not title_present or not objective_present:
+        done_actions = _matching_actions(
+            snapshot.get("doneActions"),
+            quest_id=pending.quest_id,
+            npc_id=pending.npc_id,
+            action="done",
+        )
+        exact_terminal_done = len(done_actions) == 1
+        if not title_present or (not objective_present and not exact_terminal_done):
             raise QuestIntakeDecisionError(
                 "quest_accept_terminal_evidence_missing",
                 "quest terminal detail evidence is missing",
@@ -323,13 +359,20 @@ class QuestIntakeRuntime:
                 "quest_accept_submit_action_missing_or_ambiguous",
                 "quest accept action text is missing",
             )
+        terminal_action = done_actions[0] if exact_terminal_done else accept_actions[0]
+        terminal_intent = (
+            QuestIntakeIntent.COMPLETE_QUEST
+            if exact_terminal_done else QuestIntakeIntent.ACCEPT_QUEST
+        )
+        terminal_kind = "done" if exact_terminal_done else "accept"
         return self._remember_decision(
             QuestIntakeDecision(
-                intent=QuestIntakeIntent.ACCEPT_QUEST,
+                intent=terminal_intent,
                 action_type="npc_quest_action",
                 action_metadata=_immutable_metadata(
                     **common,
-                    action="accept",
+                    action=terminal_kind,
+                    expected_point_id=terminal_action.get("pointId"),
                     expected_text=expected_text,
                 ),
                 action_failure_reason="quest_accept_submit_action_failed",
@@ -353,12 +396,21 @@ class QuestIntakeRuntime:
         elif decision.intent is QuestIntakeIntent.OPEN_QUEST:
             updated = self.mark_quest_opened()
         elif decision.intent is QuestIntakeIntent.ANSWER_DIALOG:
-            updated = self.mark_dialog_answered()
-        elif decision.intent is QuestIntakeIntent.ACCEPT_QUEST:
+            updated = self.mark_dialog_answer_settled()
+        elif decision.intent in {
+            QuestIntakeIntent.ACCEPT_QUEST, QuestIntakeIntent.COMPLETE_QUEST,
+        }:
             updated = self.mark_accept_submitted()
         else:  # pragma: no cover - exhaustive guard for future enum additions.
             raise RuntimeError("unsupported quest intake decision")
         self._pending_decision = None
+        return updated
+
+    def mark_dialog_answer_settled(self) -> PendingQuestAccept:
+        """Advance an acknowledged answer and its optional recipe cursor."""
+
+        updated = self.mark_dialog_answered()
+        self._dialogue_recipe.acknowledge()
         return updated
 
     def mark_npc_opened(self) -> PendingQuestAccept:
@@ -410,7 +462,7 @@ class QuestIntakeRuntime:
         self.pending = replace(pending, quest_opened=True)
         return self.pending
 
-    def mark_dialog_answered(self, *, max_steps: int = 20) -> PendingQuestAccept:
+    def mark_dialog_answered(self, *, max_steps: int = 64) -> PendingQuestAccept:
         pending = self._require(QuestAcceptPhase.NPC_DIALOG)
         if not pending.quest_opened:
             raise RuntimeError("quest detail is not open")

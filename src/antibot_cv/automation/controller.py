@@ -51,6 +51,7 @@ from src.antibot_cv.entity_detection.tracker import EntityTracker
 from src.antibot_cv.telemetry.event_logger import EventLogger, frame_hash
 from src.antibot_cv.automation.performance_policy import capture_fps_for_state, evidence_hash_view
 from src.antibot_cv.automation.run_retention import RunRetentionPolicy, prune_run_directories
+from src.antibot_cv.automation.mutation_lease import MutationLease, MutationLeaseCoordinator
 from src.antibot_cv.automation.route_recovery_policy import RouteRecoveryCadence
 from src.antibot_cv.telemetry.session_summary import LatencyTracker, write_session_summary
 from src.antibot_cv.viewport.coordinates import CoordinateMapper, MonitorGeometry, Rect
@@ -75,6 +76,8 @@ class AutomationRunOptions:
     open_hunt_on_start: bool = False
     browser_client_id: str | None = None
     runtime_overrides: dict[str, object] | None = None
+    mutation_coordinator: MutationLeaseCoordinator | None = None
+    mutation_lease: MutationLease | None = None
 
 
 StatusCallback = Callable[[dict[str, object]], None]
@@ -98,6 +101,8 @@ class AutomationController(
         mapper: CoordinateMapper | None = None,
         browser_client_id: str | None = None,
         cancellation_event: threading.Event | None = None,
+        mutation_coordinator: MutationLeaseCoordinator | None = None,
+        mutation_lease: MutationLease | None = None,
     ) -> None:
         self.config = config
         self.browser_client_id = browser_client_id
@@ -246,7 +251,18 @@ class AutomationController(
         self._search_pause_until_monotonic: float | None = None
 
         sink = self._make_sink(sink_mode)
-        self.action_executor = ActionExecutor(guard=self.guard, session=self.session, sink=sink, logger=self.logger)
+        self.action_executor = ActionExecutor(
+            guard=self.guard,
+            session=self.session,
+            sink=sink,
+            logger=self.logger,
+            mutation_fence_validator=(
+                None if mutation_coordinator is None else mutation_coordinator.matches_fence
+            ),
+            mutation_fence_provider=(
+                None if mutation_lease is None else mutation_lease.fence_data
+            ),
+        )
 
     def _make_sink(self, sink_mode: str) -> object:
         if self.config.dry_run:
@@ -268,6 +284,7 @@ class AutomationController(
             cycle_id=self.session.cycle_id,
             dry_run=self.config.dry_run,
         )
+        self._resume_durable_quest_workflow()
 
     def process_frame(self, frame: np.ndarray) -> GameState:
         self._frame_for_evidence_hash = frame
@@ -597,6 +614,8 @@ def _apply_runtime_overrides(config: AutomationConfig, overrides: dict[str, obje
         leveling["autonomous_quest_director"] = autonomous_quest_director
         if autonomous_quest_director:
             leveling["enabled"] = True
+    if "acceptAvailableQuests" in overrides:
+        leveling["accept_available_quests"] = bool(overrides.get("acceptAvailableQuests"))
     if "questEngineMode" in overrides:
         leveling["quest_engine_mode"] = str(overrides.get("questEngineMode") or "").strip()
     if "pinnedQuestId" in overrides:
@@ -688,6 +707,8 @@ def run_automation(
             mapper=mapper,
             browser_client_id=options.browser_client_id,
             cancellation_event=stop_event,
+            mutation_coordinator=options.mutation_coordinator,
+            mutation_lease=options.mutation_lease,
         )
         hotkeys = HotkeyController(controller.guard, controller.logger)
         if options.hotkeys:

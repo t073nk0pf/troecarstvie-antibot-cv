@@ -133,6 +133,22 @@ def test_exploration_clicks_single_neutral_question_and_skips_attempted_ref() ->
     ) is None
 
 
+def test_exploration_does_not_treat_lack_of_knowledge_as_refusal() -> None:
+    from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+        select_exploratory_dialogue_action,
+    )
+
+    continuation = {
+        "ref": "3928",
+        "text": (
+            "Хорошо – хорошо, я посмотрю. Да только не ведаю, "
+            "как могу комбинацию нужную подобрать…"
+        ),
+    }
+
+    assert select_exploratory_dialogue_action((continuation,)) is continuation
+
+
 def test_exploration_tries_safe_unknown_options_in_source_order() -> None:
     from src.antibot_cv.automation.quest_dialogue_choice_policy import (
         select_exploratory_dialogue_action,

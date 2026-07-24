@@ -23,6 +23,9 @@ from src.antibot_cv.automation.quest_npc_action_journal import (
     dialog_semantic_fingerprint,
 )
 from src.antibot_cv.automation.quest_npc_open_navigation import make_pending_npc_open
+from src.antibot_cv.automation.quest_active_catalog_navigation import (
+    make_pending_active_catalog_navigation,
+)
 
 
 def ref() -> QuestRef:
@@ -34,7 +37,7 @@ def dialog_stage():
     return make_pending_npc_open(
         client_id="client-a", profile_id="profile-a", tab_id=42,
         quest_id=quest.id, quest_title=quest.title, quest_accept_ref=None,
-        quest_catalog_page=0, giver_name=quest.giver_names[0], npc_id="10",
+        quest_catalog_page=0, giver_name=quest.giver_names[0], npc_id="10", route_ref="398",
         npc_name="Башня Вагарда", location_id="132", location_name=quest.location,
         area_snapshot_id="area-npcs-q269", area_generated_at=99.0, issued_at=100.0,
     )
@@ -128,6 +131,68 @@ def test_open_and_answer_require_semantic_successor_not_snapshot_id_only() -> No
     assert settle_dialog_action(answered, identical, client_id="client-a", profile_id="profile-a", tab_id=42, now=112.0) is NpcQuestActionSettle.WAIT
     assert settle_dialog_action(answered, snapshot(), client_id="client-b", profile_id="profile-a", tab_id=42, now=112.0) is NpcQuestActionSettle.STOP
     assert settle_dialog_action(answered, snapshot(generatedAt=109.0), client_id="client-a", profile_id="profile-a", tab_id=42, now=112.0) is NpcQuestActionSettle.WAIT
+
+
+def test_answer_settles_before_a_bounded_multi_choice_successor() -> None:
+    answered = action("answer", opened=True)
+    choices = [
+        {
+            "questId": "269", "npcId": "10", "action": "answer",
+            "ref": str(ref_id), "text": f"Выбор {ref_id}",
+            "visible": True, "disabled": False,
+        }
+        for ref_id in range(402, 407)
+    ]
+
+    assert settle_dialog_action(
+        answered, snapshot(dialogActions=choices),
+        client_id="client-a", profile_id="profile-a", tab_id=42, now=112.0,
+    ) is NpcQuestActionSettle.ACCEPT
+
+
+def test_accept_verify_owns_active_catalog_reconciliation_across_restart(tmp_path) -> None:
+    state = tmp_path / "chain.json"
+    chain = QuestChainRuntime(state_path=state)
+    chain.stage_accepted_ref(ref())
+    stage = dialog_stage()
+    chain.stage_npc_open(stage)
+    chain.settle_npc_open(stage, quest_opened=True)
+    accept = action("accept", opened=True)
+    chain.stage_npc_quest_action(accept)
+    verifying = chain.mark_npc_quest_action_dispatched(accept)
+    assert verifying.phase is NpcQuestActionPhase.ACCEPT_VERIFY
+    navigation = make_pending_active_catalog_navigation(
+        client_id="client-a", profile_id="profile-a", tab_id=42, page=0,
+        current_href="https://3kingdoms.ru/npc.php?f_id=10",
+        baseline_snapshot_id="before-active", baseline_generated_at=110.5,
+        baseline_revision="", issued_at=111.0, settle_timeout_s=20.0,
+    )
+
+    chain.stage_active_catalog_navigation(navigation)
+
+    restored = QuestChainRuntime(state_path=state)
+    assert restored.pending_npc_action == verifying
+    assert restored.pending_active_catalog_navigation == navigation
+
+
+def test_non_accept_npc_action_cannot_overlap_active_catalog_navigation() -> None:
+    chain = QuestChainRuntime()
+    chain.stage_accepted_ref(ref())
+    stage = dialog_stage()
+    chain.stage_npc_open(stage)
+    chain.settle_npc_open(stage, quest_opened=True)
+    answer = action("answer", opened=True)
+    chain.stage_npc_quest_action(answer)
+    chain.mark_npc_quest_action_dispatched(answer)
+    navigation = make_pending_active_catalog_navigation(
+        client_id="client-a", profile_id="profile-a", tab_id=42, page=0,
+        current_href="https://3kingdoms.ru/npc.php?f_id=10",
+        baseline_snapshot_id="before-active", baseline_generated_at=110.5,
+        baseline_revision="", issued_at=111.0, settle_timeout_s=20.0,
+    )
+
+    with pytest.raises(RuntimeError, match="another mutation stage"):
+        chain.stage_active_catalog_navigation(navigation)
 
 
 @pytest.mark.parametrize(

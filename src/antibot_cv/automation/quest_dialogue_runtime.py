@@ -238,7 +238,8 @@ class QuestDialogueRuntime:
             raise QuestDialogueError("dialogue_npc_missing_or_ambiguous", str(exc)) from exc
         npc_id = _bounded_text(match.get("dataId"), max_length=80)
         npc_name = _bounded_text(match.get("name"), max_length=180)
-        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name:
+        route_ref = _bounded_text(match.get("routeRef"), max_length=40)
+        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name or not route_ref.isascii() or not route_ref.isdecimal() or int(route_ref) <= 0:
             raise QuestDialogueError("dialogue_npc_identity_invalid", "matched NPC identity is invalid")
         self.pending = replace(
             pending,
@@ -255,6 +256,7 @@ class QuestDialogueRuntime:
                     expected_snapshot_id=snapshot_id,
                     expected_location_id=location_id,
                     npc_id=npc_id,
+                    expected_route_ref=route_ref,
                     expected_name=npc_name,
                     # Area actors may be proxies such as ``Дом Аскорда``
                     # or ``Палатка Вилены``.  The click stays bound to the
@@ -287,6 +289,12 @@ class QuestDialogueRuntime:
         common = {
             "expected_snapshot_id": snapshot_id,
             "npc_id": pending.npc_id,
+            # Area objects may be proxies (for example ``Палатка Вилены``)
+            # whose opened dialogue has the quest-authored NPC identity.
+            # The open-NPC action has already bound the proxy itself; all
+            # dialogue actions must remain bound to the expected dialogue
+            # identity instead of reusing the proxy label.
+            "expected_name": pending.objective.npc_query,
             "quest_id": pending.objective.quest_id,
             "expected_title": pending.objective.quest_title,
         }

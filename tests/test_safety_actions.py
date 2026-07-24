@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 
 import pytest
 
-from src.antibot_cv.automation.actions import ActionExecutor, ActionRequest, DryRunActionSink, LiveMacActionSink
+from src.antibot_cv.automation.actions import (
+    ActionDiagnosticCode, ActionExecutionResult, ActionExecutionStatus, ActionExecutor, ActionRequest,
+    BlockedActionSink, DryRunActionSink, LiveMacActionSink,
+)
 from src.antibot_cv.automation.actions import _log_action, _route_confirmation_reason
 from src.antibot_cv.automation.browser_injector import InjectorResult
 from src.antibot_cv.automation.config import AutomationConfig
 from src.antibot_cv.automation.safety import SafetyGuard
 from src.antibot_cv.automation.session import MAX_HUNT_CLICKS_PER_CYCLE, SessionState
 from src.antibot_cv.automation.live_action_service import LiveActionService
+from src.antibot_cv.automation.mutation_lease import (
+    MutationLeaseCoordinator,
+    MutationLeaseMode,
+    MutationTarget,
+)
+from src.antibot_cv.automation.npc_census_inspect_journal import (
+    NpcCensusInspectJournal, PendingCensusInspection,
+)
+from src.antibot_cv.automation.npc_census_live import CensusInspectContract
 from src.antibot_cv.telemetry.event_logger import InMemoryEventLogger
 from src.antibot_cv.viewport.coordinates import Point
 
@@ -36,6 +49,42 @@ class DelegatingDryRunSink(DryRunActionSink):
 
     def execute(self, request: ActionRequest) -> bool:
         return self.target.execute(request)
+
+
+def test_live_quest_item_acknowledgement_is_transport_success(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            **kwargs: object,
+        ) -> InjectorResult:
+            calls.append(command)
+            if command == "use_quest_item":
+                return InjectorResult(
+                    True,
+                    '{"ok":true,"message":"quest_item_use_acknowledged"}',
+                    "client",
+                )
+            raise AssertionError(command)
+
+    logger = InMemoryEventLogger(dry_run=False)
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(logger)
+
+    ok = sink.execute(ActionRequest(
+        "use_quest_item",
+        metadata={"expected_name": "Точильный камень", "confirm_delay_ms": 0},
+        dry_run=False,
+    ))
+
+    assert ok
+    assert calls == ["use_quest_item"]
 
 
 def test_live_quest_inventory_inspection_does_not_reopen_hunt_before_validation(
@@ -310,6 +359,504 @@ def test_live_action_service_preserves_safety_context_across_transport_reconnect
         "emergency_stopped": True,
         "consecutive_errors": 1,
     }
+
+
+def test_live_action_service_cannot_mutate_tab_owned_by_controller_run(
+    test_config: AutomationConfig,
+) -> None:
+    config = replace(test_config, dry_run=False)
+    coordinator = MutationLeaseCoordinator()
+    target = MutationTarget("profile-a", 17)
+    run_lease = coordinator.try_acquire(
+        target, "controller:run-1", MutationLeaseMode.EXCLUSIVE_RUN,
+    )
+    sink = DryRunActionSink()
+    service = LiveActionService(
+        lambda: config,
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    assert run_lease is not None
+    assert service.execute("client-a", ActionRequest("open_area", dry_run=False)) is False
+    assert sink.requests == []
+
+
+def test_fenced_service_retains_issued_lease_until_exact_reconciliation(
+    test_config: AutomationConfig,
+) -> None:
+    config = replace(test_config, dry_run=False)
+    coordinator = MutationLeaseCoordinator()
+    sink = DryRunActionSink()
+    service = LiveActionService(
+        lambda: config,
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    result = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    )
+    assert result.execution.status is ActionExecutionStatus.ISSUED
+    assert result.lease is not None
+    assert sink.requests[0].metadata["mutation_fence"] == {
+        "profile_id": "profile-a",
+        "tab_id": 17,
+        "actor_generation": result.lease.actor_generation,
+        "fencing_token": result.lease.fencing_token,
+    }
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == result.lease
+    blocked = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    )
+    assert blocked.execution.status is ActionExecutionStatus.NOT_ISSUED
+    assert len(sink.requests) == 1
+    assert service.reconcile_fenced(result.lease)
+    assert not service.reconcile_fenced(result.lease)
+
+
+def test_action_execution_outcome_distinguishes_pre_sink_reject_from_unknown_delivery(
+    test_config: AutomationConfig,
+) -> None:
+    rejected_sink = LiveMacActionSink()
+    rejected = ActionExecutor(
+        guard=SafetyGuard(test_config),
+        session=SessionState(requested_cycles=1),
+        sink=rejected_sink,
+    ).execute_outcome(ActionRequest("open_area", dry_run=True))
+    assert rejected.status is ActionExecutionStatus.NOT_ISSUED
+
+    unknown = ActionExecutor(
+        guard=SafetyGuard(replace(test_config, dry_run=False)),
+        session=SessionState(requested_cycles=1),
+        sink=FailingSink(),
+    ).execute_outcome(ActionRequest("click_target", dry_run=False))
+    assert unknown.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+
+
+def test_live_sink_builds_exact_parent_child_navigator_authority() -> None:
+    class Injector:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def client_snapshot(self, client_id):
+            return {
+                "client_id": client_id, "profile_id": "profile-a",
+                "tab_id": 23, "opener_tab_id": 17,
+            }
+
+        def execute(self, command, payload=None, **kwargs):
+            self.calls.append((command, dict(payload or {}), kwargs))
+            return InjectorResult(True, "{}", client_id=kwargs.get("client_id"))
+
+    injector = Injector()
+    sink = LiveMacActionSink(browser_client_id="parent-client")
+    sink._active_mutation_fence = {
+        "profile_id": "profile-a", "tab_id": 17,
+        "actor_generation": 1, "fencing_token": 7,
+    }
+    result = sink._execute_injector(
+        injector, "navigator_go", {"expectedTarget": "Дикий предел"},
+        client_id_override="child-client",
+    )
+
+    assert result.ok is True
+    assert injector.calls[0][1]["mutationTarget"] == {
+        "kind": "opener_child", "profile_id": "profile-a",
+        "tab_id": 23, "opener_tab_id": 17,
+    }
+
+
+def test_live_sink_rejects_foreign_navigator_child_before_transport() -> None:
+    class Injector:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def client_snapshot(self, client_id):
+            return {
+                "client_id": client_id, "profile_id": "profile-a",
+                "tab_id": 23, "opener_tab_id": 99,
+            }
+
+        def execute(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            raise AssertionError("foreign child must not reach transport")
+
+    injector = Injector()
+    sink = LiveMacActionSink(browser_client_id="parent-client")
+    sink._active_mutation_fence = {
+        "profile_id": "profile-a", "tab_id": 17,
+        "actor_generation": 1, "fencing_token": 7,
+    }
+    result = sink._execute_injector(
+        injector, "navigator_select_target", {"target": "Дикий предел"},
+        client_id_override="child-client",
+    )
+
+    assert result.ok is False
+    assert result.message == "mutation_child_authority_mismatch"
+    assert injector.calls == []
+
+
+def test_typed_sink_outcome_preserves_known_rejection_and_legacy_bool_compatibility(
+    test_config: AutomationConfig,
+) -> None:
+    executor = ActionExecutor(
+        guard=SafetyGuard(replace(test_config, dry_run=False)),
+        session=SessionState(requested_cycles=1),
+        sink=BlockedActionSink(reason="known_pre_mutation_rejection"),
+    )
+
+    request = ActionRequest("open_area", dry_run=False)
+    assert executor.execute_outcome(request).status is ActionExecutionStatus.NOT_ISSUED
+    assert executor.execute(request) is False
+
+
+def test_live_sink_conservatively_classifies_legacy_false_and_accepts_typed_rejection(
+    monkeypatch,
+) -> None:
+    from src.antibot_cv.automation import action_combat_handlers
+
+    sink = LiveMacActionSink()
+    monkeypatch.setattr(action_combat_handlers, "handle_action", lambda *_args: False)
+    result = sink.execute_outcome(ActionRequest("click_target", dry_run=False))
+    assert result.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert sink.execute(ActionRequest("click_target", dry_run=False)) is False
+
+    monkeypatch.setattr(
+        action_combat_handlers,
+        "handle_action",
+        lambda *_args: ActionExecutionResult(ActionExecutionStatus.NOT_ISSUED),
+    )
+    result = sink.execute_outcome(ActionRequest("click_target", dry_run=False))
+    assert result.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_fenced_service_retains_delivery_unknown_and_legacy_endpoint_cannot_reissue(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: FailingSink(),
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    first = service.execute_fenced(
+        "client-a", ActionRequest("click_target", dry_run=False),
+    )
+    assert first.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert first.lease is not None
+    assert service.retained_fenced("client-a", "click_target") == first.lease
+    assert service.retained_fenced("client-a", "open_area") is None
+    assert service.execute(
+        "client-a", ActionRequest("click_target", dry_run=False),
+    ) is False
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == first.lease
+
+
+def test_retained_unknown_is_retrievable_after_transport_reconnect(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: FailingSink(),
+        identity_factory=lambda client_id: (
+            ("profile-a", 17) if client_id in {"old-client", "new-client"} else None
+        ),
+        mutation_coordinator=coordinator,
+    )
+
+    first = service.execute_fenced(
+        "old-client", ActionRequest("click_target", dry_run=False),
+    )
+
+    assert first.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert service.retained_fenced("new-client", "click_target") == first.lease
+    assert service.execute_fenced(
+        "new-client", ActionRequest("click_target", dry_run=False),
+    ).execution.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_fenced_claim_callback_stages_before_sink_and_failure_releases(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+    staged = []
+
+    class StageCheckingSink(DryRunActionSink):
+        def execute_outcome(self, request):
+            assert staged
+            return super().execute_outcome(request)
+
+    sink = StageCheckingSink()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+    result = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+        on_claimed=staged.append,
+    )
+    assert result.execution.status is ActionExecutionStatus.ISSUED
+    assert len(sink.requests) == 1
+    assert result.lease is not None
+    assert service.reconcile_fenced(result.lease)
+
+    rejected = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+        on_claimed=lambda _lease: (_ for _ in ()).throw(RuntimeError("stage failed")),
+    )
+    assert rejected.execution.status is ActionExecutionStatus.NOT_ISSUED
+    assert coordinator.holder(MutationTarget("profile-a", 17)) is None
+    assert len(sink.requests) == 1
+
+
+def test_fenced_uncertain_claim_retains_barrier_without_calling_sink(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+    sink = DryRunActionSink()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    class CommitUncertain(OSError):
+        retain_mutation_lease = True
+
+    result = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+        on_claimed=lambda _lease: (_ for _ in ()).throw(CommitUncertain()),
+    )
+
+    assert result.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert result.lease is not None
+    assert sink.requests == []
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == result.lease
+    assert service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    ).execution.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_fenced_uncertain_not_issued_rollback_retains_barrier(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+
+    class RejectingSink(DryRunActionSink):
+        def execute_outcome(self, request):
+            return ActionExecutionResult(ActionExecutionStatus.NOT_ISSUED)
+
+    sink = RejectingSink()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    class CommitUncertain(OSError):
+        retain_mutation_lease = True
+
+    result = service.execute_fenced(
+        "client-a", ActionRequest("inspect_exact_npc", dry_run=False),
+        on_not_issued=lambda _lease: (_ for _ in ()).throw(CommitUncertain()),
+    )
+
+    assert result.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert result.lease is not None
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == result.lease
+    assert service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    ).execution.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_real_census_journal_uncertain_rollback_retains_global_barrier(
+    test_config: AutomationConfig, monkeypatch, tmp_path,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+
+    class RejectingSink(DryRunActionSink):
+        def execute_outcome(self, request):
+            return ActionExecutionResult(ActionExecutionStatus.NOT_ISSUED)
+
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: RejectingSink(),
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+    journal = NpcCensusInspectJournal(tmp_path / "inspect.json")
+    record = PendingCensusInspection(
+        "profile-a", 17,
+        CensusInspectContract(
+            snapshot_id="area-npcs-epoch-1", location_id="102",
+            endpoint_id="0", route_ref="398", endpoint_name="Npc",
+            observation_epoch="epoch", observation_revision=1,
+            generated_at="2026-07-20T00:00:00Z",
+        ),
+    )
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_rollback_directory_fsync(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise OSError("rollback directory fsync")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_rollback_directory_fsync)
+    result = service.execute_fenced(
+        "client-a", ActionRequest("inspect_exact_npc", dry_run=False),
+        on_claimed=lambda _lease: journal.stage(record),
+        on_not_issued=lambda _lease: journal.clear_exact(record),
+    )
+
+    assert result.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert result.lease is not None
+    assert journal.get(record.actor_key) == record
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == result.lease
+    assert service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    ).execution.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_real_census_journal_pre_replace_rollback_failure_retains_barrier(
+    test_config: AutomationConfig, monkeypatch, tmp_path,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+
+    class RejectingSink(DryRunActionSink):
+        def execute_outcome(self, request):
+            return ActionExecutionResult(ActionExecutionStatus.NOT_ISSUED)
+
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: RejectingSink(),
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+    journal = NpcCensusInspectJournal(tmp_path / "inspect.json")
+    record = PendingCensusInspection(
+        "profile-a", 17,
+        CensusInspectContract(
+            snapshot_id="area-npcs-epoch-1", location_id="102",
+            endpoint_id="0", route_ref="398", endpoint_name="Npc",
+            observation_epoch="epoch", observation_revision=1,
+            generated_at="2026-07-20T00:00:00Z",
+        ),
+    )
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_rollback_file_fsync(descriptor):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("rollback file fsync")
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_rollback_file_fsync)
+    result = service.execute_fenced(
+        "client-a", ActionRequest("inspect_exact_npc", dry_run=False),
+        on_claimed=lambda _lease: journal.stage(record),
+        on_not_issued=lambda _lease: journal.clear_exact(record),
+    )
+
+    assert result.execution.status is ActionExecutionStatus.DELIVERY_UNKNOWN
+    assert result.lease is not None
+    assert journal.get(record.actor_key) == record
+    restored = NpcCensusInspectJournal(journal.path)
+    restored.load()
+    assert restored.get(record.actor_key) == record
+    assert coordinator.holder(MutationTarget("profile-a", 17)) == result.lease
+    assert service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+    ).execution.status is ActionExecutionStatus.NOT_ISSUED
+
+
+def test_fenced_not_issued_rolls_back_exact_staged_claim_for_fresh_retry(
+    test_config: AutomationConfig,
+) -> None:
+    coordinator = MutationLeaseCoordinator()
+    staged = {}
+
+    class ToggleSink(DryRunActionSink):
+        reject = True
+
+        def execute_outcome(self, request):
+            if self.reject:
+                return ActionExecutionResult(ActionExecutionStatus.NOT_ISSUED)
+            return super().execute_outcome(request)
+
+    sink = ToggleSink()
+    service = LiveActionService(
+        lambda: replace(test_config, dry_run=False),
+        sink_factory=lambda _client_id: sink,
+        identity_factory=lambda _client_id: ("profile-a", 17),
+        mutation_coordinator=coordinator,
+    )
+
+    def stage(lease):
+        if staged and staged.get(lease.target) != lease:
+            raise RuntimeError("stale staged claim")
+        staged[lease.target] = lease
+
+    def rollback(lease):
+        if staged.get(lease.target) == lease:
+            staged.pop(lease.target)
+
+    first = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+        on_claimed=stage, on_not_issued=rollback,
+    )
+    assert first.execution.status is ActionExecutionStatus.NOT_ISSUED
+    assert staged == {}
+    assert coordinator.holder(MutationTarget("profile-a", 17)) is None
+
+    sink.reject = False
+    second = service.execute_fenced(
+        "client-a", ActionRequest("open_area", dry_run=False),
+        on_claimed=stage, on_not_issued=rollback,
+    )
+    assert second.execution.status is ActionExecutionStatus.ISSUED
+    assert second.lease is not None and staged[second.lease.target] == second.lease
+
+
+def test_action_executor_rejects_mismatched_semantic_combat_binding(
+    test_config: AutomationConfig,
+) -> None:
+    sink = DryRunActionSink()
+    executor = ActionExecutor(
+        guard=SafetyGuard(test_config),
+        session=SessionState(requested_cycles=1),
+        sink=sink,
+    )
+
+    assert executor.execute(ActionRequest(
+        "attack_visible_target",
+        dry_run=True,
+        metadata={
+            "semantic_authoritative": True,
+            "names": ["Гигантская оса"],
+            "semantic_binding": {
+                "target": "Непобедимый кабан",
+                "requirement_id": "req_" + "a" * 64,
+                "plan_fingerprint": "b" * 64,
+            },
+        },
+    )) is False
+    assert sink.requests == []
 
 
 def test_emergency_stop_blocks_actions(test_config: AutomationConfig) -> None:
@@ -1372,6 +1919,7 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
         "expected_snapshot_id": "area-npcs-mrj-1",
         "expected_location_id": "125",
         "npc_id": "6",
+        "expected_route_ref": "398",
         "expected_name": "Моряк Кентур",
     }
 
@@ -1390,6 +1938,7 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
                 "expectedSnapshotId": "area-npcs-mrj-1",
                 "expectedLocationId": "125",
                 "npcId": "6",
+                "expectedRouteRef": "398",
                 "expectedName": "Моряк Кентур",
                 "expectedDialogName": "Моряк Кентур",
                 "verifyTimeoutMs": 2500,
@@ -1404,6 +1953,7 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
                 "expectedSnapshotId": "area-npcs-mrj-1",
                 "expectedLocationId": "125",
                 "npcId": "0",
+                "expectedRouteRef": "398",
                 "expectedName": "Моряк Кентур",
                 "expectedDialogName": "Моряк Кентур",
                 "verifyTimeoutMs": 2500,
@@ -1413,6 +1963,132 @@ def test_live_open_exact_npc_requires_structured_snapshot_bound_identity(monkeyp
             "parent-client",
         ),
     ]
+
+
+def test_live_inspect_exact_npc_uses_same_bound_endpoint_without_result_guess(monkeypatch) -> None:
+    calls = []
+
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            calls.append((command, dict(payload or {}), client_id))
+            return InjectorResult(True, json.dumps({
+                "outcome": "CONFIRMED", "mutationIssued": True,
+                "destination": "https://3kingdoms.ru/npc.php",
+                "message": "npc_opened_confirmed",
+            }), client_id)
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(
+        InMemoryEventLogger(dry_run=False), browser_client_id="parent-client",
+    )
+    result = sink.execute_outcome(ActionRequest(
+        "inspect_exact_npc", dry_run=False,
+        metadata={
+            "expected_snapshot_id": "area-npcs-mrj-1",
+            "expected_location_id": "102", "npc_id": "0",
+            "expected_route_ref": "398", "expected_name": "Палатка Вилены",
+        },
+    ))
+
+    assert result.status is ActionExecutionStatus.ISSUED
+    assert calls[0][0] == "inspect_exact_npc"
+    assert calls[0][1]["expectedName"] == "Палатка Вилены"
+    assert calls[0][1]["expectedDialogName"] == "Палатка Вилены"
+    assert "expectedNpcInstanceId" not in calls[0][1]
+
+
+@pytest.mark.parametrize(
+    ("injector_ok", "message", "expected_status", "expected_code"),
+    [
+        (
+            True,
+            '{"outcome":"CONFIRMED","mutationIssued":true,'
+            '"destination":"https://3kingdoms.ru/npc.php?f_id=6"}',
+            ActionExecutionStatus.ISSUED,
+            "npc_open_confirmed",
+        ),
+        (
+            False,
+            "injector_ack_timeout",
+            ActionExecutionStatus.DELIVERY_UNKNOWN,
+            "injector_ack_timeout",
+        ),
+        (
+            False,
+            "injector_delivery_timeout",
+            ActionExecutionStatus.NOT_ISSUED,
+            "injector_delivery_timeout",
+        ),
+        (
+            False,
+            '{"outcome":"NOT_ISSUED","mutationIssued":false,'
+            '"message":"npc_route_ref_mismatch"}',
+            ActionExecutionStatus.NOT_ISSUED,
+            "npc_route_ref_mismatch",
+        ),
+        (
+            False,
+            "npc_route_ref_mismatch",
+            ActionExecutionStatus.DELIVERY_UNKNOWN,
+            "npc_open_ack_pending",
+        ),
+        (
+            False,
+            '{"outcome":"NOT_ISSUED","mutationIssued":true,'
+            '"message":"npc_route_ref_mismatch"}',
+            ActionExecutionStatus.DELIVERY_UNKNOWN,
+            "npc_open_ack_pending",
+        ),
+        (
+            False,
+            '{"outcome":"NOT_ISSUED","mutationIssued":false,'
+            '"message":"https://3kingdoms.ru/npc.php?secret=raw"}',
+            ActionExecutionStatus.NOT_ISSUED,
+            "npc_open_not_issued",
+        ),
+    ],
+)
+def test_live_open_exact_npc_preserves_safe_typed_transport_diagnostic(
+    monkeypatch, injector_ok, message, expected_status, expected_code,
+) -> None:
+    class FakeInjector:
+        def execute(self, command, payload=None, *, timeout_s=2.5, client_id=None):
+            return InjectorResult(injector_ok, message, client_id)
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    sink = LiveMacActionSink(
+        InMemoryEventLogger(dry_run=False), browser_client_id="parent-client",
+    )
+    result = sink.execute_outcome(ActionRequest(
+        "open_exact_npc",
+        metadata={
+            "expected_snapshot_id": "area-npcs-mrj-1",
+            "expected_location_id": "125",
+            "npc_id": "6",
+            "expected_route_ref": "398",
+            "expected_name": "Моряк Кентур",
+        },
+        dry_run=False,
+    ))
+
+    assert result.status is expected_status
+    assert result.diagnostic_code == expected_code
+
+
+def test_action_execution_result_closes_diagnostic_and_status_contract() -> None:
+    result = ActionExecutionResult(
+        ActionExecutionStatus.DELIVERY_UNKNOWN,
+        "https://3kingdoms.ru/npc.php?secret=raw\n" + "x" * 5000,
+    )
+    assert result.diagnostic_code is ActionDiagnosticCode.UNSPECIFIED
+    with pytest.raises(TypeError):
+        ActionExecutionResult("delivery_unknown", ActionDiagnosticCode.UNSPECIFIED)
 
 
 def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch) -> None:
@@ -1502,6 +2178,106 @@ def test_live_npc_quest_action_requires_exact_numeric_quest_contract(monkeypatch
             },
             3.0,
             "parent-client",
+        ),
+    ]
+
+
+def test_q304_vilena_resulting_identity_reaches_guarded_live_transport(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object], str | None]] = []
+
+    class FakeInjector:
+        def execute(
+            self,
+            command: str,
+            payload: dict[str, object] | None = None,
+            *,
+            timeout_s: float = 2.5,
+            client_id: str | None = None,
+        ) -> InjectorResult:
+            calls.append((command, dict(payload or {}), client_id))
+            if command == "open_exact_npc":
+                return InjectorResult(True, json.dumps({
+                    "outcome": "CONFIRMED",
+                    "mutationIssued": True,
+                    "destination": "https://3kingdoms.ru/npc.php?f_id=4",
+                    "issuedAt": "2026-07-19T00:00:00Z",
+                    "message": "npc_opened_confirmed",
+                }), client_id)
+            return InjectorResult(True, '{"message":"npc_quest_action_submitted"}', client_id)
+
+    monkeypatch.setattr(
+        "src.antibot_cv.automation.actions.global_browser_injector",
+        lambda: FakeInjector(),
+    )
+    config = AutomationConfig.from_dict({"dry_run": False, "max_cycles": 3})
+    session = SessionState(requested_cycles=3)
+    executor = ActionExecutor(
+        guard=SafetyGuard(config),
+        session=session,
+        sink=LiveMacActionSink(
+            InMemoryEventLogger(dry_run=False), browser_client_id="vilena-client",
+        ),
+    )
+
+    assert executor.execute(ActionRequest(
+        "open_exact_npc",
+        dry_run=False,
+        metadata={
+            "expected_snapshot_id": "area-npcs-q304-vilena",
+            "expected_location_id": "128",
+            "npc_id": "4",
+            "expected_route_ref": "398",
+            "expected_name": "Палатка Вилены",
+            "expected_dialog_name": "Колдунья Вилена",
+            "expected_npc_instance_id": "110",
+        },
+    ))
+    assert executor.execute(ActionRequest(
+        "npc_quest_action",
+        dry_run=False,
+        metadata={
+            "expected_snapshot_id": "npc-dialog-q304-vilena",
+            "npc_id": "4",
+            "expected_npc_instance_id": "110",
+            "expected_name": "Колдунья Вилена",
+            "quest_id": "304",
+            "expected_title": "Цветочная болезнь",
+            "action": "open",
+        },
+    ))
+
+    assert session.total_actions == 2
+    assert calls == [
+        (
+            "open_exact_npc",
+            {
+                "expectedSnapshotId": "area-npcs-q304-vilena",
+                "expectedLocationId": "128",
+                "npcId": "4",
+                "expectedRouteRef": "398",
+                "expectedName": "Палатка Вилены",
+                "expectedDialogName": "Колдунья Вилена",
+                "expectedNpcInstanceId": "110",
+                "verifyTimeoutMs": 2500,
+                "commandTimeoutMs": 5500,
+            },
+            "vilena-client",
+        ),
+        (
+        "npc_quest_action",
+        {
+            "expectedSnapshotId": "npc-dialog-q304-vilena",
+            "npcId": "4",
+            "expectedNpcInstanceId": "110",
+            "expectedName": "Колдунья Вилена",
+            "questId": "304",
+            "expectedTitle": "Цветочная болезнь",
+            "action": "open",
+            "expectedRef": None,
+            "expectedPointId": None,
+            "expectedText": None,
+        },
+        "vilena-client",
         ),
     ]
 

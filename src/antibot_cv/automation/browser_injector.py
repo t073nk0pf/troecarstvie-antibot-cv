@@ -10,10 +10,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterator
 from urllib.parse import parse_qs, urlparse
 
+from src.antibot_cv.automation.bridge_command_registry import bridge_command_is_mutating
+
 
 DEFAULT_INJECTOR_HOST = "127.0.0.1"
 DEFAULT_INJECTOR_PORT = 17654
-CURRENT_BRIDGE_VERSION = "2026-07-17-chat-delivery-retention-v74"
+CURRENT_BRIDGE_VERSION = "2026-07-21-npc-census-v80"
 
 
 def _optional_int(value: object) -> int | None:
@@ -25,6 +27,8 @@ def _optional_int(value: object) -> int | None:
         return None
 
 
+def _command_is_mutating(command: str, payload: dict[str, Any]) -> bool:
+    return bridge_command_is_mutating(command, payload)
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     allow_reuse_port = False
@@ -46,7 +50,7 @@ class BrowserInjectorServer:
         self.port = port
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._pending_condition = threading.Condition(self._lock)
         self._pending: dict[str, dict[str, Any]] = {}
         self._thread_local = threading.local()
@@ -55,6 +59,15 @@ class BrowserInjectorServer:
         self._last_client_id: str | None = None
         self._last_client_version: str | None = None
         self._trusted_extension_origin: str | None = None
+        # Owner authority is monotonic across every direct/child target.  Target
+        # ownership is separate: it records which owner fence may mutate one
+        # concrete tab, but must never establish an independent authority clock.
+        self._mutation_owner_fences: dict[
+            tuple[str, int], tuple[str, int, int, int]
+        ] = {}
+        self._mutation_target_fences: dict[
+            tuple[str, int], tuple[str, int, int, int]
+        ] = {}
         self._api_handler: Callable[[str, str, dict[str, list[str]], dict[str, Any] | None], tuple[int, dict[str, Any]]] | None = None
 
     def set_api_handler(
@@ -239,6 +252,12 @@ class BrowserInjectorServer:
         deadline_monotonic: float | None = None,
     ) -> InjectorResult:
         self.start()
+        try:
+            payload_snapshot = json.loads(json.dumps(payload or {}, allow_nan=False))
+        except (TypeError, ValueError):
+            return InjectorResult(False, "injector_payload_not_json", client_id=client_id)
+        if not isinstance(payload_snapshot, dict):
+            return InjectorResult(False, "injector_payload_not_object", client_id=client_id)
         command_id = uuid.uuid4().hex
         result_event = threading.Event()
         target_client_id = client_id or self.current_client_id
@@ -253,11 +272,18 @@ class BrowserInjectorServer:
                     target_client_id,
                     required_version=required_version,
                 )
+            target_snapshot = self._clients.get(target_client_id) if target_client_id else None
+            fence_rejection = self._validate_mutation_fence(
+                command, payload_snapshot,
+                target_snapshot=target_snapshot if isinstance(target_snapshot, dict) else None,
+            )
+            if fence_rejection is not None:
+                return InjectorResult(False, fence_rejection, client_id=target_client_id)
             self._pending[command_id] = {
                 "command": {
                     "id": command_id,
                     "type": command,
-                    "payload": payload or {},
+                    "payload": payload_snapshot,
                 },
                 "required_version": required_version,
                 "target_client_id": target_client_id,
@@ -265,6 +291,7 @@ class BrowserInjectorServer:
                 "result": None,
                 "created_at": time.monotonic(),
                 "delivered_count": 0,
+                "mutating": _command_is_mutating(command, payload_snapshot),
             }
             self._pending_condition.notify_all()
         wait_deadline = time.monotonic() + max(0.0, timeout_s)
@@ -292,6 +319,76 @@ class BrowserInjectorServer:
             result = pending.get("result") if isinstance(pending, dict) else None
             self._pending.pop(command_id, None)
             return result if isinstance(result, InjectorResult) else InjectorResult(False, "injector_missing_result")
+
+    def _validate_mutation_fence(
+        self,
+        command: str,
+        payload: dict[str, Any],
+        *,
+        target_snapshot: dict[str, Any] | None = None,
+    ) -> str | None:
+        fence = payload.get("mutationFence")
+        if fence is None:
+            return None
+        if not isinstance(fence, dict) or set(fence) != {
+            "profile_id", "tab_id", "actor_generation", "fencing_token",
+        }:
+            return "mutation_fence_malformed"
+        try:
+            profile_id = str(fence["profile_id"]).strip()
+            tab_id = int(fence["tab_id"])
+            generation = int(fence["actor_generation"])
+            token = int(fence["fencing_token"])
+        except (TypeError, ValueError):
+            return "mutation_fence_invalid"
+        if not profile_id or min(tab_id, generation, token) < 0 or generation == 0 or token == 0:
+            return "mutation_fence_invalid"
+        owner_key = (profile_id, tab_id)
+        target_key = owner_key
+        if target_snapshot is not None and _command_is_mutating(command, payload):
+            actual_profile = str(target_snapshot.get("profile_id") or "")
+            actual_tab = target_snapshot.get("tab_id")
+            if actual_profile == profile_id and actual_tab == tab_id:
+                if payload.get("mutationTarget") is not None:
+                    return "mutation_target_unexpected"
+            else:
+                binding = payload.get("mutationTarget")
+                if not isinstance(binding, dict) or set(binding) != {
+                    "kind", "profile_id", "tab_id", "opener_tab_id",
+                }:
+                    return "mutation_child_authority_missing"
+                if binding.get("kind") != "opener_child":
+                    return "mutation_child_authority_invalid"
+                binding_profile = str(binding.get("profile_id") or "")
+                binding_tab = binding.get("tab_id")
+                binding_opener = binding.get("opener_tab_id")
+                if binding_profile != actual_profile or binding_tab != actual_tab:
+                    return "mutation_target_identity_mismatch"
+                if actual_profile != profile_id or binding_opener != tab_id \
+                        or target_snapshot.get("opener_tab_id") != tab_id:
+                    return "mutation_opener_identity_mismatch"
+                if isinstance(actual_tab, bool) or not isinstance(actual_tab, int):
+                    return "mutation_target_identity_missing"
+                target_key = (actual_profile, actual_tab)
+        candidate = (owner_key[0], owner_key[1], generation, token)
+        with self._lock:
+            current_owner = self._mutation_owner_fences.get(owner_key)
+            if current_owner is not None and (
+                generation < current_owner[2]
+                or generation == current_owner[2] and token < current_owner[3]
+            ):
+                return "mutation_fence_stale"
+            current_target = self._mutation_target_fences.get(target_key)
+            if current_target is not None and current_target[:2] != owner_key:
+                return "mutation_child_owner_conflict"
+            if current_owner is None or (
+                generation > current_owner[2]
+                or generation == current_owner[2] and token > current_owner[3]
+            ):
+                self._mutation_owner_fences[owner_key] = candidate
+            if current_target != candidate:
+                self._mutation_target_fences[target_key] = candidate
+        return None
 
     @contextmanager
     def client_context(self, client_id: str | None) -> Iterator[None]:
@@ -412,6 +509,16 @@ class BrowserInjectorServer:
                 continue
             if required_version is not None and client_version != required_version:
                 continue
+            if pending.get("mutating") is True and not self._pending_target_identity_current_locked(
+                pending, client_id,
+            ):
+                continue
+            if pending.get("mutating") is True and not self._pending_fence_is_current_locked(pending):
+                continue
+            # A mutating command is a one-shot physical delivery claim.  ACK
+            # loss or a document reload must never make it executable again.
+            if pending.get("mutating") is True and int(pending.get("delivered_count", 0) or 0) > 0:
+                continue
             if target_client_id is None:
                 pending["target_client_id"] = client_id
                 pending["claimed_at"] = time.monotonic()
@@ -419,6 +526,66 @@ class BrowserInjectorServer:
             pending["last_delivered_at"] = time.monotonic()
             return dict(pending["command"])
         return None
+
+    def _pending_target_identity_current_locked(
+        self, pending: dict[str, Any], client_id: str,
+    ) -> bool:
+        command = pending.get("command")
+        payload = command.get("payload") if isinstance(command, dict) else None
+        if not isinstance(payload, dict):
+            return False
+        fence = payload.get("mutationFence")
+        if fence is None:
+            return True
+        if not isinstance(fence, dict):
+            return False
+        client = self._clients.get(client_id)
+        if not isinstance(client, dict):
+            return False
+        actual_profile = str(client.get("profile_id") or "")
+        actual_tab = client.get("tab_id")
+        target = payload.get("mutationTarget")
+        if target is None:
+            return (
+                actual_profile == str(fence.get("profile_id") or "")
+                and actual_tab == fence.get("tab_id")
+            )
+        if not isinstance(target, dict) or target.get("kind") != "opener_child":
+            return False
+        return (
+            actual_profile == str(target.get("profile_id") or "")
+            and actual_tab == target.get("tab_id")
+            and client.get("opener_tab_id") == target.get("opener_tab_id")
+            and str(fence.get("profile_id") or "") == actual_profile
+            and fence.get("tab_id") == target.get("opener_tab_id")
+        )
+
+    def _pending_fence_is_current_locked(self, pending: dict[str, Any]) -> bool:
+        command = pending.get("command")
+        payload = command.get("payload") if isinstance(command, dict) else None
+        fence = payload.get("mutationFence") if isinstance(payload, dict) else None
+        if fence is None:
+            return True
+        if not isinstance(fence, dict):
+            return False
+        try:
+            owner_key = (str(fence["profile_id"]).strip(), int(fence["tab_id"]))
+            target = payload.get("mutationTarget")
+            key = (
+                (str(target["profile_id"]).strip(), int(target["tab_id"]))
+                if isinstance(target, dict) else owner_key
+            )
+            candidate = (
+                owner_key[0], owner_key[1],
+                int(fence["actor_generation"]), int(fence["fencing_token"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        return bool(key[0]) and (
+            self._mutation_owner_fences.get(owner_key) == candidate
+            and self._mutation_target_fences.get(key) == candidate
+        )
+
 
     def _resolve_single_recent_client_locked(self, *, required_version: str | None) -> str | InjectorResult | None:
         now = time.monotonic()

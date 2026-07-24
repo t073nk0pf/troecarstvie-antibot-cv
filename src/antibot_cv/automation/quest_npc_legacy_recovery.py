@@ -201,7 +201,7 @@ def evaluate_legacy_npc_recovery(
             client_id=client_id, profile_id=profile_id, tab_id=tab_id,
             quest_id=ref.id, quest_title=ref.title, quest_accept_ref=ref.accept_ref,
             quest_catalog_page=ref.catalog_page, giver_name=event.giver_name,
-            npc_id=event.npc_id, npc_name=event.npc_name, location_id=event.location_id,
+            npc_id=event.npc_id, route_ref=None, npc_name=event.npc_name, location_id=event.location_id,
             location_name=ref.location, area_snapshot_id=event.area_snapshot_id,
             area_generated_at=event.issued_at, issued_at=event.issued_at,
             settle_timeout_s=LEGACY_DEADLINE_S,
