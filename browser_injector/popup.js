@@ -1,9 +1,12 @@
-const API = "http://127.0.0.1:17654/api";
-
 const fields = [
   "configPath",
   "maxCycles",
   "targetLevels",
+  "targetNames",
+  "goalLevel",
+  "maxDeathsPerSession",
+  "targetLocationName",
+  "autoNavigateQuestTargets",
   "startDelay",
   "healthMinPercent",
   "prowessMinPercent",
@@ -23,6 +26,19 @@ const fields = [
   "combatClickIntervalMs",
   "combatPreClickDelayMs",
   "combatClickHoldMs",
+  "battleItemRecoveryEnabled",
+  "battleHealthPotionThreshold",
+  "battleProwessPotionThreshold",
+  "battleHealthPotionSlots",
+  "battleProwessPotionSlots",
+  "battleHealthPotionNames",
+  "battleProwessPotionNames",
+  "battleDamageBoostEnabled",
+  "battleDamageBoostSlots",
+  "battleDamageBoostNames",
+  "battleDamageBoostChancePercent",
+  "battleItemCooldownMs",
+  "battleItemMaxUsesPerBattle",
   "live",
   "noActivateApp",
   "openHuntOnStart",
@@ -34,7 +50,8 @@ const $ = (id) => document.getElementById(id);
 const defaults = {
   configPath: "config/automation.local.json",
   maxCycles: 50,
-  targetLevels: "2",
+  targetLevels: "",
+  targetNames: "",
   startDelay: 1,
   healthMinPercent: 90,
   prowessMinPercent: 90,
@@ -54,23 +71,59 @@ const defaults = {
   combatClickIntervalMs: 900,
   combatPreClickDelayMs: 0,
   combatClickHoldMs: 0,
-  live: true,
+  battleItemRecoveryEnabled: false,
+  battleHealthPotionThreshold: 35,
+  battleProwessPotionThreshold: 15,
+  battleHealthPotionSlots: "",
+  battleProwessPotionSlots: "",
+  battleHealthPotionNames: "",
+  battleProwessPotionNames: "",
+  battleDamageBoostEnabled: false,
+  battleDamageBoostSlots: "",
+  battleDamageBoostNames: "",
+  battleDamageBoostChancePercent: 100,
+  battleItemCooldownMs: 3000,
+  battleItemMaxUsesPerBattle: 1,
+  goalLevel: null,
+  maxDeathsPerSession: 3,
+  targetLocationName: "",
+  autoNavigateQuestTargets: false,
+  live: false,
   noActivateApp: true,
   openHuntOnStart: true,
   itemRecoveryEnabled: true,
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
-    method: options.method || "GET",
-    headers: { "content-type": "application/json" },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  const data = await response.json().catch(() => ({}));
+  const response = await localFetch(`/api${path}`, options);
+  const data = response.data || {};
   if (!response.ok) {
-    throw new Error(data.error || `HTTP ${response.status}`);
+    throw new Error(data.error || response.error || `HTTP ${response.status}`);
   }
   return data;
+}
+
+function localFetch(path, options = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "antibot-cv-local-fetch",
+        request: {
+          path,
+          method: options.method || "GET",
+          body: options.body,
+        },
+      },
+      (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        resolve(response || { ok: false, status: 0, error: "local_fetch_failed" });
+      }
+    );
+  });
 }
 
 function readSettings() {
@@ -82,7 +135,7 @@ function readSettings() {
     }
     if (input.type === "checkbox") {
       settings[id] = input.checked;
-    } else if (input.type === "number") {
+    } else if (input.type === "number" || input.type === "range") {
       settings[id] = input.value === "" ? null : Number(input.value);
     } else {
       settings[id] = input.value.trim();
@@ -95,8 +148,31 @@ function readSettings() {
     .filter(Boolean)
     .map((value) => Number(value))
     .filter((value) => Number.isInteger(value) && value > 0);
+  settings.targetNames = parseNameList(settings.targetNames);
   settings.combatSlotSequence = [1, 2, 3, 4, 5, 6].filter((slot) => Boolean($(`skillSlot${slot}`)?.checked));
+  settings.battleHealthPotionSlots = parseNumberList(settings.battleHealthPotionSlots);
+  settings.battleProwessPotionSlots = parseNumberList(settings.battleProwessPotionSlots);
+  settings.battleDamageBoostSlots = parseNumberList(settings.battleDamageBoostSlots);
+  settings.battleHealthPotionNames = parseNameList(settings.battleHealthPotionNames);
+  settings.battleProwessPotionNames = parseNameList(settings.battleProwessPotionNames);
+  settings.battleDamageBoostNames = parseNameList(settings.battleDamageBoostNames);
   return settings;
+}
+
+function parseNumberList(value) {
+  return String(value || "")
+    .replace(/,/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((item) => Number(item))
+    .filter((item, index, array) => Number.isInteger(item) && item >= 0 && array.indexOf(item) === index);
+}
+
+function parseNameList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function writeSettings(settings) {
@@ -130,6 +206,10 @@ function writeSettings(settings) {
       input.checked = Boolean(value);
     } else if (id === "targetLevels" && Array.isArray(value)) {
       input.value = value.join(",");
+    } else if ((id === "battleHealthPotionSlots" || id === "battleProwessPotionSlots" || id === "battleDamageBoostSlots") && Array.isArray(value)) {
+      input.value = value.join(",");
+    } else if ((id === "targetNames" || id === "battleHealthPotionNames" || id === "battleProwessPotionNames" || id === "battleDamageBoostNames") && Array.isArray(value)) {
+      input.value = value.join(", ");
     } else {
       input.value = value ?? "";
     }
@@ -143,6 +223,14 @@ async function saveSettings() {
 async function loadSettings() {
   const stored = await chrome.storage.local.get("antibotCvSettings");
   writeSettings(stored.antibotCvSettings || defaults);
+}
+
+function renderDamageBoostChance() {
+  const value = Math.max(0, Math.min(100, Number($("battleDamageBoostChancePercent")?.value || 0)));
+  const output = $("battleDamageBoostChanceValue");
+  if (output) {
+    output.textContent = `${value}%`;
+  }
 }
 
 function setStatusText(id, text) {
@@ -260,7 +348,9 @@ function renderStatus(status, currentClient) {
   $("runBadge").textContent = running ? "running" : "idle";
   $("runBadge").classList.toggle("running", running);
   $("startButton").disabled = running || !hasCurrentClient;
+  $("questRunButton").disabled = running || !hasCurrentClient;
   $("stopButton").disabled = !running || !hasCurrentClient;
+  $("updateExtensionButton").disabled = Boolean(status.any_running);
 
   const client = status.client || {};
   const clientText = !hasCurrentClient
@@ -275,8 +365,23 @@ function renderStatus(status, currentClient) {
   const last = status.last_status || {};
   setStatusText("botState", last.state || (running ? "STARTING" : "STOPPED"));
   setStatusText("cycleStatus", `${last.completed_cycles ?? 0}/${last.requested_cycles ?? "?"}`);
+  const playerText = last.character_name
+    ? `${last.character_name} [${last.current_level ?? "?"}] XP ${last.current_xp_percent ?? "?"}%`
+    : "-";
+  setStatusText("playerStatus", playerText);
+  setStatusText("goalStatus", last.goal_level ? `уровень ${last.goal_level}` : "не задана");
+  setStatusText(
+    "planStatus",
+    last.leveling_intent ? `${last.leveling_intent}: ${last.leveling_reason || ""}` : "-"
+  );
+  setStatusText("deathStatus", `${last.deaths_observed ?? 0}/${settingsMaxDeaths()}`);
   setStatusText("actionStatus", last.total_actions ?? 0);
   setStatusText("errorStatus", status.last_error || last.last_error || last.error_reason || last.errors || "-");
+}
+
+function settingsMaxDeaths() {
+  const value = Number($("maxDeathsPerSession")?.value);
+  return Number.isInteger(value) && value >= 0 ? value : "?";
 }
 
 async function refreshStatus() {
@@ -301,7 +406,9 @@ async function refreshStatus() {
     $("runBadge").textContent = "offline";
     $("runBadge").classList.remove("running");
     $("startButton").disabled = true;
+    $("questRunButton").disabled = true;
     $("stopButton").disabled = true;
+    $("updateExtensionButton").disabled = true;
     setStatusText("serverStatus", "Сначала запусти control-server в терминале");
     setStatusText("clientStatus", "-");
     setStatusText("botState", "-");
@@ -318,6 +425,29 @@ async function startBot() {
   if (!settings.clientId) {
     throw new Error("Открой поп-ап на нужной вкладке игры, чтобы привязать текущий client_id.");
   }
+  settings.autonomousQuestDirector = false;
+  settings.autoNavigateQuestTargets = false;
+  settings.openHuntOnStart = true;
+  await api("/start", { method: "POST", body: settings });
+  await refreshStatus();
+}
+
+async function startQuestBot() {
+  await saveSettings();
+  const settings = readSettings();
+  settings.clientId = selectedClientId();
+  if (!settings.clientId) {
+    throw new Error("Открой поп-ап на нужной вкладке игры, чтобы привязать текущий client_id.");
+  }
+  if (settings.live !== true) {
+    throw new Error("Для реального выполнения квестов включи live.");
+  }
+  settings.autonomousQuestDirector = true;
+  settings.autoNavigateQuestTargets = true;
+  settings.openHuntOnStart = false;
+  settings.requiredCharacterName = "";
+  settings.goalLevel = null;
+  settings.targetLocationName = "";
   await api("/start", { method: "POST", body: settings });
   await refreshStatus();
 }
@@ -329,6 +459,19 @@ async function stopBot() {
   }
   await api("/stop", { method: "POST", body: { clientId } });
   await refreshStatus();
+}
+
+async function updateExtension() {
+  const status = await api("/status");
+  const currentClient = await loadCurrentClient();
+  const currentVersion = String(
+    currentClient?.version || status.client?.client_version || "unknown-pre-updater"
+  ).trim();
+  await globalThis.AntibotCvUpdateRuntime.requestExtensionUpdate({
+    chromeApi: chrome,
+    status,
+    currentVersion,
+  });
 }
 
 function renderSkillScan(data) {
@@ -363,6 +506,7 @@ async function scanSkills() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadSettings();
+  renderDamageBoostChance();
   await loadCurrentClient().catch(() => {});
   for (const id of fields) {
     const input = $(id);
@@ -370,9 +514,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       input.addEventListener("change", saveSettings);
     }
   }
+  $("battleDamageBoostChancePercent")?.addEventListener("input", renderDamageBoostChance);
   $("startButton").addEventListener("click", () => startBot().catch((error) => setStatusText("errorStatus", error.message)));
+  $("questRunButton").addEventListener("click", () => startQuestBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("stopButton").addEventListener("click", () => stopBot().catch((error) => setStatusText("errorStatus", error.message)));
   $("refreshButton").addEventListener("click", refreshStatus);
+  $("updateExtensionButton").addEventListener("click", () => {
+    $("updateExtensionButton").disabled = true;
+    updateExtension().catch((error) => {
+      setStatusText("errorStatus", error.message);
+      refreshStatus();
+    });
+  });
   $("scanSkillsButton").addEventListener("click", () => scanSkills().catch((error) => setStatusText("errorStatus", error.message)));
   await refreshStatus();
   setInterval(refreshStatus, 1500);

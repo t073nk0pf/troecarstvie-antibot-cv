@@ -34,6 +34,7 @@ class ScreenCapture:
     def __init__(self, config: CaptureConfig) -> None:
         self.config = config
         self._mss = None
+        self._bgr_buffer: np.ndarray | None = None
 
     def __enter__(self) -> "ScreenCapture":
         import mss
@@ -86,8 +87,12 @@ class ScreenCapture:
                 "height": self.config.roi.height,
             }
         shot = self.mss.grab(grab_rect)  # type: ignore[attr-defined]
-        frame = np.array(shot)
-        return frame[:, :, :3].copy()
+        bgra = np.asarray(shot)
+        shape = (shot.height, shot.width, 3)
+        if self._bgr_buffer is None or self._bgr_buffer.shape != shape:
+            self._bgr_buffer = np.empty(shape, dtype=np.uint8)
+        np.copyto(self._bgr_buffer, bgra[:, :, :3])
+        return self._bgr_buffer
 
 
 def calibrate_capture(config: CaptureConfig) -> CalibrationReport:

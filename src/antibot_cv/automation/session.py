@@ -35,12 +35,16 @@ class SessionState:
     emergency_stop: bool = False
     cycle_had_battle: bool = False
     cycle_had_combat_action: bool = False
+    cycle_battle_outcome: str | None = None
     ability_used_battle_ids: set[int] = field(default_factory=set)
     exit_clicked_battle_ids: set[int] = field(default_factory=set)
     hunt_click_counts_by_cycle_id: dict[int, int] = field(default_factory=dict)
     attack_click_counts_by_battle_id: dict[int, int] = field(default_factory=dict)
 
     def new_battle(self) -> int:
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
         self.battle_id = self.next_battle_id
         self.next_battle_id += 1
         return self.battle_id
@@ -65,6 +69,10 @@ class SessionState:
     def mark_battle_detected(self) -> None:
         self.battles_detected += 1
         self.cycle_had_battle = True
+
+    def mark_battle_outcome(self, outcome: str | None) -> None:
+        normalized = str(outcome or "").strip().lower()
+        self.cycle_battle_outcome = normalized if normalized in {"victory", "defeat", "unknown"} else None
 
     def mark_ability4(self) -> None:
         if self.battle_id is None:
@@ -102,14 +110,19 @@ class SessionState:
     def mark_recovery(self) -> None:
         self.recoveries += 1
 
-    def can_complete_cycle(self) -> bool:
-        return self.cycle_had_battle and self.cycle_had_combat_action
+    def can_complete_cycle(self, *, require_victory: bool = False) -> bool:
+        base_complete = self.cycle_had_battle and self.cycle_had_combat_action
+        return base_complete and (not require_victory or self.cycle_battle_outcome == "victory")
 
     def reset_cycle_attempt(self) -> None:
         self.battle_id = None
         self.cycle_had_battle = False
         self.cycle_had_combat_action = False
+        self.cycle_battle_outcome = None
         self.hunt_click_counts_by_cycle_id.pop(self.cycle_id, None)
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
 
     def mark_incomplete_cycle(self) -> None:
         self.incomplete_cycles += 1
@@ -121,6 +134,11 @@ class SessionState:
         self.battle_id = None
         self.cycle_had_battle = False
         self.cycle_had_combat_action = False
+        self.cycle_battle_outcome = None
+        self.ability_used_battle_ids.clear()
+        self.exit_clicked_battle_ids.clear()
+        self.attack_click_counts_by_battle_id.clear()
+        self.hunt_click_counts_by_cycle_id.clear()
 
     @property
     def elapsed_s(self) -> float:

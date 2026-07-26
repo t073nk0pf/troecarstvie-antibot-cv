@@ -1,0 +1,575 @@
+"""Pure, fail-closed execution policy for active travel-to-NPC quest steps."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from enum import Enum
+import hashlib
+import re
+import time
+from types import MappingProxyType
+
+from src.antibot_cv.automation.quest_active_catalog import ActiveQuestEntry
+from src.antibot_cv.automation.quest_dialogue_choice_policy import (
+    select_exploratory_dialogue_action,
+)
+from src.antibot_cv.automation.quest_giver import resolve_unique_giver
+from src.antibot_cv.automation.quest_objective_runtime import quest_step_fingerprint
+from src.antibot_cv.automation.quest_puzzle_sequences import (
+    select_verified_puzzle_action,
+    unsupported_puzzle_signature,
+)
+
+
+class QuestDialoguePhase(str, Enum):
+    ROUTE = "ROUTE"
+    NPC_LOOKUP = "NPC_LOOKUP"
+    NPC_DIALOG = "NPC_DIALOG"
+    VERIFY_ACTIVE = "VERIFY_ACTIVE"
+
+
+class QuestDialogueIntent(str, Enum):
+    OPEN_NPC = "OPEN_NPC"
+    OPEN_QUEST = "OPEN_QUEST"
+    ANSWER_DIALOG = "ANSWER_DIALOG"
+    COMPLETE_STEP = "COMPLETE_STEP"
+
+
+class QuestDialogueError(ValueError):
+    """A stable fail-closed parsing or decision failure."""
+
+    def __init__(self, unsafe_reason: str, message: str) -> None:
+        super().__init__(message)
+        self.unsafe_reason = unsafe_reason
+
+
+@dataclass(frozen=True)
+class QuestDialogueObjective:
+    quest_id: str
+    quest_title: str
+    objective: str
+    npc_query: str
+    location: str
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class PendingQuestDialogue:
+    objective: QuestDialogueObjective
+    phase: QuestDialoguePhase
+    location_id: str | None = None
+    npc_id: str | None = None
+    npc_name: str | None = None
+    area_snapshot_id: str | None = None
+    quest_opened: bool = False
+    dialog_steps: int = 0
+    puzzle_step: int = 0
+    puzzle_completed_drums: tuple[int, ...] = ()
+    last_answer_ref: str | None = None
+    dialog_choice_fingerprint: str | None = None
+    attempted_answer_refs: tuple[str, ...] = ()
+    started_monotonic: float = 0.0
+    deadline_monotonic: float = 0.0
+
+
+@dataclass(frozen=True)
+class QuestDialogueDecision:
+    intent: QuestDialogueIntent
+    action_type: str
+    action_metadata: Mapping[str, object]
+    action_failure_reason: str
+    quest_id: str
+    snapshot_id: str
+
+
+def parse_dialogue_objective(entry: ActiveQuestEntry) -> QuestDialogueObjective:
+    """Parse a single-location Russian ``go to NPC`` active quest step.
+
+    The parser deliberately accepts only the shape evidenced by the active
+    quest page: one navigation target that is also named as a location in the
+    objective, and an NPC phrase between ``к`` and ``в <location>``.
+    """
+
+    if not isinstance(entry, ActiveQuestEntry):
+        raise QuestDialogueError("dialogue_entry_invalid", "active quest entry is invalid")
+    fingerprint, reason = quest_step_fingerprint(entry)
+    if fingerprint is None:
+        raise QuestDialogueError(f"dialogue_{reason}", "active quest fingerprint is unsafe")
+    raw_objective = entry.data.get("objective")
+    navigation = entry.data.get("navigation")
+    if not isinstance(raw_objective, str):  # Also guarded by the fingerprint.
+        raise QuestDialogueError("dialogue_objective_missing", "quest objective is missing")
+    if not isinstance(navigation, (tuple, list)) or len(navigation) != 1:
+        raise QuestDialogueError(
+            "dialogue_location_missing_or_ambiguous",
+            "dialogue step must expose exactly one navigation location",
+        )
+    raw_location = navigation[0]
+    if not isinstance(raw_location, Mapping):
+        raise QuestDialogueError("dialogue_location_invalid", "navigation location is invalid")
+    target = _bounded_text(raw_location.get("target"), max_length=220)
+    label = _bounded_text(raw_location.get("text"), max_length=220)
+    if not target or not label or _normalized(target) != _normalized(label):
+        raise QuestDialogueError(
+            "dialogue_location_missing_or_ambiguous",
+            "dialogue navigation does not identify one exact location",
+        )
+
+    # The active page uses two evidenced, unambiguous Russian word orders:
+    # ``к/с NPC в Location`` and ``в/на Location к NPC и <next instruction>``.
+    # Both bind the NPC phrase directly to the sole navigable location.  This
+    # deliberately rejects building targets and free-form prose.
+    location_pattern = _inflected_location_pattern(label)
+    npc_match = re.search(
+        rf"(?:^|\s)(?:к|с)\s+(.+?)\s+в\s+{location_pattern}(?=\s|[.,!?;:]|$)",
+        raw_objective,
+        flags=re.IGNORECASE,
+    )
+    if npc_match is None:
+        npc_match = re.search(
+            rf"(?:^|\s)(?:в|на)\s+{location_pattern}\s+к\s+(.+?)(?=\s+и\s+|[.,!?;:]|$)",
+            raw_objective,
+            flags=re.IGNORECASE,
+        )
+    if npc_match is None:
+        npc_match = re.search(
+            rf"^\s*(?:отправляйтесь|отправиться)\s+(?:к\s+)?(.+?)\s+"
+            rf"(?:в|на)\s+{location_pattern}(?=\s|[.,!?;:]|$)",
+            raw_objective,
+            flags=re.IGNORECASE,
+        )
+    if npc_match is None:
+        raise QuestDialogueError(
+            "dialogue_npc_missing_or_ambiguous",
+            "quest objective does not identify an NPC before the navigation location",
+        )
+    npc_query = " ".join(npc_match.group(1).split())
+    if not npc_query or len(npc_query) > 180 or len(re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", npc_query)) < 1:
+        raise QuestDialogueError("dialogue_npc_missing_or_ambiguous", "quest NPC query is invalid")
+    return QuestDialogueObjective(
+        quest_id=entry.id,
+        quest_title=entry.title,
+        objective=raw_objective,
+        npc_query=npc_query,
+        location=label,
+        fingerprint=fingerprint,
+    )
+
+
+def _inflected_location_pattern(label: str) -> str:
+    """Match the exact location words in common Russian case forms.
+
+    The navigation label remains the authoritative route target.  This only
+    binds the prose objective to that one target, so accepting its regular
+    grammatical endings does not widen the destination choice.
+    """
+
+    words = label.split()
+    if not words:
+        return re.escape(label)
+    return r"\s+".join(_inflected_location_word_pattern(word) for word in words)
+
+
+def _inflected_location_word_pattern(word: str) -> str:
+    if not re.fullmatch(r"[А-Яа-яЁё-]+", word):
+        return re.escape(word)
+    match = re.fullmatch(r"(.{3,}?)([аяоеыиьй])", word, flags=re.IGNORECASE)
+    if match is not None:
+        stem, ending = match.groups()
+        endings = (ending, "а", "я", "у", "ю", "е", "и", "ы", "ой", "ою", "ом", "ем", "ах", "ях")
+        return re.escape(stem) + "(?:" + "|".join(re.escape(value) for value in endings) + ")"
+    if len(word) >= 3:
+        return re.escape(word) + r"(?:а|я|у|ю|е|ом|ем|ах|ях)?"
+    return re.escape(word)
+
+
+class QuestDialogueRuntime:
+    """Own state and safe decisions for one active dialogue step."""
+
+    def __init__(self) -> None:
+        self.pending: PendingQuestDialogue | None = None
+        self._pending_decision: QuestDialogueDecision | None = None
+
+    def begin(
+        self, entry: ActiveQuestEntry, *, already_at_location: bool
+    ) -> PendingQuestDialogue:
+        if self.pending is not None:
+            raise RuntimeError("quest dialogue is already in progress")
+        objective = parse_dialogue_objective(entry)
+        started = time.monotonic()
+        self.pending = PendingQuestDialogue(
+            objective=objective,
+            phase=(
+                QuestDialoguePhase.NPC_LOOKUP
+                if already_at_location
+                else QuestDialoguePhase.ROUTE
+            ),
+            started_monotonic=started,
+            deadline_monotonic=started + 120.0,
+        )
+        self._pending_decision = None
+        return self.pending
+
+    def mark_route_arrived(self) -> PendingQuestDialogue:
+        pending = self._require(QuestDialoguePhase.ROUTE)
+        self._pending_decision = None
+        self.pending = replace(pending, phase=QuestDialoguePhase.NPC_LOOKUP)
+        return self.pending
+
+    def decide_area_npc(self, snapshot: object) -> QuestDialogueDecision:
+        pending = self._require(QuestDialoguePhase.NPC_LOOKUP)
+        self._pending_decision = None
+        if not isinstance(snapshot, dict) or snapshot.get("ok") is not True:
+            raise QuestDialogueError("dialogue_npc_snapshot_invalid", "area NPC snapshot is unavailable")
+        if snapshot.get("truncated") is not False:
+            raise QuestDialogueError("dialogue_npc_snapshot_invalid", "area NPC snapshot is truncated")
+        snapshot_id = _bounded_text(snapshot.get("snapshotId"), max_length=120)
+        location = snapshot.get("location")
+        location_id = _bounded_text(location.get("id"), max_length=80) if isinstance(location, dict) else ""
+        location_name = _bounded_text(location.get("name"), max_length=220) if isinstance(location, dict) else ""
+        if not snapshot_id.startswith("area-npcs-") or not location_id:
+            raise QuestDialogueError("dialogue_npc_snapshot_invalid", "area NPC snapshot identity is missing")
+        if location_name and _normalized(location_name) != _normalized(pending.objective.location):
+            raise QuestDialogueError("dialogue_location_mismatch", "area snapshot is from another location")
+        try:
+            match = resolve_unique_giver(pending.objective.npc_query, snapshot.get("items"))
+        except ValueError as exc:
+            raise QuestDialogueError("dialogue_npc_missing_or_ambiguous", str(exc)) from exc
+        npc_id = _bounded_text(match.get("dataId"), max_length=80)
+        npc_name = _bounded_text(match.get("name"), max_length=180)
+        route_ref = _bounded_text(match.get("routeRef"), max_length=40)
+        if not npc_id.isdecimal() or int(npc_id) < 0 or not npc_name or not route_ref.isascii() or not route_ref.isdecimal() or int(route_ref) <= 0:
+            raise QuestDialogueError("dialogue_npc_identity_invalid", "matched NPC identity is invalid")
+        self.pending = replace(
+            pending,
+            location_id=location_id,
+            npc_id=npc_id,
+            npc_name=npc_name,
+            area_snapshot_id=snapshot_id,
+        )
+        return self._remember(
+            QuestDialogueDecision(
+                intent=QuestDialogueIntent.OPEN_NPC,
+                action_type="open_exact_npc",
+                action_metadata=_metadata(
+                    expected_snapshot_id=snapshot_id,
+                    expected_location_id=location_id,
+                    npc_id=npc_id,
+                    expected_route_ref=route_ref,
+                    expected_name=npc_name,
+                    # Area actors may be proxies such as ``Дом Аскорда``
+                    # or ``Палатка Вилены``.  The click stays bound to the
+                    # exact proxy ID/name, while the resulting dialogue is
+                    # bound to the quest-authored person identity.
+                    expected_dialog_name=pending.objective.npc_query,
+                    quest_id=pending.objective.quest_id,
+                ),
+                action_failure_reason="quest_dialogue_npc_open_failed",
+                quest_id=pending.objective.quest_id,
+                snapshot_id=snapshot_id,
+            )
+        )
+
+    def decide_dialog(self, snapshot: object, *, max_steps: int = 20) -> QuestDialogueDecision:
+        pending = self._require(QuestDialoguePhase.NPC_DIALOG)
+        self._pending_decision = None
+        if not isinstance(max_steps, int) or isinstance(max_steps, bool) or max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        if (
+            not isinstance(snapshot, dict)
+            or snapshot.get("ok") is not True
+            or snapshot.get("truncated") is not False
+            or snapshot.get("identityMatches") is not True
+        ):
+            raise QuestDialogueError("dialogue_snapshot_invalid", "NPC dialogue snapshot is not authoritative")
+        snapshot_id = _bounded_text(snapshot.get("snapshotId"), max_length=120)
+        if not snapshot_id.startswith("npc-dialog-") or not pending.npc_id:
+            raise QuestDialogueError("dialogue_snapshot_invalid", "NPC dialogue identity is missing")
+        common = {
+            "expected_snapshot_id": snapshot_id,
+            "npc_id": pending.npc_id,
+            # Area objects may be proxies (for example ``Палатка Вилены``)
+            # whose opened dialogue has the quest-authored NPC identity.
+            # The open-NPC action has already bound the proxy itself; all
+            # dialogue actions must remain bound to the expected dialogue
+            # identity instead of reusing the proxy label.
+            "expected_name": pending.objective.npc_query,
+            "quest_id": pending.objective.quest_id,
+            "expected_title": pending.objective.quest_title,
+        }
+        answers = _actions(
+            snapshot.get("dialogActions"),
+            quest_id=pending.objective.quest_id,
+            npc_id=pending.npc_id,
+            action="answer",
+        )
+        completions = _actions(
+            snapshot.get("doneActions"),
+            quest_id=pending.objective.quest_id,
+            npc_id=pending.npc_id,
+            action="done",
+        )
+        effective_pending = pending
+        inferred_already_open = False
+        if not pending.quest_opened:
+            opens = _actions(
+                snapshot.get("questActions"),
+                quest_id=pending.objective.quest_id,
+                action="open",
+            )
+            if len(opens) == 1:
+                if answers or completions:
+                    raise QuestDialogueError(
+                        "dialogue_action_ambiguous",
+                        "dialogue exposes open and progression actions together",
+                    )
+                observed_title = _bounded_text(opens[0].get("title"), max_length=220)
+                if not observed_title:
+                    raise QuestDialogueError("dialogue_open_invalid", "quest open title is missing")
+                return self._remember(
+                    QuestDialogueDecision(
+                        QuestDialogueIntent.OPEN_QUEST,
+                        "npc_quest_action",
+                        _metadata(**{**common, "expected_title": observed_title}, action="open"),
+                        "quest_dialogue_open_failed",
+                        pending.objective.quest_id,
+                        snapshot_id,
+                    )
+                )
+            if len(opens) > 1:
+                raise QuestDialogueError(
+                    "dialogue_open_missing_or_ambiguous",
+                    "quest open action is missing or ambiguous",
+                )
+            if not answers and not completions:
+                raise QuestDialogueError(
+                    "dialogue_open_missing_or_ambiguous",
+                    "quest open action is missing or ambiguous",
+                )
+            inferred_already_open = True
+            effective_pending = replace(pending, quest_opened=True)
+        if answers and completions:
+            raise QuestDialogueError("dialogue_action_ambiguous", "dialogue exposes ambiguous progression actions")
+        choice_fingerprint = _dialog_choice_fingerprint(answers) if answers else None
+        attempted_refs = (
+            effective_pending.attempted_answer_refs
+            if choice_fingerprint == effective_pending.dialog_choice_fingerprint
+            else ()
+        )
+        selected_answer = select_exploratory_dialogue_action(
+            answers,
+            attempted_refs=attempted_refs,
+        ) if answers else None
+        puzzle_answer = select_verified_puzzle_action(
+            effective_pending.objective.quest_id,
+            answers,
+            href=str(snapshot.get("href") or ""),
+            completed_drums=effective_pending.puzzle_completed_drums,
+        ) if answers else None
+        if puzzle_answer is not None:
+            selected_answer = puzzle_answer
+        if puzzle_answer is None and unsupported_puzzle_signature(
+            pending.objective.quest_id,
+            answers,
+        ):
+            raise QuestDialogueError(
+                "dialogue_puzzle_unsupported",
+                "dialogue exposes a puzzle without a verified recipe",
+            )
+        if answers and selected_answer is None:
+            if (
+                len(answers) == 1
+                and _bounded_text(answers[0].get("ref"), max_length=80) in attempted_refs
+            ):
+                raise QuestDialogueError(
+                    "dialogue_action_not_advanced",
+                    "dialogue still exposes the previously submitted answer",
+                )
+            raise QuestDialogueError(
+                "dialogue_choices_exhausted",
+                "dialogue has no remaining safe untried progression action",
+            )
+        if len(completions) > 1:
+            raise QuestDialogueError("dialogue_action_ambiguous", "dialogue exposes ambiguous progression actions")
+        if effective_pending.dialog_steps >= max_steps:
+            raise QuestDialogueError("dialogue_step_limit_exceeded", "quest dialogue step limit exceeded")
+        if selected_answer is not None:
+            expected_ref = _bounded_text(selected_answer.get("ref"), max_length=80)
+            expected_text = _bounded_text(selected_answer.get("text"), max_length=1200)
+            if not expected_ref.isdecimal() or int(expected_ref) <= 0 or not expected_text:
+                raise QuestDialogueError("dialogue_answer_invalid", "dialogue answer identity is invalid")
+            if expected_ref in attempted_refs:
+                raise QuestDialogueError(
+                    "dialogue_action_not_advanced",
+                    "dialogue still exposes the previously submitted answer",
+                )
+            return self._remember(
+                QuestDialogueDecision(
+                    QuestDialogueIntent.ANSWER_DIALOG,
+                    "npc_quest_action",
+                    _metadata(
+                        **common,
+                        action="answer",
+                        expected_ref=expected_ref,
+                        expected_text=expected_text,
+                        verified_puzzle_step=(effective_pending.puzzle_step if puzzle_answer is not None else None),
+                        puzzle_completed_drum=(puzzle_answer.get("puzzle_completed_drum") if puzzle_answer is not None else None),
+                        puzzle_implicit_completed_drums=(puzzle_answer.get("puzzle_implicit_completed_drums") if puzzle_answer is not None else None),
+                        dialog_choice_fingerprint=choice_fingerprint,
+                        inferred_already_open=inferred_already_open,
+                    ),
+                    "quest_dialogue_answer_failed",
+                    pending.objective.quest_id,
+                    snapshot_id,
+                )
+            )
+        if len(completions) == 1:
+            point_id = _bounded_text(completions[0].get("pointId"), max_length=80)
+            expected_text = _bounded_text(completions[0].get("text"), max_length=1200)
+            if not point_id.isdecimal() or int(point_id) <= 0 or not expected_text:
+                raise QuestDialogueError("dialogue_completion_invalid", "dialogue completion identity is invalid")
+            return self._remember(
+                QuestDialogueDecision(
+                    QuestDialogueIntent.COMPLETE_STEP,
+                    "npc_quest_action",
+                    _metadata(
+                        **common,
+                        action="done",
+                        expected_point_id=point_id,
+                        expected_text=expected_text,
+                        inferred_already_open=inferred_already_open,
+                    ),
+                    "quest_dialogue_completion_failed",
+                    pending.objective.quest_id,
+                    snapshot_id,
+                )
+            )
+        raise QuestDialogueError("dialogue_action_missing", "dialogue progression action is missing")
+
+    def acknowledge(self, decision: QuestDialogueDecision) -> PendingQuestDialogue:
+        if decision is not self._pending_decision or self.pending is None:
+            raise RuntimeError("quest dialogue decision is stale")
+        if decision.quest_id != self.pending.objective.quest_id:
+            raise RuntimeError("quest dialogue decision belongs to another quest")
+        pending = self.pending
+        if decision.intent is QuestDialogueIntent.OPEN_NPC:
+            if not pending.npc_id:
+                raise RuntimeError("quest NPC was not observed")
+            updated = replace(pending, phase=QuestDialoguePhase.NPC_DIALOG)
+        elif decision.intent is QuestDialogueIntent.OPEN_QUEST:
+            updated = replace(pending, quest_opened=True)
+        elif decision.intent is QuestDialogueIntent.ANSWER_DIALOG:
+            puzzle_step = pending.puzzle_step
+            if decision.action_metadata.get("verified_puzzle_step") == pending.puzzle_step:
+                puzzle_step += 1
+            completed_drums = pending.puzzle_completed_drums
+            implicit_drums = decision.action_metadata.get("puzzle_implicit_completed_drums")
+            if isinstance(implicit_drums, tuple):
+                completed_drums = (*completed_drums, *(item for item in implicit_drums if isinstance(item, int) and item not in completed_drums))
+            completed_drum = decision.action_metadata.get("puzzle_completed_drum")
+            if isinstance(completed_drum, int) and completed_drum not in completed_drums:
+                completed_drums = (*completed_drums, completed_drum)
+            choice_fingerprint = str(
+                decision.action_metadata.get("dialog_choice_fingerprint") or ""
+            ) or None
+            expected_ref = str(decision.action_metadata.get("expected_ref") or "")
+            attempted_refs = (
+                pending.attempted_answer_refs
+                if choice_fingerprint == pending.dialog_choice_fingerprint
+                else ()
+            )
+            if expected_ref and expected_ref not in attempted_refs:
+                attempted_refs = (*attempted_refs, expected_ref)
+            updated = replace(
+                pending,
+                quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened,
+                dialog_steps=pending.dialog_steps + 1,
+                puzzle_step=puzzle_step,
+                puzzle_completed_drums=completed_drums,
+                last_answer_ref=expected_ref or None,
+                dialog_choice_fingerprint=choice_fingerprint,
+                attempted_answer_refs=attempted_refs,
+            )
+        elif decision.intent is QuestDialogueIntent.COMPLETE_STEP:
+            updated = replace(
+                pending,
+                quest_opened=True if decision.action_metadata.get("inferred_already_open") is True else pending.quest_opened,
+                phase=QuestDialoguePhase.VERIFY_ACTIVE,
+                dialog_steps=pending.dialog_steps + 1,
+            )
+        else:  # pragma: no cover
+            raise RuntimeError("unsupported quest dialogue decision")
+        self.pending = updated
+        self._pending_decision = None
+        return updated
+
+    def finish_verified(self, *, quest_id: str, previous_fingerprint: str) -> None:
+        pending = self._require(QuestDialoguePhase.VERIFY_ACTIVE)
+        if quest_id != pending.objective.quest_id or previous_fingerprint != pending.objective.fingerprint:
+            raise RuntimeError("active refresh verification does not match the dialogue step")
+        self.pending = None
+        self._pending_decision = None
+
+    def _remember(self, decision: QuestDialogueDecision) -> QuestDialogueDecision:
+        self._pending_decision = decision
+        return decision
+
+    def _require(self, phase: QuestDialoguePhase) -> PendingQuestDialogue:
+        if self.pending is None or self.pending.phase is not phase:
+            raise RuntimeError(f"quest dialogue phase must be {phase.value}")
+        return self.pending
+
+
+def _actions(
+    raw: object,
+    *,
+    quest_id: str,
+    action: str,
+    npc_id: str | None = None,
+    title: str | None = None,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(raw, list):
+        return ()
+    matches: list[dict[str, object]] = []
+    for candidate in raw:
+        if not isinstance(candidate, dict):
+            continue
+        if (
+            str(candidate.get("questId") or "") != quest_id
+            or candidate.get("action") != action
+            or candidate.get("visible") is not True
+            or candidate.get("disabled") is not False
+        ):
+            continue
+        if npc_id is not None and str(candidate.get("npcId") or "") != npc_id:
+            continue
+        if title is not None and _normalized(candidate.get("title")) != _normalized(title):
+            continue
+        matches.append(candidate)
+    return tuple(matches)
+
+
+def _metadata(**values: object) -> Mapping[str, object]:
+    return MappingProxyType(dict(values))
+
+
+def _normalized(value: object) -> str:
+    return " ".join(str(value or "").casefold().replace("ё", "е").split())
+
+
+def _dialog_choice_fingerprint(actions: tuple[Mapping[str, object], ...]) -> str:
+    identities = sorted(
+        (
+            _bounded_text(action.get("ref"), max_length=80),
+            _normalized(action.get("text")),
+        )
+        for action in actions
+    )
+    material = "\x1e".join(f"{ref}\x1f{text}" for ref, text in identities)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _bounded_text(value: object, *, max_length: int) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= max_length else ""

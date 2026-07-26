@@ -42,3 +42,21 @@ def test_battle_flow_transitions() -> None:
     ]:
         machine.transition(state)
     assert machine.state == GameState.LOCATION_SEARCH
+
+
+def test_terminal_quest_evidence_can_reconcile_from_statistics_wait() -> None:
+    machine = StateMachine()
+    for state in [
+        GameState.TARGET_FOUND,
+        GameState.TARGET_SELECTED,
+        GameState.BATTLE_WAIT,
+        GameState.BATTLE_ACTIVE,
+        GameState.WAIT_BATTLE_END,
+        GameState.BATTLE_END_DETECTED,
+        GameState.EXIT_BATTLE,
+        GameState.STATISTICS_WAIT,
+        GameState.QUEST_REFRESH_PENDING,
+    ]:
+        machine.transition(state)
+
+    assert machine.state is GameState.QUEST_REFRESH_PENDING

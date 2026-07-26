@@ -3,26 +3,42 @@
     return;
   }
 
-  const endpoint = "http://127.0.0.1:17654";
-  const bridgeVersion = "2026-07-07-local-popup";
+  const bridgeVersion = "2026-07-21-npc-census-v80";
   const contentSource = `antibot-cv-content:${bridgeVersion}`;
   const injectorSource = `antibot-cv-injector:${bridgeVersion}`;
-  const clientId = getStableClientId();
+  let clientId = "";
+  let clientIdentity = null;
+  const documentNonce = createDocumentNonce();
+  const clientReady = getTabClientId();
   let busy = false;
   let lastCommandId = null;
 
-  function getStableClientId() {
-    const key = "antibotCvClientId";
+  function getTabClientId() {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: "antibot-cv-tab-identity", documentNonce }, (response) => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        if (!response || !response.ok || !response.clientId) {
+          reject(new Error((response && response.error) || "tab_identity_failed"));
+          return;
+        }
+        clientId = String(response.clientId);
+        clientIdentity = response;
+        resolve(clientId);
+      });
+    });
+  }
+
+  function createDocumentNonce() {
     try {
-      const existing = window.sessionStorage.getItem(key);
-      if (existing) {
-        return existing;
-      }
-      const created = `chrome-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      window.sessionStorage.setItem(key, created);
-      return created;
+      const bytes = new Uint32Array(3);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (value) => value.toString(16).padStart(8, "0")).join("");
     } catch (_) {
-      return `chrome-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return `${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`.slice(0, 24);
     }
   }
 
@@ -33,6 +49,11 @@
     document.documentElement.dataset.antibotCvBridgeInjected = bridgeVersion;
     return new Promise((resolve) => {
       const script = document.createElement("script");
+      // The game document is served with a legacy Cyrillic encoding. Without an
+      // explicit charset Chrome decodes this external classic script using the
+      // page encoding and corrupts every UTF-8 Cyrillic literal in the bridge.
+      script.charset = "UTF-8";
+      script.setAttribute("charset", "UTF-8");
       script.src = chrome.runtime.getURL("page_bridge.js");
       script.async = false;
       script.onload = () => {
@@ -54,14 +75,18 @@
     if (!message || message.type !== "antibot-cv-current-client") {
       return false;
     }
-    sendResponse({
-      ok: true,
-      clientId,
-      version: bridgeVersion,
-      href: window.location.href,
-      title: document.title || "",
-    });
-    return false;
+    clientReady
+      .then(() =>
+        sendResponse({
+          ok: true,
+          clientId,
+          version: bridgeVersion,
+          href: window.location.href,
+          title: document.title || "",
+        })
+      )
+      .catch((error) => sendResponse({ ok: false, error: String(error && error.message ? error.message : error) }));
+    return true;
   });
 
   async function poll() {
@@ -70,17 +95,18 @@
     }
     busy = true;
     try {
+      await clientReady;
       const params = new URLSearchParams({
         client: clientId,
         version: bridgeVersion,
         href: window.location.href,
         title: document.title || "",
       });
-      const response = await fetch(
-        `${endpoint}/next?${params.toString()}`,
-        { cache: "no-store" }
-      );
-      const data = await response.json();
+      if (clientIdentity && clientIdentity.profileId) params.set("profile", String(clientIdentity.profileId));
+      if (clientIdentity && Number.isInteger(clientIdentity.tabId)) params.set("tab", String(clientIdentity.tabId));
+      if (clientIdentity && Number.isInteger(clientIdentity.openerTabId)) params.set("opener", String(clientIdentity.openerTabId));
+      params.set("wait", "25");
+      const data = await localFetch(`/next?${params.toString()}`);
       const command = data && data.command;
       if (command && command.id && command.id !== lastCommandId) {
         const targetHrefIncludes = command.payload && command.payload.targetHrefIncludes;
@@ -95,30 +121,66 @@
       // The Python controller is not running. Keep polling quietly.
     } finally {
       busy = false;
+      // Keep one continuous long-poll outstanding. Waiting for the periodic
+      // interval here creates a delivery gap as long as the server wait.
+      window.setTimeout(poll, 0);
     }
   }
 
   async function ack(id, result) {
     try {
-      await fetch(`${endpoint}/ack`, {
+      await localFetch("/ack", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+        body: {
           id,
           ok: Boolean(result && result.ok),
           message: result && result.message ? String(result.message) : "",
           client_id: clientId,
-        }),
+        },
       });
     } catch (_) {
       // Best effort acknowledgement only.
     }
   }
 
+  function localFetch(path, options = {}) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "antibot-cv-local-fetch",
+          request: {
+            path,
+            method: options.method || "GET",
+            body: options.body,
+          },
+        },
+        (response) => {
+          const error = chrome.runtime.lastError;
+          if (error) {
+            reject(new Error(error.message));
+            return;
+          }
+          if (!response || !response.ok) {
+            reject(new Error((response && (response.error || response.data?.error)) || "local_fetch_failed"));
+            return;
+          }
+          resolve(response.data || {});
+        }
+      );
+    });
+  }
+
   function timeoutForPageCommand(payload) {
     const rawInventoryDelay = Number(payload && payload.inventoryOpenDelayMs);
     const inventoryDelay = Number.isFinite(rawInventoryDelay) ? Math.max(0, Math.min(5000, rawInventoryDelay)) : 0;
-    return Math.max(2000, Math.min(15000, inventoryDelay + 5000));
+    const rawVerifyTimeout = Number(payload && payload.verifyTimeoutMs);
+    const verifyTimeout = Number.isFinite(rawVerifyTimeout) ? Math.max(0, Math.min(10000, rawVerifyTimeout)) : 0;
+    const rawCommandTimeout = Number(payload && payload.commandTimeoutMs);
+    const commandTimeout = Number.isFinite(rawCommandTimeout) ? Math.max(0, Math.min(25000, rawCommandTimeout)) : 0;
+    return Math.max(
+      2000,
+      Math.min(25000, Math.max(inventoryDelay > 0 ? inventoryDelay + 5000 : 0, verifyTimeout + 2500, commandTimeout))
+    );
   }
 
   function runCommandInPage(command) {
@@ -126,7 +188,13 @@
       () =>
         new Promise((resolve) => {
           const token = `antibot-cv-${command.id}`;
-          const payload = command.payload || {};
+          const payload = command.payload && typeof command.payload === "object" && !Array.isArray(command.payload)
+            ? command.payload
+            : {};
+          const transportPayload = {
+            ...payload,
+            transport: { clientId },
+          };
           const commandTimeoutMs = timeoutForPageCommand(payload);
           const timeout = window.setTimeout(() => {
             cleanup();
@@ -157,7 +225,7 @@
               token,
               command: {
                 type: command.type,
-                payload,
+                payload: transportPayload,
               },
             },
             "*"
@@ -166,6 +234,6 @@
     );
   }
 
-  window.setInterval(poll, 350);
+  window.setInterval(poll, 25000);
   poll();
 })();

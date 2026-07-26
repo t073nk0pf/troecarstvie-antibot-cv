@@ -3,6 +3,13 @@
 Local macOS CV automation harness for generating controlled game-session
 samples for anti-bot detector development.
 
+Current implementation status and the next verified development step are kept
+in [`docs/CURRENT_STATE.md`](docs/CURRENT_STATE.md). Confirmed changes and live
+test conclusions are recorded in
+[`docs/DEVELOPMENT_LOG.md`](docs/DEVELOPMENT_LOG.md).
+The target product, current milestone, and staged exit criteria are defined in
+[`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md).
+
 This project is intentionally not a stealth automation tool. It does not bypass
 anti-cheat, CAPTCHA, game restrictions, browser internals, process memory, or
 network traffic. Dry-run mode is the default and records intended actions
@@ -16,18 +23,37 @@ python3.11 -m venv .venv
 pip install -r requirements.txt
 ```
 
+## Windows Quick Start
+
+From Git CMD in the cloned project folder:
+
+```bat
+setup_windows.cmd
+```
+
+Then close Git CMD, open a new Git CMD, and start the local control server:
+
+```bat
+botcv
+```
+
+Keep the `botcv` terminal open while using the Chrome extension. The setup file
+creates `.venv`, installs dependencies, updates the Windows bridge branch when
+the folder is a git clone, and adds `%USERPROFILE%\bin\botcv.cmd` to the user
+PATH.
+
 ## CLI
 
 Calibration:
 
 ```bash
-python -m src.antibot_cv.automation.controller calibrate
+python -m src.antibot_cv.automation.controller_cli calibrate
 ```
 
 Dry-run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.example.json \
   --preview
 ```
@@ -35,7 +61,7 @@ python -m src.antibot_cv.automation.controller run \
 Live limited run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.example.json \
   --live \
   --max-cycles 3
@@ -44,7 +70,7 @@ python -m src.antibot_cv.automation.controller run \
 Long local run:
 
 ```bash
-python -m src.antibot_cv.automation.controller run \
+python -m src.antibot_cv.automation.controller_cli run \
   --config config/automation.local.json \
   --live \
   --max-session-minutes 480 \
@@ -64,7 +90,7 @@ not accidentally inspect or click the Codex window.
 Chrome injector check:
 
 ```bash
-python -m src.antibot_cv.automation.controller injector-status --timeout 10
+python -m src.antibot_cv.automation.controller_cli injector-status --timeout 10
 ```
 
 If this prints `"ok": false`, load the unpacked extension from
@@ -76,7 +102,7 @@ access.
 Resource ROI check:
 
 ```bash
-python -m src.antibot_cv.automation.controller inspect-resources \
+python -m src.antibot_cv.automation.controller_cli inspect-resources \
   --config config/automation.local.json
 ```
 
@@ -84,7 +110,7 @@ For calibration, save a raw capture and an overlay with configured and detected
 resource boxes:
 
 ```bash
-python -m src.antibot_cv.automation.controller inspect-resources \
+python -m src.antibot_cv.automation.controller_cli inspect-resources \
   --config config/automation.local.json \
   --output-frame runs/resource-frame.png \
   --output-overlay runs/resource-overlay.png
@@ -93,14 +119,14 @@ python -m src.antibot_cv.automation.controller inspect-resources \
 Template validation:
 
 ```bash
-python -m src.antibot_cv.automation.controller validate-templates \
+python -m src.antibot_cv.automation.controller_cli validate-templates \
   --config config/automation.example.json
 ```
 
 Replay:
 
 ```bash
-python -m src.antibot_cv.automation.controller replay \
+python -m src.antibot_cv.automation.controller_cli replay \
   --input tests/fixtures/session_frames/
 ```
 

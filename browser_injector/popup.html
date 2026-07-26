@@ -33,6 +33,23 @@
           <span>Уровни мобов</span>
           <input id="targetLevels" type="text" placeholder="2 или 2,3" />
         </label>
+        <label class="wide">
+          <span>Имена мобов (через запятую)</span>
+          <input id="targetNames" type="text" placeholder="пусто = цели активных квестов" />
+        </label>
+        <label>
+          <span>Качать до уровня</span>
+          <input id="goalLevel" type="number" min="1" max="100" placeholder="не задан" />
+        </label>
+        <label>
+          <span>Смертей за сессию</span>
+          <input id="maxDeathsPerSession" type="number" min="0" max="20" value="3" />
+        </label>
+        <label class="wide">
+          <span>Целевая локация</span>
+          <input id="targetLocationName" type="text" placeholder="не задана" />
+        </label>
+        <label class="wide"><input id="autoNavigateQuestTargets" type="checkbox" /> идти к цели активного квеста</label>
         <label>
           <span>Старт, сек</span>
           <input id="startDelay" type="number" min="0" step="0.1" value="1" />
@@ -108,8 +125,63 @@
         </label>
       </section>
 
+      <section class="grid">
+        <label class="checkbox-line">
+          <input id="battleItemRecoveryEnabled" type="checkbox" />
+          <span>Пить банки в бою</span>
+        </label>
+        <label>
+          <span>HP-банка ниже %</span>
+          <input id="battleHealthPotionThreshold" type="number" min="0" max="100" step="1" value="35" />
+        </label>
+        <label>
+          <span>Удаль-банка ниже %</span>
+          <input id="battleProwessPotionThreshold" type="number" min="0" max="100" step="1" value="15" />
+        </label>
+        <label>
+          <span>HP слоты</span>
+          <input id="battleHealthPotionSlots" type="text" placeholder="например 1,2" />
+        </label>
+        <label>
+          <span>Удаль слоты</span>
+          <input id="battleProwessPotionSlots" type="text" placeholder="например 3" />
+        </label>
+        <label>
+          <span>HP имена</span>
+          <input id="battleHealthPotionNames" type="text" placeholder="зелье жизни, банка жизни" />
+        </label>
+        <label>
+          <span>Удаль имена</span>
+          <input id="battleProwessPotionNames" type="text" placeholder="зелье удали, банка удали" />
+        </label>
+        <label class="checkbox-line">
+          <input id="battleDamageBoostEnabled" type="checkbox" />
+          <span>Сферы мощи перед ударами</span>
+        </label>
+        <label>
+          <span>Усиление: слоты</span>
+          <input id="battleDamageBoostSlots" type="text" placeholder="например 4" />
+        </label>
+        <label>
+          <span>Усиление: имена</span>
+          <input id="battleDamageBoostNames" type="text" placeholder="эликсир силы" />
+        </label>
+        <label class="wide range-field">
+          <span>Шанс сферы перед ударом: <output id="battleDamageBoostChanceValue">100%</output></span>
+          <input id="battleDamageBoostChancePercent" type="range" min="0" max="100" step="5" value="100" />
+        </label>
+        <label>
+          <span>КД банок, мс</span>
+          <input id="battleItemCooldownMs" type="number" min="0" max="60000" step="100" value="3000" />
+        </label>
+        <label>
+          <span>Банок за бой</span>
+          <input id="battleItemMaxUsesPerBattle" type="number" min="1" max="10" step="1" value="1" />
+        </label>
+      </section>
+
       <section class="checks">
-        <label><input id="live" type="checkbox" checked /> live</label>
+        <label><input id="live" type="checkbox" /> live</label>
         <label><input id="noActivateApp" type="checkbox" checked /> Chrome может быть в фоне</label>
         <label><input id="openHuntOnStart" type="checkbox" checked /> сразу открыть охоту</label>
         <label><input id="itemRecoveryEnabled" type="checkbox" checked /> пить бурдюки</label>
@@ -118,7 +190,9 @@
       <section class="actions">
         <button id="startButton" type="button">Старт</button>
         <button id="stopButton" type="button">Стоп</button>
-        <button id="refreshButton" type="button">Обновить</button>
+        <button id="questRunButton" class="wide-action" type="button">Выполнять квесты</button>
+        <button id="refreshButton" type="button">Статус</button>
+        <button id="updateExtensionButton" type="button" disabled>Обновить bridge</button>
       </section>
 
       <section class="status">
@@ -126,11 +200,16 @@
           <div><dt>Клиент</dt><dd id="clientStatus">-</dd></div>
           <div><dt>Состояние</dt><dd id="botState">-</dd></div>
           <div><dt>Циклы</dt><dd id="cycleStatus">-</dd></div>
+          <div><dt>Персонаж</dt><dd id="playerStatus">-</dd></div>
+          <div><dt>Цель</dt><dd id="goalStatus">-</dd></div>
+          <div><dt>План</dt><dd id="planStatus">-</dd></div>
+          <div><dt>Смерти</dt><dd id="deathStatus">-</dd></div>
           <div><dt>Действия</dt><dd id="actionStatus">-</dd></div>
           <div><dt>Ошибка</dt><dd id="errorStatus">-</dd></div>
         </dl>
       </section>
     </main>
+    <script src="update_runtime.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

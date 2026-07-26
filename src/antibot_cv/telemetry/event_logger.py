@@ -18,6 +18,8 @@ class EventLogger:
         *,
         dry_run: bool,
         application_version: str = __version__,
+        max_bytes: int = 25 * 1024 * 1024,
+        backup_count: int = 3,
     ) -> None:
         self.session_id = session_id
         self.run_dir = Path(run_dir)
@@ -25,7 +27,24 @@ class EventLogger:
         self.path = self.run_dir / "events.jsonl"
         self.dry_run = dry_run
         self.application_version = application_version
+        self.max_bytes = max(1024, int(max_bytes))
+        self.backup_count = max(1, int(backup_count))
         self._lock = threading.Lock()
+
+    def _rotate_if_needed(self, incoming_bytes: int) -> None:
+        try:
+            current_size = self.path.stat().st_size
+        except FileNotFoundError:
+            return
+        if current_size + incoming_bytes <= self.max_bytes:
+            return
+        oldest = self.path.with_name(f"{self.path.name}.{self.backup_count}")
+        oldest.unlink(missing_ok=True)
+        for index in range(self.backup_count - 1, 0, -1):
+            source = self.path.with_name(f"{self.path.name}.{index}")
+            if source.exists():
+                source.replace(self.path.with_name(f"{self.path.name}.{index + 1}"))
+        self.path.replace(self.path.with_name(f"{self.path.name}.1"))
 
     def log_event(self, event_type: str, **fields: Any) -> None:
         record: dict[str, Any] = {
@@ -53,9 +72,11 @@ class EventLogger:
             "application_version": self.application_version,
         }
         record.update(fields)
+        serialized = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
         with self._lock:
+            self._rotate_if_needed(len(serialized.encode("utf-8")))
             with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                handle.write(serialized)
 
 
 class InMemoryEventLogger:

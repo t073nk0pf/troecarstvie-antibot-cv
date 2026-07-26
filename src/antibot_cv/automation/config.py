@@ -32,6 +32,7 @@ class TargetConfig:
     mode: str = "template_label"
     allowed_targets: tuple[str, ...] = ("steppe_jackal", "young_lynx")
     preferred_target_order: tuple[str, ...] = ("steppe_jackal", "young_lynx")
+    allowed_names: tuple[str, ...] = ()
     allowed_levels: tuple[int, ...] = ()
     stable_frames: int = 2
     double_click_to_attack: bool = True
@@ -49,7 +50,6 @@ class TargetConfig:
     click_retry_delay_ms: int = 250
     interaction_margin_px: int = 0
     per_target_click_offsets: dict[str, ClickOffset] = field(default_factory=dict)
-    sprite_template_ids: tuple[str, ...] = ()
     green_label: GreenLabelConfig = field(default_factory=GreenLabelConfig)
 
 
@@ -118,6 +118,58 @@ class CombatConfig:
 
 
 @dataclass(frozen=True)
+class BattleItemRecoveryConfig:
+    enabled: bool = False
+    health_use_when_below_percent: float = 35.0
+    prowess_use_when_below_percent: float = 15.0
+    health_slots: tuple[int, ...] = ()
+    prowess_slots: tuple[int, ...] = ()
+    health_names: tuple[str, ...] = ()
+    prowess_names: tuple[str, ...] = ()
+    damage_boost_enabled: bool = False
+    damage_boost_slots: tuple[int, ...] = ()
+    damage_boost_names: tuple[str, ...] = ()
+    damage_boost_use_chance_percent: float = 100.0
+    cooldown_ms: int = 3000
+    max_uses_per_battle: int = 1
+    pre_click_delay_ms: int = 0
+    click_hold_ms: int = 0
+
+
+@dataclass(frozen=True)
+class LevelingConfig:
+    enabled: bool = False
+    target_level: int | None = None
+    required_character_name: str = ""
+    snapshot_interval_ms: int = 1000
+    snapshot_stale_timeout_ms: int = 15000
+    max_deaths_per_session: int = 3
+    target_location_name: str = ""
+    auto_target_level_offsets: tuple[int, ...] = (0,)
+    free_revive_only: bool = True
+    revive_verify_timeout_ms: int = 15000
+    post_revive_resource_timeout_ms: int = 120000
+    post_revive_max_item_attempts: int = 4
+    checkpoint_interval_ms: int = 5000
+    quest_refresh_every_cycles: int = 5
+    quest_refresh_timeout_ms: int = 10000
+    auto_navigate_quest_targets: bool = False
+    autonomous_quest_director: bool = False
+    accept_available_quests: bool = True
+    quest_engine_mode: str = "legacy"
+    pinned_quest_id: str = ""
+    ignored_quest_ids: tuple[str, ...] = ()
+    prefer_active_quests: bool = False
+    quest_refresh_every_completed: int = 5
+    quest_catalog_max_pages: int = 20
+    navigator_timeout_ms: int = 10000
+    navigator_max_transitions: int = 50
+    route_settle_ms: int = 3000
+    allow_soft_currency_purchases: bool = False
+    max_soft_currency_spend: float = 0.0
+
+
+@dataclass(frozen=True)
 class DetectionConfig:
     confirm_frames: int = 2
     threshold: float = 0.7
@@ -149,7 +201,7 @@ class ItemRecoveryConfig:
     health_use_when_below_percent: float | None = None
     prowess_use_when_below_percent: float | None = None
     force_use: bool = False
-    use_if_resources_missing: bool = True
+    use_if_resources_missing: bool = False
     open_hunt_after: bool = True
     timeout_s: float = 6.0
     health_restore_percent: float = 40.0
@@ -180,6 +232,15 @@ class SafetyConfig:
 
 
 @dataclass(frozen=True)
+class RunRetentionConfig:
+    enabled: bool = False
+    max_age_days: int = 30
+    max_runs: int = 100
+    max_total_bytes: int = 2_000_000_000
+    min_keep: int = 3
+
+
+@dataclass(frozen=True)
 class AutomationConfig:
     dry_run: bool = True
     allow_live_toggle: bool = False
@@ -197,9 +258,14 @@ class AutomationConfig:
     statistics: DetectionConfig = field(default_factory=DetectionConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     item_recovery: ItemRecoveryConfig = field(default_factory=ItemRecoveryConfig)
+    battle_item_recovery: BattleItemRecoveryConfig = field(default_factory=BattleItemRecoveryConfig)
+    leveling: LevelingConfig = field(default_factory=LevelingConfig)
     recovery: RecoveryConfig = field(default_factory=RecoveryConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    run_retention: RunRetentionConfig = field(default_factory=RunRetentionConfig)
     templates_path: str = "config/templates.example.json"
+    npc_catalog_path: str = "docs/3kingdoms/NPC_CATALOG.json"
+    world_registry_path: str = "config/world_registry.json"
     runs_dir: str = "runs"
 
     @classmethod
@@ -219,6 +285,8 @@ class AutomationConfig:
         max_cycles: int | None = None,
         max_session_minutes: int | None = None,
         target_allowed_levels: tuple[int, ...] | None = None,
+        target_allowed_names: tuple[str, ...] | None = None,
+        goal_level: int | None = None,
     ) -> "AutomationConfig":
         data = to_plain_dict(self)
         if dry_run is not None:
@@ -229,6 +297,11 @@ class AutomationConfig:
             data["max_session_minutes"] = max_session_minutes
         if target_allowed_levels is not None:
             data.setdefault("target", {})["allowed_levels"] = list(target_allowed_levels)
+        if target_allowed_names is not None:
+            data.setdefault("target", {})["allowed_names"] = list(target_allowed_names)
+        if goal_level is not None:
+            data.setdefault("leveling", {})["enabled"] = True
+            data.setdefault("leveling", {})["target_level"] = int(goal_level)
         return AutomationConfig.from_dict(data)
 
 
@@ -270,10 +343,16 @@ def _build_dataclass(cls: type[Any], raw: Any) -> Any:
             values[item.name] = _build_resource_config(value)
         elif item.name == "item_recovery":
             values[item.name] = _build_item_recovery_config(value)
+        elif item.name == "battle_item_recovery":
+            values[item.name] = _build_battle_item_recovery_config(value)
+        elif item.name == "leveling":
+            values[item.name] = _build_leveling_config(value)
         elif item.name == "recovery":
             values[item.name] = _build_dataclass(RecoveryConfig, value)
         elif item.name == "safety":
             values[item.name] = _build_dataclass(SafetyConfig, value)
+        elif item.name == "run_retention":
+            values[item.name] = _build_dataclass(RunRetentionConfig, value)
         else:
             values[item.name] = value
     return cls(**values)
@@ -285,10 +364,10 @@ def _build_target_config(raw: dict[str, Any]) -> TargetConfig:
         data["allowed_targets"] = tuple(data["allowed_targets"])
     if "preferred_target_order" in data:
         data["preferred_target_order"] = tuple(data["preferred_target_order"])
+    if "allowed_names" in data:
+        data["allowed_names"] = tuple(str(value).strip() for value in data["allowed_names"] if str(value).strip())
     if "allowed_levels" in data:
         data["allowed_levels"] = tuple(int(value) for value in data["allowed_levels"])
-    if "sprite_template_ids" in data:
-        data["sprite_template_ids"] = tuple(data["sprite_template_ids"])
     if data.get("search_roi") is not None:
         data["search_roi"] = Rect(**data["search_roi"])
     if "click_offset" in data:
@@ -302,6 +381,19 @@ def _build_target_config(raw: dict[str, Any]) -> TargetConfig:
     if "green_label" in data:
         data["green_label"] = GreenLabelConfig(**data["green_label"])
     return TargetConfig(**data)
+
+
+def _build_leveling_config(raw: dict[str, Any]) -> LevelingConfig:
+    data = dict(raw)
+    if "auto_target_level_offsets" in data:
+        data["auto_target_level_offsets"] = tuple(int(value) for value in data["auto_target_level_offsets"])
+    if "ignored_quest_ids" in data:
+        data["ignored_quest_ids"] = tuple(str(value).strip() for value in data["ignored_quest_ids"] if str(value).strip())
+    quest_engine_mode = str(data.get("quest_engine_mode", "legacy")).strip()
+    if quest_engine_mode not in {"legacy", "shadow", "q280_q304"}:
+        raise ValueError("leveling.quest_engine_mode must be one of: legacy, shadow, q280_q304")
+    data["quest_engine_mode"] = quest_engine_mode
+    return LevelingConfig(**data)
 
 
 def _build_viewport_config(raw: dict[str, Any]) -> ViewportConfig:
@@ -367,6 +459,27 @@ def _build_item_recovery_config(raw: dict[str, Any]) -> ItemRecoveryConfig:
     if "between_items_delay_ms" in data:
         data["between_items_delay_ms"] = int(data["between_items_delay_ms"])
     return ItemRecoveryConfig(**data)
+
+
+def _build_battle_item_recovery_config(raw: dict[str, Any]) -> BattleItemRecoveryConfig:
+    data = dict(raw)
+    for key in ("health_slots", "prowess_slots", "damage_boost_slots"):
+        if key in data:
+            data[key] = tuple(int(value) for value in data[key])
+    for key in ("health_names", "prowess_names", "damage_boost_names"):
+        if key in data:
+            data[key] = tuple(str(value) for value in data[key])
+    for key in ("cooldown_ms", "max_uses_per_battle", "pre_click_delay_ms", "click_hold_ms"):
+        if key in data:
+            data[key] = int(data[key])
+    for key in (
+        "health_use_when_below_percent",
+        "prowess_use_when_below_percent",
+        "damage_boost_use_chance_percent",
+    ):
+        if key in data:
+            data[key] = float(data[key])
+    return BattleItemRecoveryConfig(**data)
 
 
 def to_plain_dict(value: Any) -> Any:

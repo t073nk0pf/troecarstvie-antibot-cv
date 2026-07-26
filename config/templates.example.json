@@ -149,42 +149,6 @@
       },
       "template_id": "victory_popup",
       "threshold": 0.8
-    },
-    {
-      "max_results": 4,
-      "path": "assets/templates/targets/mob_sprite_01.png",
-      "scales": [
-        0.9,
-        1.0,
-        1.1
-      ],
-      "search_roi": null,
-      "template_id": "mob_sprite_01",
-      "threshold": 0.72
-    },
-    {
-      "max_results": 4,
-      "path": "assets/templates/targets/mob_sprite_02.png",
-      "scales": [
-        0.9,
-        1.0,
-        1.1
-      ],
-      "search_roi": null,
-      "template_id": "mob_sprite_02",
-      "threshold": 0.72
-    },
-    {
-      "max_results": 4,
-      "path": "assets/templates/targets/mob_sprite_03.png",
-      "scales": [
-        0.9,
-        1.0,
-        1.1
-      ],
-      "search_roi": null,
-      "template_id": "mob_sprite_03",
-      "threshold": 0.72
     }
   ]
 }
